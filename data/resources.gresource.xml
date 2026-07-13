@@ -2,6 +2,7 @@
 <gresources>
   <gresource prefix="/io/github/superuser_miguel/Vitrine">
     <file compressed="true">window.ui</file>
+    <file compressed="true">grid_cell.ui</file>
     <file compressed="true">style.css</file>
   </gresource>
 </gresources>

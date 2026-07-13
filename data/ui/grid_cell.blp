@@ -1,0 +1,41 @@
+using Gtk 4.0;
+
+// One thumbnail cell in the browser grid. Layout lives here (house rule 1);
+// grid_cell.rs only binds the async thumbnail and guards cell recycling.
+template $VitrineGridCell: Gtk.Box {
+  orientation: vertical;
+  spacing: 4;
+  margin-start: 4;
+  margin-end: 4;
+  margin-top: 4;
+  margin-bottom: 4;
+
+  Gtk.Overlay {
+    height-request: 150;
+    width-request: 150;
+
+    Gtk.Picture picture {
+      content-fit: contain;
+      can-shrink: true;
+    }
+
+    [overlay]
+    Gtk.Image broken_icon {
+      icon-name: "image-missing-symbolic";
+      pixel-size: 48;
+      halign: center;
+      valign: center;
+      visible: false;
+      styles ["dim-label"]
+    }
+  }
+
+  Gtk.Label label {
+    ellipsize: end;
+    max-width-chars: 18;
+    width-chars: 18;
+    lines: 1;
+    justify: center;
+    styles ["caption"]
+  }
+}

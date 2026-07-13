@@ -5,6 +5,10 @@
 //! `AdwApplicationWindow` with a headerbar and About dialog. The browser grid,
 //! viewer, filmstrip, index and dedup layers land in later phases (see PLAN.md).
 
+mod decode;
+mod grid_cell;
+mod image_object;
+mod thumbnails;
 mod window;
 
 mod config {
@@ -46,9 +50,12 @@ fn main() -> glib::ExitCode {
         load_css();
     });
     app.connect_activate(|app| present(&window_for(app)));
-    app.connect_open(|app, _files, _hint| {
-        // Phase 1 wires opening a folder/image here; for now just present.
-        present(&window_for(app));
+    app.connect_open(|app, files, _hint| {
+        let window = window_for(app);
+        if let Some(file) = files.first() {
+            window.open_location(file.clone());
+        }
+        present(&window);
     });
 
     app.run()

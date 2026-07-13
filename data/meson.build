@@ -3,9 +3,11 @@ blueprints = custom_target(
   'blueprints',
   input: files(
     'ui/window.blp',
+    'ui/grid_cell.blp',
   ),
   output: [
     'window.ui',
+    'grid_cell.ui',
   ],
   command: [
     blueprint_compiler,

@@ -18,28 +18,100 @@ template $VitrineWindow: Adw.ApplicationWindow {
   width-request: 360;
   height-request: 240;
 
-  content: Adw.ToolbarView {
-    [top]
-    Adw.HeaderBar {
-      title-widget: Adw.WindowTitle {
-        title: _("Vitrine");
+  content: Adw.NavigationSplitView split_view {
+    max-sidebar-width: 260;
+
+    sidebar: Adw.NavigationPage {
+      title: _("Vitrine");
+
+      child: Adw.ToolbarView {
+        [top]
+        Adw.HeaderBar {}
+
+        // Places sidebar is a placeholder until library roots (Phase 2) and
+        // collections (Phase 3) land.
+        content: Gtk.ScrolledWindow {
+          hscrollbar-policy: never;
+
+          child: Gtk.ListBox places_list {
+            selection-mode: none;
+            styles ["navigation-sidebar"]
+
+            Gtk.ListBoxRow open_row {
+              child: Gtk.Box {
+                spacing: 12;
+                margin-start: 6;
+                margin-end: 6;
+                margin-top: 8;
+                margin-bottom: 8;
+
+                Gtk.Image {
+                  icon-name: "folder-open-symbolic";
+                }
+
+                Gtk.Label {
+                  label: _("Open Folder…");
+                  halign: start;
+                }
+              };
+            }
+          };
+        };
       };
+    };
 
-      [end]
-      MenuButton {
-        icon-name: "open-menu-symbolic";
-        tooltip-text: _("Main Menu");
-        menu-model: primary_menu;
-        primary: true;
-      }
-    }
+    content: Adw.NavigationPage {
+      title: _("Library");
 
-    // Phase 1 replaces this placeholder with the browser grid ↔ viewer ↔
-    // filmstrip navigation (AdwNavigationView / AdwNavigationSplitView).
-    content: Adw.StatusPage {
-      icon-name: "image-x-generic-symbolic";
-      title: _("No Folder Open");
-      description: _("Open a folder of images to start browsing.");
+      child: Adw.NavigationView nav_view {
+        Adw.NavigationPage {
+          title: _("Library");
+          tag: "browser";
+
+          child: Adw.ToolbarView {
+            [top]
+            Adw.HeaderBar {
+              [start]
+              Gtk.Button open_button {
+                child: Adw.ButtonContent {
+                  icon-name: "folder-open-symbolic";
+                  label: _("Open Folder");
+                };
+                tooltip-text: _("Open a folder of images");
+              }
+
+              [end]
+              MenuButton {
+                icon-name: "open-menu-symbolic";
+                tooltip-text: _("Main Menu");
+                menu-model: primary_menu;
+                primary: true;
+              }
+            }
+
+            content: Gtk.Stack content_stack {
+              Gtk.StackPage {
+                name: "empty";
+
+                child: Adw.StatusPage {
+                  icon-name: "image-x-generic-symbolic";
+                  title: _("No Folder Open");
+                  description: _("Open a folder of images to start browsing.");
+                };
+              }
+
+              Gtk.StackPage {
+                name: "grid";
+
+                child: Gtk.ScrolledWindow grid_scroller {
+                  hexpand: true;
+                  vexpand: true;
+                };
+              }
+            };
+          };
+        }
+      };
     };
   };
 }
