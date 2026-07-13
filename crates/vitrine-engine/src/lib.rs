@@ -25,6 +25,10 @@
 //! - Phase 1: LRU texture-cache eviction policy is hosted here so it is
 //!   testable without GTK.
 
+pub mod lru;
+
+pub use lru::SizedLru;
+
 /// Crate version, surfaced by the app's About dialog to prove the app↔engine
 /// wiring end-to-end in Phase 0.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

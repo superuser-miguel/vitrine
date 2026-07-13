@@ -22,4 +22,7 @@ adw = { version = "0.9", package = "libadwaita", features = ["v1_5"] }
 gettext-rs = { version = "0.7", features = ["gettext-system"] }
 # The UI-free core (PLAN §1 house rule 2).
 vitrine-engine = { workspace = true }
-# ashpd (XDG portals) and glycin are added in Phase 1, where first used.
+# Sandboxed subprocess-per-image decode (PLAN §3). The `gdk4` feature yields
+# `Frame::texture() -> gdk::Texture`; its gdk4 must match our gtk4 (both 0.11).
+glycin = { version = "3.1", features = ["gdk4"] }
+# ashpd (XDG portals) is added when the extra-roots chooser lands.
