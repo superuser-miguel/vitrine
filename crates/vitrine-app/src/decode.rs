@@ -26,6 +26,23 @@ pub async fn thumbnail(file: &gio::File, size: u32) -> Result<gdk::Texture, glyc
     Ok(frame.texture())
 }
 
+/// Decode `file` for the viewer, capping the longest edge at `max_dim` so a
+/// single displayed image stays a bounded texture (the LRU cache and zoom work
+/// against this). Requests a scaled frame when the source is larger; the caller
+/// still defensively downscales, since the scale hint is best-effort.
+pub async fn full(file: &gio::File, max_dim: u32) -> Result<gdk::Texture, glycin::ErrorCtx> {
+    let image = Loader::new(file.clone()).load().await?;
+    let details = image.details();
+    let frame = if details.width().max(details.height()) > max_dim {
+        image
+            .specific_frame(FrameRequest::new().scale(max_dim, max_dim))
+            .await?
+    } else {
+        image.next_frame().await?
+    };
+    Ok(frame.texture())
+}
+
 /// The MIME types Vitrine treats as browsable images — glycin's advertised set
 /// (includes AVIF, JXL, HEIF). Used to filter folder contents into the grid.
 pub fn is_supported_image(content_type: &str) -> bool {

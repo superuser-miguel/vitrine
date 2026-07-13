@@ -3,8 +3,8 @@
 //! Phase 1 browser. Opening a folder enumerates its images asynchronously into
 //! a `gio::ListStore` of [`ImageObject`]s, shown in a virtualized `GtkGridView`
 //! with `GtkMultiSelection` (rubber-band + Ctrl/Shift ranges). Thumbnails decode
-//! lazily per visible cell (see [`crate::grid_cell`]). The single-image viewer
-//! and filmstrip arrive in the next increment.
+//! lazily per visible cell (see [`crate::grid_cell`]). Activating a cell pushes
+//! the [`crate::viewer`] page onto the `AdwNavigationView`, sharing the store.
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -12,6 +12,7 @@ use gtk::{gio, glib, CompositeTemplate};
 
 use crate::grid_cell::VitrineGridCell;
 use crate::image_object::ImageObject;
+use crate::viewer::VitrineViewer;
 
 /// Gio attributes fetched per child when enumerating a folder.
 const ENUMERATE_ATTRS: &str =
@@ -32,11 +33,15 @@ mod imp {
         pub open_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub places_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub nav_view: TemplateChild<adw::NavigationView>,
 
         /// Backing model for the grid (one row per image file).
         pub store: gio::ListStore,
         /// Selection model the grid renders.
         pub selection: RefCell<Option<gtk::MultiSelection>>,
+        /// The viewer page, created lazily on first activation.
+        pub viewer: RefCell<Option<VitrineViewer>>,
     }
 
     impl Default for VitrineWindow {
@@ -46,8 +51,10 @@ mod imp {
                 grid_scroller: Default::default(),
                 open_button: Default::default(),
                 places_list: Default::default(),
+                nav_view: Default::default(),
                 store: gio::ListStore::new::<ImageObject>(),
                 selection: RefCell::new(None),
+                viewer: RefCell::new(None),
             }
         }
     }
@@ -139,8 +146,31 @@ impl VitrineWindow {
         grid_view.set_enable_rubberband(true);
         grid_view.set_vexpand(true);
 
+        // Enter / double-click opens the viewer at that image.
+        grid_view.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, position| window.open_viewer(position)
+        ));
+
         imp.grid_scroller.set_child(Some(&grid_view));
         *imp.selection.borrow_mut() = Some(selection);
+    }
+
+    /// Push the viewer page showing the image at `position`.
+    fn open_viewer(&self, position: u32) {
+        let imp = self.imp();
+        let viewer = imp
+            .viewer
+            .borrow_mut()
+            .get_or_insert_with(VitrineViewer::new)
+            .clone();
+        viewer.open(imp.store.clone(), position);
+        if imp.nav_view.find_page("viewer").is_none() {
+            imp.nav_view.push(&viewer);
+        } else {
+            imp.nav_view.pop_to_tag("viewer");
+        }
     }
 
     fn setup_actions(&self) {
@@ -217,6 +247,15 @@ impl VitrineWindow {
         imp.store.extend_from_slice(&items);
         imp.content_stack
             .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
+        // Dev aid: VITRINE_OPEN=<index> auto-opens the viewer (for screenshots).
+        if let Some(idx) = std::env::var("VITRINE_OPEN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+        {
+            if idx < self.imp().store.n_items() {
+                self.open_viewer(idx);
+            }
+        }
         self.maybe_screenshot();
     }
 

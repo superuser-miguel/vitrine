@@ -1,0 +1,58 @@
+using Gtk 4.0;
+using Adw 1;
+
+// Single-image viewer page pushed onto the browser's Adw.NavigationView.
+// Layout here; viewer.rs owns decode/zoom/prefetch and builds the filmstrip
+// ListView into filmstrip_scroller.
+template $VitrineViewer: Adw.NavigationPage {
+  title: _("Viewer");
+  tag: "viewer";
+
+  child: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      title-widget: Adw.WindowTitle title {
+        title: _("Viewer");
+      };
+
+      [end]
+      Gtk.Button zoom_in_button {
+        icon-name: "zoom-in-symbolic";
+        tooltip-text: _("Zoom In");
+      }
+
+      [end]
+      Gtk.Button zoom_fit_button {
+        icon-name: "zoom-fit-best-symbolic";
+        tooltip-text: _("Fit to Window");
+      }
+
+      [end]
+      Gtk.Button zoom_out_button {
+        icon-name: "zoom-out-symbolic";
+        tooltip-text: _("Zoom Out");
+      }
+    }
+
+    content: Gtk.ScrolledWindow picture_scroller {
+      hexpand: true;
+      vexpand: true;
+
+      child: Gtk.Picture picture {
+        content-fit: contain;
+        can-shrink: true;
+      };
+    };
+
+    [bottom]
+    Gtk.ScrolledWindow filmstrip_scroller {
+      vscrollbar-policy: never;
+      hscrollbar-policy: automatic;
+      height-request: 92;
+
+      styles [
+        "background",
+      ]
+    }
+  };
+}

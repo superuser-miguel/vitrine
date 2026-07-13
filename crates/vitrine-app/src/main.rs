@@ -9,6 +9,7 @@ mod decode;
 mod grid_cell;
 mod image_object;
 mod thumbnails;
+mod viewer;
 mod window;
 
 mod config {

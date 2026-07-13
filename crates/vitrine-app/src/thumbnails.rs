@@ -11,9 +11,39 @@
 //! a warm cache, layers on top of this in the next increment.)
 
 use gtk::gdk;
+use gtk::glib;
 use gtk::graphene;
 use gtk::gsk;
 use gtk::prelude::*;
+
+use crate::image_object::ImageObject;
+
+/// Ensure `item` has a thumbnail, decoding once if needed and caching it on the
+/// item's `texture` property (so property bindings update every view showing it).
+/// `widget` supplies the GSK renderer for the defensive downscale. A no-op if a
+/// thumbnail already exists, a previous decode failed, or one is already running.
+pub fn ensure_thumbnail(widget: &impl IsA<gtk::Widget>, item: &ImageObject, size: u32) {
+    if item.texture().is_some() || item.has_failed() || !item.begin_load() {
+        return;
+    }
+    let file = item.file();
+    let weak_widget = widget.as_ref().downgrade();
+    let item = item.clone();
+    glib::spawn_future_local(async move {
+        match crate::decode::thumbnail(&file, size).await {
+            Ok(texture) => {
+                let thumb = weak_widget
+                    .upgrade()
+                    .and_then(|w| w.native())
+                    .and_then(|n| n.renderer())
+                    .map(|r| downscale(&texture, size, &r))
+                    .unwrap_or(texture);
+                item.set_texture(Some(thumb));
+            }
+            Err(_) => item.mark_failed(),
+        }
+    });
+}
 
 /// Downscale `texture` so its longest edge is at most `max` px, preserving
 /// aspect. Returns the input unchanged if it already fits. Rendered on
