@@ -1,0 +1,29 @@
+# --- Rust / Cargo ---
+/target/
+**/*.rs.bk
+# Cargo.lock IS committed: Vitrine ships binaries, so the lockfile is tracked.
+
+# --- Meson / build outputs ---
+/build/
+/builddir/
+/_build/
+/build-dir/
+
+# --- Flatpak ---
+/.flatpak-builder/
+/repo/
+*.flatpak
+
+# --- Blueprint ---
+# Compiled *.ui XML is a build artifact generated into the build dir, never in-tree.
+
+# --- Local planning docs (context for Claude, not repo content) ---
+/gallery-viewer-design-notes.md
+/gallery-viewer-plan.pptx
+
+# --- Editors / OS ---
+*.swp
+*~
+.idea/
+.vscode/
+.DS_Store

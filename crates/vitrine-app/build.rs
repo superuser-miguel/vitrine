@@ -1,0 +1,133 @@
+//! Build script for `vitrine-app`.
+//!
+//! Two modes, distinguished by whether Meson set `VITRINE_PKGDATADIR`:
+//!
+//!  * Plain `cargo` (dev / CI): compiles Blueprint `.blp` -> `.ui`, bundles the
+//!    gresource into `OUT_DIR`, and generates `config.rs` with `PKGDATADIR`
+//!    pointing at `OUT_DIR`, so the app loads its resources from there.
+//!  * Under Meson: Meson compiles/installs the gresource itself, so this script
+//!    only generates `config.rs` from the Meson-provided environment.
+
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const BASE_ID: &str = "io.github.superuser_miguel.Vitrine";
+const GRESOURCE_PREFIX: &str = "/io/github/superuser_miguel/Vitrine";
+const GETTEXT_PACKAGE: &str = "vitrine";
+
+fn main() {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("crate is two levels below the workspace root")
+        .to_path_buf();
+    let data_dir = workspace_root.join("data");
+
+    let version = env::var("CARGO_PKG_VERSION").unwrap();
+    let profile = env::var("VITRINE_PROFILE").unwrap_or_else(|_| "Devel".to_string());
+    let localedir =
+        env::var("VITRINE_LOCALEDIR").unwrap_or_else(|_| "/usr/share/locale".to_string());
+    let app_id = env::var("VITRINE_APP_ID").unwrap_or_else(|_| {
+        if profile == "Devel" {
+            format!("{BASE_ID}.Devel")
+        } else {
+            BASE_ID.to_string()
+        }
+    });
+
+    // Meson tells us where it installs resources; its absence means cargo-dev.
+    let meson_pkgdatadir = env::var("VITRINE_PKGDATADIR").ok();
+    let pkgdatadir = match &meson_pkgdatadir {
+        Some(dir) => dir.clone(),
+        None => {
+            compile_resources(&data_dir, &out_dir);
+            out_dir.to_string_lossy().into_owned()
+        }
+    };
+
+    // config.rs is always generated here (single `include!` path for main.rs).
+    let template = fs::read_to_string(manifest_dir.join("src/config.rs.in")).unwrap();
+    let config = template
+        .replace("@APP_ID@", &app_id)
+        .replace("@VERSION@", &version)
+        .replace("@PROFILE@", &profile)
+        .replace("@GRESOURCE_PREFIX@", GRESOURCE_PREFIX)
+        .replace("@GETTEXT_PACKAGE@", GETTEXT_PACKAGE)
+        .replace("@LOCALEDIR@", &localedir)
+        .replace("@PKGDATADIR@", &pkgdatadir);
+    fs::write(out_dir.join("config.rs"), config).expect("write config.rs");
+
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("src/config.rs.in").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        data_dir.join("style.css").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        data_dir.join("resources.gresource.xml").display()
+    );
+    for blp in blueprints(&data_dir) {
+        println!("cargo:rerun-if-changed={}", blp.display());
+    }
+    for v in [
+        "VITRINE_APP_ID",
+        "VITRINE_PROFILE",
+        "VITRINE_LOCALEDIR",
+        "VITRINE_PKGDATADIR",
+    ] {
+        println!("cargo:rerun-if-env-changed={v}");
+    }
+}
+
+/// cargo-dev only: compile every Blueprint and bundle the gresource into OUT_DIR.
+fn compile_resources(data_dir: &Path, out_dir: &Path) {
+    for blp in blueprints(data_dir) {
+        let ui = out_dir.join(blp.file_stem().unwrap()).with_extension("ui");
+        run(
+            Command::new("blueprint-compiler")
+                .arg("compile")
+                .arg(&blp)
+                .arg("--output")
+                .arg(&ui),
+            "blueprint-compiler",
+        );
+    }
+    fs::copy(data_dir.join("style.css"), out_dir.join("style.css")).expect("copy style.css");
+    let gresource_xml = out_dir.join("resources.gresource.xml");
+    fs::copy(data_dir.join("resources.gresource.xml"), &gresource_xml)
+        .expect("copy resources.gresource.xml");
+    run(
+        Command::new("glib-compile-resources")
+            .arg("--sourcedir")
+            .arg(out_dir)
+            .arg("--target")
+            .arg(out_dir.join("vitrine.gresource"))
+            .arg(&gresource_xml),
+        "glib-compile-resources",
+    );
+}
+
+/// Every `*.blp` under `data/ui`, sorted for deterministic builds.
+fn blueprints(data_dir: &Path) -> Vec<PathBuf> {
+    let mut v: Vec<PathBuf> = fs::read_dir(data_dir.join("ui"))
+        .expect("read data/ui")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "blp"))
+        .collect();
+    v.sort();
+    v
+}
+
+fn run(cmd: &mut Command, tool: &str) {
+    let status = cmd
+        .status()
+        .unwrap_or_else(|e| panic!("failed to spawn {tool}: {e}"));
+    assert!(status.success(), "{tool} exited with {status}");
+}

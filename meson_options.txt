@@ -1,0 +1,14 @@
+option(
+  'profile',
+  type: 'combo',
+  choices: ['default', 'development'],
+  value: 'default',
+  description: 'Build profile: "development" gets a .Devel app id + striped devel header',
+)
+
+option(
+  'offline',
+  type: 'boolean',
+  value: false,
+  description: 'Pass --offline to cargo (Flatpak/Flathub vendored, network-free builds)',
+)

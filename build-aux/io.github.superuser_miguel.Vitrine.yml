@@ -1,0 +1,79 @@
+# Flatpak manifest — Vitrine (GTK4/libadwaita image browser, Rust/gtk4-rs).
+#
+# Build & run (local dev iteration):
+#   flatpak-builder --user --install --force-clean build-dir \
+#     build-aux/io.github.superuser_miguel.Vitrine.yml
+#   flatpak run io.github.superuser_miguel.Vitrine
+#
+# Sandbox posture is PLAN.md §4 (exact, complete set). Do NOT add
+# --filesystem=host, ever. Extra image roots are granted at runtime via the
+# FileChooser portal with persistence.
+
+id: io.github.superuser_miguel.Vitrine
+runtime: org.gnome.Platform
+runtime-version: '50'        # current stable GNOME runtime at scaffold time
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: vitrine
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/vitrine/cargo
+  # LOCAL dev iteration only (lets cargo hit crates.io during the build).
+  # Flathub forbids build-time network — before submission, vendor the crate
+  # graph (see the app module) and DELETE this build-arg.
+  build-args:
+    - --share=network
+
+finish-args:
+  # -- display / input ------------------------------------------------------
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri                       # GPU rendering for GTK4/GSK + glycin
+
+  # -- filesystem (PLAN §4) -------------------------------------------------
+  - --filesystem=xdg-pictures          # the one deliberate static root
+  - --filesystem=xdg-cache/thumbnails:create   # shared freedesktop thumb cache
+
+  # NOTE deliberately ABSENT (portals-first — see PLAN §4):
+  #   --filesystem=home / host  -> additional roots flow through the
+  #                                FileChooser portal (persisted as doc-portal
+  #                                paths in config).
+
+modules:
+  # ---------------------------------------------------------------- blueprint
+  # Compiles .blp UI files at build time; not needed at runtime.
+  - name: blueprint-compiler
+    buildsystem: meson
+    cleanup: ['*']
+    sources:
+      - type: git
+        url: https://gitlab.gnome.org/GNOME/blueprint-compiler.git
+        tag: v0.18.0
+
+  # ---------------------------------------------------------------- the app
+  # Meson drives the build and invokes cargo (GNOME Builder Rust-template
+  # pattern) so Blueprint compilation, GResource bundling, desktop/metainfo
+  # install, and the cargo build all live in one build system.
+  - name: vitrine
+    buildsystem: meson
+    config-opts:
+      - -Dprofile=default
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - builddir
+          - build-dir
+          - .flatpak-builder
+          - .git
+      # For Flathub (offline builds), vendor the crate graph and REMOVE the
+      # --share=network build-arg above, then set -Doffline=true. Generate with
+      # flatpak-builder-tools:
+      #   python3 flatpak-cargo-generator.py Cargo.lock -o build-aux/cargo-sources.json
+      # then add:
+      # - cargo-sources.json

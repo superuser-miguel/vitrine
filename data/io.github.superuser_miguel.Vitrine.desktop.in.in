@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Vitrine
+GenericName=Image Browser
+Comment=Browse, review and tag your image collection
+Type=Application
+Exec=vitrine %U
+Terminal=false
+Categories=Graphics;Viewer;GTK;
+Icon=@app-id@
+StartupNotify=true
+StartupWMClass=@app-id@
+Keywords=image;photo;picture;gallery;browser;viewer;tag;exif;duplicate;
+MimeType=image/jpeg;image/png;image/webp;image/avif;image/gif;image/tiff;image/bmp;inode/directory;

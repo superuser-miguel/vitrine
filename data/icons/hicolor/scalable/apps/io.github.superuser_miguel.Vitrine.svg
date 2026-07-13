@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Placeholder Vitrine icon: a framed image (mountains + sun). Replace with a
+       proper icon before release (PLAN Phase 4 polish). -->
+  <rect x="16" y="24" width="96" height="80" rx="12" fill="#3584e4"/>
+  <rect x="26" y="34" width="76" height="60" rx="6" fill="#ffffff"/>
+  <circle cx="46" cy="52" r="8" fill="#f5c211"/>
+  <path d="M26 88 L52 62 L68 78 L84 58 L102 82 L102 88 Z" fill="#2ec27e"/>
+  <rect x="26" y="34" width="76" height="60" rx="6" fill="none" stroke="#1a5fb4" stroke-width="3"/>
+</svg>

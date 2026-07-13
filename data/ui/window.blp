@@ -1,0 +1,45 @@
+using Gtk 4.0;
+using Adw 1;
+
+menu primary_menu {
+  section {
+    // Keyboard-shortcuts overlay is added with the real shortcut model (Phase 4).
+    item {
+      label: _("_About Vitrine");
+      action: "app.about";
+    }
+  }
+}
+
+template $VitrineWindow: Adw.ApplicationWindow {
+  title: _("Vitrine");
+  default-width: 1100;
+  default-height: 720;
+  width-request: 360;
+  height-request: 240;
+
+  content: Adw.ToolbarView {
+    [top]
+    Adw.HeaderBar {
+      title-widget: Adw.WindowTitle {
+        title: _("Vitrine");
+      };
+
+      [end]
+      MenuButton {
+        icon-name: "open-menu-symbolic";
+        tooltip-text: _("Main Menu");
+        menu-model: primary_menu;
+        primary: true;
+      }
+    }
+
+    // Phase 1 replaces this placeholder with the browser grid ↔ viewer ↔
+    // filmstrip navigation (AdwNavigationView / AdwNavigationSplitView).
+    content: Adw.StatusPage {
+      icon-name: "image-x-generic-symbolic";
+      title: _("No Folder Open");
+      description: _("Open a folder of images to start browsing.");
+    };
+  };
+}

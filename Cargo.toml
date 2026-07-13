@@ -1,0 +1,33 @@
+# Vitrine — Cargo workspace root.
+#
+# A fast, focused, catalog-aware image browser + reviewer for GNOME.
+# Meson drives the real build (see meson.build) and invokes cargo; plain
+# `cargo build` / `cargo test` work on the host for iteration and CI, given
+# gtk4-devel + libadwaita-devel for the app crate. The engine crate builds
+# anywhere — it has zero GTK/GLib dependencies (hard boundary, see its lib.rs).
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/vitrine-engine",
+    "crates/vitrine-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/superuser-miguel/vitrine"
+authors = ["Miguel Almanzar <xmm.user@gmail.com>"]
+
+[workspace.dependencies]
+# Internal crates
+vitrine-engine = { path = "crates/vitrine-engine" }
+
+# The GTK stack lives in crates/vitrine-app/Cargo.toml. Engine-side crates
+# (blake3, image_hasher, rusqlite, rayon) are added in the phase that first
+# uses them — kept out of the tree until then to avoid dead dependencies.
+
+[profile.release]
+lto = "thin"

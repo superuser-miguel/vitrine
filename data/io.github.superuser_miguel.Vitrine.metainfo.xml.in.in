@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copyright 2026 Miguel Almanzar -->
+<component type="desktop-application">
+  <id>@app-id@</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Vitrine</name>
+  <summary>Browse, review and tag your image collection</summary>
+  <description>
+    <p>
+      Vitrine is a fast, focused, catalog-aware image browser and reviewer for
+      GNOME. It pairs a GPU-composited viewer with a virtualized thumbnail grid
+      and a filmstrip, then adds a catalog and tag layer that survives renames
+      and moves — browse images that happen to be files.
+    </p>
+    <p>Highlights:</p>
+    <ul>
+      <li>Virtualized thumbnail grid with rubber-band and keyboard selection.</li>
+      <li>GPU-composited single-image viewer with zoom, pan and gestures.</li>
+      <li>A content-hash keyed index so tags and ratings survive file renames.</li>
+      <li>Tags, star ratings, smart collections and hand-curated catalogs.</li>
+      <li>Find exact and near-duplicate images.</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">@app-id@.desktop</launchable>
+  <url type="homepage">https://github.com/superuser-miguel/vitrine</url>
+  <url type="bugtracker">https://github.com/superuser-miguel/vitrine/issues</url>
+  <developer id="io.github.superuser_miguel">
+    <name>Miguel Almanzar</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-07-13">
+      <description>
+        <p>Initial scaffold.</p>
+      </description>
+    </release>
+  </releases>
+</component>

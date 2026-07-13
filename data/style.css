@@ -1,0 +1,3 @@
+/* Vitrine app-wide styling. Empty in Phase 0; the grid cell overlays (rating
+   stars, selection checks) and the viewer chrome get their styles here in
+   Phases 1 and 3. Kept as a real (loaded) resource so the pipeline is wired. */
