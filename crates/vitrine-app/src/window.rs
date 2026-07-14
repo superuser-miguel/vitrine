@@ -28,6 +28,12 @@ const DEFAULT_ICON: usize = 2;
 /// icons (user preference: more than this is useless).
 const MAX_COLUMNS: u32 = 7;
 
+/// When scrolling settles, prefetch this many items past the last visible one
+/// (and a few before) into the RAM cache, so resuming the scroll shows loaded
+/// thumbnails instead of blanks.
+const PREFETCH_AHEAD: u32 = 64;
+const PREFETCH_BEHIND: u32 = 16;
+
 mod imp {
     use super::*;
     use std::cell::RefCell;
@@ -64,9 +70,10 @@ mod imp {
         pub viewer: RefCell<Option<VitrineViewer>>,
         /// Bounded RAM thumbnail cache, shared by the grid and the filmstrip.
         pub thumb_cache: crate::thumbnails::ThumbCache,
-        /// Cells bound while scrolling that still need a thumbnail load; drained
-        /// when scrolling settles so fast scroll doesn't spawn a load per cell.
-        pub pending: RefCell<Vec<(glib::WeakRef<VitrineGridCell>, ImageObject)>>,
+        /// Cells bound while scrolling that still need a thumbnail load (with the
+        /// item's position); drained when scrolling settles so fast scroll doesn't
+        /// spawn a load per cell.
+        pub pending: RefCell<Vec<(glib::WeakRef<VitrineGridCell>, ImageObject, u32)>>,
         /// Debounce timer for flushing `pending` after scrolling stops.
         pub flush_source: RefCell<Option<glib::SourceId>>,
     }
@@ -259,15 +266,73 @@ impl VitrineWindow {
     }
 
     /// Load thumbnails for the cells queued since the last flush that are still
-    /// showing the item they were queued for (scrolled-past cells are skipped).
+    /// showing the item they were queued for (scrolled-past cells are skipped),
+    /// then prefetch a margin around the visible range so resuming the scroll
+    /// shows loaded thumbnails.
     fn flush_pending(&self) {
         let imp = self.imp();
         let pending: Vec<_> = imp.pending.borrow_mut().drain(..).collect();
-        for (weak_cell, item) in pending {
+        let (mut lo, mut hi) = (u32::MAX, 0u32);
+        for (weak_cell, item, position) in pending {
             if let Some(cell) = weak_cell.upgrade() {
+                if cell.item().as_ref() == Some(&item) {
+                    lo = lo.min(position);
+                    hi = hi.max(position);
+                }
                 cell.load(item, imp.thumb_cache.clone());
             }
         }
+        if lo <= hi {
+            self.prefetch_range(lo, hi);
+        }
+    }
+
+    /// Prefetch the items just outside `[lo, hi]` into the RAM cache.
+    fn prefetch_range(&self, lo: u32, hi: u32) {
+        let n = self.imp().store.n_items();
+        let start = lo.saturating_sub(PREFETCH_BEHIND);
+        let end = hi.saturating_add(PREFETCH_AHEAD).min(n.saturating_sub(1));
+        let load_size = self.icon_px().max(256);
+        for pos in start..=end {
+            if pos >= lo && pos <= hi {
+                continue; // already handled as a visible cell
+            }
+            self.prefetch_one(pos, load_size);
+        }
+    }
+
+    /// Load one item's thumbnail into the RAM cache (no cell), gated.
+    fn prefetch_one(&self, position: u32, load_size: u32) {
+        let imp = self.imp();
+        let Some(item) = imp.store.item(position).and_downcast::<ImageObject>() else {
+            return;
+        };
+        if item.has_failed() {
+            return;
+        }
+        let key = crate::thumbnails::ram_key(&item.file().uri(), load_size);
+        if imp.thumb_cache.borrow().contains(&key) {
+            return;
+        }
+        let file = item.file();
+        let mtime = item.mtime();
+        let cache = imp.thumb_cache.clone();
+        let renderer_widget = crate::thumbnails::renderer_source(self);
+        glib::spawn_future_local(async move {
+            let _permit = crate::thumbnails::load_gate().acquire().await;
+            if cache.borrow().contains(&key) {
+                return;
+            }
+            if let Some(texture) =
+                crate::thumbnails::load(file, mtime, load_size, renderer_widget).await
+            {
+                cache.borrow_mut().put(
+                    key,
+                    texture.clone(),
+                    crate::thumbnails::texture_cost(&texture),
+                );
+            }
+        });
     }
 
     /// The current thumbnail display size in pixels.
@@ -298,11 +363,12 @@ impl VitrineWindow {
                 // Display synchronously; queue the load (spawned when scrolling
                 // settles) only if the thumbnail isn't already cached.
                 if cell.bind(&item, &cache) {
+                    let position = list_item.position();
                     window
                         .imp()
                         .pending
                         .borrow_mut()
-                        .push((cell.downgrade(), item));
+                        .push((cell.downgrade(), item, position));
                     window.schedule_flush();
                 }
             }
