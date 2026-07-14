@@ -125,6 +125,7 @@ mod imp {
             }
             self.obj().setup_grid();
             self.obj().setup_actions();
+            self.obj().maybe_cycle();
         }
     }
 
@@ -581,6 +582,40 @@ impl VitrineWindow {
         self.maybe_screenshot();
         self.maybe_scrolltest();
         self.maybe_loadtest();
+    }
+
+    /// Dev aid: if `VITRINE_CYCLE=/a:/b:/c` is set, open each folder in turn every
+    /// ~2.5s, looping — to reproduce leaks from repeated folder switching.
+    fn maybe_cycle(&self) {
+        let Some(spec) = std::env::var_os("VITRINE_CYCLE") else {
+            return;
+        };
+        let dirs: Vec<String> = spec
+            .to_string_lossy()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        if dirs.is_empty() {
+            return;
+        }
+        let idx = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        glib::timeout_add_seconds_local(
+            2,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    let i = idx.get();
+                    idx.set(i + 1);
+                    let dir = &dirs[i % dirs.len()];
+                    window.open_location(gio::File::for_path(dir));
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
     }
 
     /// Dev aid: if `VITRINE_LOADTEST` is set, sit still while thumbnails load and

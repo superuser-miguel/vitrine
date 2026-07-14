@@ -291,8 +291,10 @@ fn store(
 }
 
 /// Downscale `texture` so its longest edge is at most `max` px, preserving
-/// aspect. Returns the input unchanged if it already fits. Rendered on
-/// `renderer`, so the result is a compact GPU texture.
+/// aspect. Returns the input unchanged if it already fits. Uses the GSK renderer
+/// to scale, then copies the result into a **`MemoryTexture`**: a GPU texture is
+/// backed by a dmabuf file descriptor, and thousands cached across folders leak
+/// FDs (→ "too many open files"); memory textures hold no FD.
 pub fn downscale(texture: &gdk::Texture, max: u32, renderer: &gsk::Renderer) -> gdk::Texture {
     let w = texture.width();
     let h = texture.height();
@@ -307,5 +309,22 @@ pub fn downscale(texture: &gdk::Texture, max: u32, renderer: &gsk::Renderer) -> 
     let bounds = graphene::Rect::new(0.0, 0.0, nw, nh);
 
     let node = gsk::TextureScaleNode::new(texture, &bounds, gsk::ScalingFilter::Trilinear);
-    renderer.render_texture(node, Some(&bounds))
+    let gpu = renderer.render_texture(node, Some(&bounds));
+    to_memory_texture(&gpu)
+}
+
+/// Copy a texture's pixels into a `MemoryTexture` (holds no GPU/dmabuf FD),
+/// dropping the source GPU texture.
+fn to_memory_texture(texture: &gdk::Texture) -> gdk::Texture {
+    let mut downloader = gdk::TextureDownloader::new(texture);
+    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+    let (bytes, stride) = downloader.download_bytes();
+    gdk::MemoryTextureBuilder::new()
+        .set_bytes(Some(&bytes))
+        .set_width(texture.width())
+        .set_height(texture.height())
+        .set_stride(stride)
+        .set_format(gdk::MemoryFormat::R8g8b8a8)
+        .build()
+        .upcast()
 }
