@@ -139,7 +139,7 @@ pub async fn load(
     match renderer {
         Some(renderer) => {
             let thumb = downscale(&texture, bucket.pixels(), &renderer);
-            store(&uri, source_mtime, bucket, &thumb, is_shareable(&file)).await;
+            store(&uri, source_mtime, bucket, &thumb, is_shareable(&file));
             Some(thumb)
         }
         None => Some(texture),
@@ -253,47 +253,41 @@ pub fn prune_private_cache() {
 }
 
 /// Write `texture` to the thumbnail cache(s), tagged with the freedesktop
-/// `Thumb::URI`/`Thumb::MTime` metadata so any thumbnailer can validate it.
-/// Always writes the app-private cache; also the shared cache when `shareable`
-/// (real-path files), contributing thumbnails back to Nautilus/GNOME.
-/// Best-effort — failures are ignored.
-async fn store(
+/// `Thumb::URI`/`Thumb::MTime` metadata. Fire-and-forget: PNG **encode and disk
+/// write happen on a worker thread** (both are pure CPU/IO and were a major
+/// main-loop stall while populating). Always writes the app-private cache; also
+/// the shared cache when `shareable` (real-path files, contributing to Nautilus).
+fn store(
     uri: &str,
     source_mtime: i64,
     bucket: ThumbBucket,
     texture: &gdk::Texture,
     shareable: bool,
 ) {
-    let png = texture.save_to_png_bytes();
+    let texture = texture.clone(); // gdk::Texture is Send
+    let uri = uri.to_string();
     let mtime = source_mtime.to_string();
-    let png = vitrine_engine::png_meta::add_text_chunks(
-        &png,
-        &[("Thumb::URI", uri), ("Thumb::MTime", &mtime)],
-    )
-    .unwrap_or_else(|| png.to_vec());
-
+    let rel = format!("{}.png", thumbnail_cache::cache_key(&uri));
     let mut roots = vec![private_dir()];
     let shared = shared_dir();
     if shareable && shared != private_dir() {
         roots.push(shared);
     }
 
-    let rel = format!("{}.png", thumbnail_cache::cache_key(uri));
-    for root in roots {
-        let dir = root.join(bucket.dir());
-        if std::fs::create_dir_all(&dir).is_err() {
-            continue;
+    gio::spawn_blocking(move || {
+        let png = texture.save_to_png_bytes();
+        let png = vitrine_engine::png_meta::add_text_chunks(
+            &png,
+            &[("Thumb::URI", &uri), ("Thumb::MTime", &mtime)],
+        )
+        .unwrap_or_else(|| png.to_vec());
+        for root in roots {
+            let dir = root.join(bucket.dir());
+            if std::fs::create_dir_all(&dir).is_ok() {
+                let _ = std::fs::write(dir.join(&rel), &png);
+            }
         }
-        let file = gio::File::for_path(dir.join(&rel));
-        let _ = file
-            .replace_contents_future(
-                png.clone(),
-                None,
-                false,
-                gio::FileCreateFlags::REPLACE_DESTINATION,
-            )
-            .await;
-    }
+    });
 }
 
 /// Downscale `texture` so its longest edge is at most `max` px, preserving

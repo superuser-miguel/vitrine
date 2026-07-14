@@ -580,6 +580,46 @@ impl VitrineWindow {
         }
         self.maybe_screenshot();
         self.maybe_scrolltest();
+        self.maybe_loadtest();
+    }
+
+    /// Dev aid: if `VITRINE_LOADTEST` is set, sit still while thumbnails load and
+    /// report the worst main-loop stall (a 16ms heartbeat measures its own
+    /// lateness) — this is what "sluggish while populating" feels like.
+    fn maybe_loadtest(&self) {
+        if std::env::var_os("VITRINE_LOADTEST").is_none() {
+            return;
+        }
+        use std::time::Instant;
+        let last = std::rc::Rc::new(std::cell::Cell::new(Instant::now()));
+        let max_ms = std::rc::Rc::new(std::cell::Cell::new(0u128));
+        let start = Instant::now();
+        glib::timeout_add_local(
+            std::time::Duration::from_millis(16),
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    let now = Instant::now();
+                    let gap = now.saturating_duration_since(last.get()).as_millis();
+                    if gap > max_ms.get() {
+                        max_ms.set(gap);
+                    }
+                    last.set(now);
+                    if start.elapsed().as_secs() >= 10 {
+                        eprintln!("LOADTEST max main-loop stall = {} ms", max_ms.get());
+                        if let Some(app) = window.application() {
+                            app.quit();
+                        }
+                        glib::ControlFlow::Break
+                    } else {
+                        glib::ControlFlow::Continue
+                    }
+                }
+            ),
+        );
     }
 
     /// Dev aid: if `VITRINE_SCROLLTEST` is set, fast-scroll the grid top→bottom
