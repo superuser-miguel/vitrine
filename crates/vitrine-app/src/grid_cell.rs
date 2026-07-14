@@ -15,12 +15,16 @@ use gtk::CompositeTemplate;
 use crate::image_object::ImageObject;
 use crate::thumbnails::ThumbCache;
 
-/// Thumbnail decode resolution (fits within THUMB_SIZE×THUMB_SIZE).
+/// Default thumbnail resolution (also the filmstrip's load size).
 pub const THUMB_SIZE: u32 = 256;
+
+/// Load a thumbnail at least this large even for small icons, so small/medium
+/// icons reuse the warm shared `large` (256) cache instead of a cold `normal`.
+const MIN_LOAD_PX: u32 = 256;
 
 mod imp {
     use super::*;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
 
     #[derive(Debug, Default, CompositeTemplate)]
     #[template(resource = "/io/github/superuser_miguel/Vitrine/grid_cell.ui")]
@@ -33,6 +37,8 @@ mod imp {
         pub broken_icon: TemplateChild<gtk::Image>,
         /// The item this cell currently displays; the recycling-guard token.
         pub item: RefCell<Option<ImageObject>>,
+        /// Display size of the thumbnail (px), from the grid's icon-size level.
+        pub icon_size: Cell<u32>,
     }
 
     #[glib::object_subclass]
@@ -68,6 +74,26 @@ impl Default for VitrineGridCell {
 }
 
 impl VitrineGridCell {
+    /// Set the thumbnail display size (px). Sizes the picture and scales the
+    /// filename width to roughly match.
+    pub fn set_icon_size(&self, px: u32) {
+        let imp = self.imp();
+        imp.icon_size.set(px);
+        imp.picture.set_size_request(px as i32, px as i32);
+        // Roughly one char per 8 px, clamped, so the label tracks the icon width.
+        let chars = (px / 8).clamp(8, 28) as i32;
+        imp.label.set_width_chars(chars);
+        imp.label.set_max_width_chars(chars);
+    }
+
+    /// Resolution to load: at least [`MIN_LOAD_PX`] so small icons reuse the warm
+    /// shared cache, and higher for big icons so they stay sharp.
+    fn load_size(&self) -> u32 {
+        self.imp().icon_size.get().max(MIN_LOAD_PX)
+    }
+}
+
+impl VitrineGridCell {
     /// Bind this cell to `item`: show its name, and its thumbnail from the RAM
     /// cache or via an async load (disk cache / decode).
     pub fn bind(&self, item: &ImageObject, cache: &ThumbCache) {
@@ -75,8 +101,8 @@ impl VitrineGridCell {
         imp.label.set_text(&item.display_name());
         *imp.item.borrow_mut() = Some(item.clone());
 
-        let uri = item.file().uri().to_string();
-        if let Some(texture) = cache.borrow_mut().get(&uri).cloned() {
+        let key = crate::thumbnails::ram_key(&item.file().uri(), self.load_size());
+        if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             self.show_texture(&texture);
             return;
         }
@@ -100,19 +126,20 @@ impl VitrineGridCell {
 
     fn spawn_thumbnail(&self, item: ImageObject, cache: ThumbCache) {
         let file = item.file();
-        let uri = file.uri().to_string();
         let mtime = item.mtime();
+        let load_size = self.load_size();
+        let key = crate::thumbnails::ram_key(&file.uri(), load_size);
         let renderer_widget = crate::thumbnails::renderer_source(self);
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = cell)]
             self,
             async move {
-                match crate::thumbnails::load(file, mtime, THUMB_SIZE, renderer_widget).await {
+                match crate::thumbnails::load(file, mtime, load_size, renderer_widget).await {
                     Some(thumb) => {
                         // Insert into the bounded RAM cache (evicts LRU) so it is
                         // not held forever per item.
                         cache.borrow_mut().put(
-                            uri,
+                            key,
                             thumb.clone(),
                             crate::thumbnails::texture_cost(&thumb),
                         );

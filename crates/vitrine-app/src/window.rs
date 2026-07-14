@@ -18,6 +18,16 @@ use crate::viewer::VitrineViewer;
 const ENUMERATE_ATTRS: &str =
     "standard::name,standard::display-name,standard::content-type,standard::type,time::modified";
 
+/// Thumbnail display sizes (px) the +/- control steps through. Chosen so a
+/// typical window spans ~1 column (largest) to ~6 (smallest) — below that is
+/// uselessly tiny, so max-columns is also capped (see `setup_grid`).
+const ICON_SIZES: &[u32] = &[128, 176, 240, 320, 448, 640];
+/// Default icon-size index into `ICON_SIZES`.
+const DEFAULT_ICON: usize = 2;
+/// Never show more than this many columns, however wide the window / small the
+/// icons (user preference: more than this is useless).
+const MAX_COLUMNS: u32 = 7;
+
 mod imp {
     use super::*;
     use std::cell::RefCell;
@@ -37,11 +47,19 @@ mod imp {
         pub nav_view: TemplateChild<adw::NavigationView>,
         #[template_child]
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
+        #[template_child]
+        pub icon_smaller: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub icon_larger: TemplateChild<gtk::Button>,
 
         /// Backing model for the grid (one row per image file).
         pub store: gio::ListStore,
         /// Selection model the grid renders.
         pub selection: RefCell<Option<gtk::MultiSelection>>,
+        /// The grid view (its factory is rebuilt when the icon size changes).
+        pub grid_view: RefCell<Option<gtk::GridView>>,
+        /// Current icon-size index into `ICON_SIZES`.
+        pub icon_index: std::cell::Cell<usize>,
         /// The viewer page, created lazily on first activation.
         pub viewer: RefCell<Option<VitrineViewer>>,
         /// Bounded RAM thumbnail cache, shared by the grid and the filmstrip.
@@ -57,8 +75,12 @@ mod imp {
                 places_list: Default::default(),
                 nav_view: Default::default(),
                 toast_overlay: Default::default(),
+                icon_smaller: Default::default(),
+                icon_larger: Default::default(),
                 store: gio::ListStore::new::<ImageObject>(),
                 selection: RefCell::new(None),
+                grid_view: RefCell::new(None),
+                icon_index: std::cell::Cell::new(DEFAULT_ICON),
                 viewer: RefCell::new(None),
                 thumb_cache: crate::thumbnails::new_ram_cache(),
             }
@@ -110,53 +132,31 @@ impl VitrineWindow {
         glib::Object::builder().property("application", app).build()
     }
 
-    /// Build the grid: a `SignalListItemFactory` that produces [`VitrineGridCell`]s
-    /// over a `GtkMultiSelection` of the image store.
+    /// Build the grid: a `GtkGridView` + `GtkMultiSelection` whose factory is
+    /// (re)built per icon size.
     fn setup_grid(&self) {
         let imp = self.imp();
 
-        let factory = gtk::SignalListItemFactory::new();
-        factory.connect_setup(|_, list_item| {
-            let list_item = list_item
-                .downcast_ref::<gtk::ListItem>()
-                .expect("factory item is a ListItem");
-            let cell = VitrineGridCell::default();
-            list_item.set_child(Some(&cell));
-        });
-        let cache = imp.thumb_cache.clone();
-        factory.connect_bind(move |_, list_item| {
-            let list_item = list_item
-                .downcast_ref::<gtk::ListItem>()
-                .expect("factory item is a ListItem");
-            let cell = list_item
-                .child()
-                .and_downcast::<VitrineGridCell>()
-                .expect("cell set up in setup");
-            let item = list_item
-                .item()
-                .and_downcast::<ImageObject>()
-                .expect("model holds ImageObjects");
-            cell.bind(&item, &cache);
-        });
-        factory.connect_unbind(|_, list_item| {
-            let list_item = list_item
-                .downcast_ref::<gtk::ListItem>()
-                .expect("factory item is a ListItem");
-            if let Some(cell) = list_item.child().and_downcast::<VitrineGridCell>() {
-                cell.unbind();
-            }
-        });
+        // Dev aid: VITRINE_ICON=<index> sets the initial icon-size level.
+        if let Some(idx) = std::env::var("VITRINE_ICON")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+        {
+            imp.icon_index.set(idx.min(ICON_SIZES.len() - 1));
+        }
 
         let selection = gtk::MultiSelection::new(Some(imp.store.clone()));
-        let grid_view = gtk::GridView::new(Some(selection.clone()), Some(factory));
-        // NOTE: do NOT raise max-columns here. A high cap (e.g. 16) makes
-        // GtkGridView realize a working set that scales with the *folder* size
-        // rather than the viewport — 800 cells bound for an 800-image folder.
-        // Leaving the default keeps the bound working set constant (~225) no
-        // matter how large the folder is. (See Phase 1 perf notes.)
-        grid_view.set_min_columns(2);
+        let grid_view =
+            gtk::GridView::new(Some(selection.clone()), None::<gtk::SignalListItemFactory>);
+        // Columns flow from cell width; cap the max (do NOT raise it high — a
+        // high cap makes GtkGridView realize a working set that scales with the
+        // *folder* size, e.g. 800 cells for 800 images). 1..MAX_COLUMNS gives
+        // the user's desired range with a constant, bounded working set.
+        grid_view.set_min_columns(1);
+        grid_view.set_max_columns(MAX_COLUMNS);
         grid_view.set_enable_rubberband(true);
         grid_view.set_vexpand(true);
+        grid_view.set_factory(Some(&self.build_factory()));
 
         // Enter / double-click opens the viewer at that image.
         grid_view.connect_activate(glib::clone!(
@@ -165,29 +165,132 @@ impl VitrineWindow {
             move |_, position| window.open_viewer(position)
         ));
 
-        // Delete trashes the selection; Space quick-previews the first selected.
+        // Delete trashes, Space previews, Ctrl +/-/0 changes icon size.
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(glib::clone!(
             #[weak(rename_to = window)]
             self,
             #[upgrade_or]
             glib::Propagation::Proceed,
-            move |_, key, _, _| match key {
-                gtk::gdk::Key::Delete => {
-                    window.trash_selected();
-                    glib::Propagation::Stop
+            move |_, key, _, mods| {
+                let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                match (ctrl, key) {
+                    (true, gtk::gdk::Key::plus | gtk::gdk::Key::equal | gtk::gdk::Key::KP_Add) => {
+                        window.change_icon(1)
+                    }
+                    (true, gtk::gdk::Key::minus | gtk::gdk::Key::KP_Subtract) => {
+                        window.change_icon(-1)
+                    }
+                    (true, gtk::gdk::Key::_0 | gtk::gdk::Key::KP_0) => window.reset_icon(),
+                    (_, gtk::gdk::Key::Delete) => window.trash_selected(),
+                    (_, gtk::gdk::Key::space | gtk::gdk::Key::KP_Space) => {
+                        window.preview_selected()
+                    }
+                    _ => return glib::Propagation::Proceed,
                 }
-                gtk::gdk::Key::space | gtk::gdk::Key::KP_Space => {
-                    window.preview_selected();
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
+                glib::Propagation::Stop
             }
         ));
         grid_view.add_controller(keys);
 
+        // Ctrl+scroll on the grid zooms icon size.
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        scroll.connect_scroll(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |ctrl, _, dy| {
+                if !ctrl
+                    .current_event_state()
+                    .contains(gtk::gdk::ModifierType::CONTROL_MASK)
+                {
+                    return glib::Propagation::Proceed;
+                }
+                window.change_icon(if dy < 0.0 { 1 } else { -1 });
+                glib::Propagation::Stop
+            }
+        ));
+        imp.grid_scroller.add_controller(scroll);
+
         imp.grid_scroller.set_child(Some(&grid_view));
         *imp.selection.borrow_mut() = Some(selection);
+        *imp.grid_view.borrow_mut() = Some(grid_view);
+
+        imp.icon_smaller.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.change_icon(-1)
+        ));
+        imp.icon_larger.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.change_icon(1)
+        ));
+    }
+
+    /// The current thumbnail display size in pixels.
+    fn icon_px(&self) -> u32 {
+        ICON_SIZES[self.imp().icon_index.get()]
+    }
+
+    /// A factory whose cells are sized to the current icon size and load the
+    /// resolution appropriate for it.
+    fn build_factory(&self) -> gtk::SignalListItemFactory {
+        let icon_px = self.icon_px();
+        let cache = self.imp().thumb_cache.clone();
+
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_setup(move |_, list_item| {
+            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+            let cell = VitrineGridCell::default();
+            cell.set_icon_size(icon_px);
+            list_item.set_child(Some(&cell));
+        });
+        factory.connect_bind(move |_, list_item| {
+            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+            let cell = list_item.child().and_downcast::<VitrineGridCell>().unwrap();
+            let item = list_item.item().and_downcast::<ImageObject>().unwrap();
+            cell.bind(&item, &cache);
+        });
+        factory.connect_unbind(|_, list_item| {
+            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+            if let Some(cell) = list_item.child().and_downcast::<VitrineGridCell>() {
+                cell.unbind();
+            }
+        });
+        factory
+    }
+
+    /// Step the icon size by `delta` levels (clamped) and rebuild the factory.
+    fn change_icon(&self, delta: i32) {
+        let imp = self.imp();
+        let new = (imp.icon_index.get() as i32 + delta).clamp(0, ICON_SIZES.len() as i32 - 1);
+        if new as usize == imp.icon_index.get() {
+            return;
+        }
+        imp.icon_index.set(new as usize);
+        self.apply_icon_size();
+    }
+
+    fn reset_icon(&self) {
+        let imp = self.imp();
+        if imp.icon_index.get() != DEFAULT_ICON {
+            imp.icon_index.set(DEFAULT_ICON);
+            self.apply_icon_size();
+        }
+    }
+
+    /// Rebuild the grid factory at the current icon size (recreates visible
+    /// cells) and update the +/- buttons' sensitivity.
+    fn apply_icon_size(&self) {
+        let imp = self.imp();
+        if let Some(grid_view) = imp.grid_view.borrow().as_ref() {
+            grid_view.set_factory(Some(&self.build_factory()));
+        }
+        let idx = imp.icon_index.get();
+        imp.icon_smaller.set_sensitive(idx > 0);
+        imp.icon_larger.set_sensitive(idx < ICON_SIZES.len() - 1);
     }
 
     /// Positions currently selected in the grid, ascending.

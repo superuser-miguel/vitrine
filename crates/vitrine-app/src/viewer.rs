@@ -226,8 +226,8 @@ impl VitrineViewer {
         let Some(cache) = self.imp().thumb_cache.borrow().clone() else {
             return;
         };
-        let uri = item.file().uri().to_string();
-        if let Some(texture) = cache.borrow_mut().get(&uri).cloned() {
+        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE);
+        if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             pic.set_paintable(Some(&texture));
             return;
         }
@@ -249,7 +249,7 @@ impl VitrineViewer {
                 return;
             };
             cache.borrow_mut().put(
-                uri,
+                key,
                 texture.clone(),
                 crate::thumbnails::texture_cost(&texture),
             );

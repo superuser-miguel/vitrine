@@ -87,6 +87,23 @@ template $VitrineWindow: Adw.ApplicationWindow {
                 menu-model: primary_menu;
                 primary: true;
               }
+
+              [end]
+              Gtk.Box {
+                styles [
+                  "linked",
+                ]
+
+                Gtk.Button icon_smaller {
+                  icon-name: "zoom-out-symbolic";
+                  tooltip-text: _("Smaller Thumbnails");
+                }
+
+                Gtk.Button icon_larger {
+                  icon-name: "zoom-in-symbolic";
+                  tooltip-text: _("Larger Thumbnails");
+                }
+              }
             }
 
             content: Adw.ToastOverlay toast_overlay {

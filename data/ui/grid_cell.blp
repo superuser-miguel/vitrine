@@ -5,15 +5,15 @@ using Gtk 4.0;
 template $VitrineGridCell: Gtk.Box {
   orientation: vertical;
   spacing: 4;
+  halign: center;
+  valign: start;
   margin-start: 4;
   margin-end: 4;
   margin-top: 4;
   margin-bottom: 4;
 
+  // Size is set from grid_cell.rs per the current icon size (see set_icon_size).
   Gtk.Overlay {
-    height-request: 150;
-    width-request: 150;
-
     Gtk.Picture picture {
       content-fit: contain;
       can-shrink: true;

@@ -49,6 +49,12 @@ pub fn texture_cost(texture: &gdk::Texture) -> u64 {
     texture.width() as u64 * texture.height() as u64 * 4
 }
 
+/// RAM-cache key: URI plus the resolution bucket, so the same image cached at
+/// different icon sizes (e.g. 256 vs 512) doesn't collide.
+pub fn ram_key(uri: &str, target_px: u32) -> String {
+    format!("{uri}#{}", ThumbBucket::for_target(target_px).pixels())
+}
+
 /// The shared freedesktop thumbnail cache (host cache; shared with Nautilus).
 fn shared_dir() -> PathBuf {
     glib::home_dir().join(".cache/thumbnails")
