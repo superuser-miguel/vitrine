@@ -8,6 +8,7 @@
 mod decode;
 mod grid_cell;
 mod image_object;
+mod index;
 mod thumbnails;
 mod viewer;
 mod window;

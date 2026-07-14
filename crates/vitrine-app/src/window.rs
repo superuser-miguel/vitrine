@@ -12,6 +12,7 @@ use gtk::{gio, glib, CompositeTemplate};
 
 use crate::grid_cell::VitrineGridCell;
 use crate::image_object::ImageObject;
+use crate::index::{IndexProgress, Indexer};
 use crate::viewer::VitrineViewer;
 
 /// Gio attributes fetched per child when enumerating a folder.
@@ -57,6 +58,12 @@ mod imp {
         pub icon_smaller: TemplateChild<gtk::Button>,
         #[template_child]
         pub icon_larger: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub index_banner: TemplateChild<adw::Banner>,
+
+        /// Background library indexer (created in `constructed`). Owns the one
+        /// writer `Db`; the UI only enqueues folders and reads progress.
+        pub indexer: RefCell<Option<Indexer>>,
 
         /// Backing model for the grid (one row per image file).
         pub store: gio::ListStore,
@@ -89,6 +96,8 @@ mod imp {
                 toast_overlay: Default::default(),
                 icon_smaller: Default::default(),
                 icon_larger: Default::default(),
+                index_banner: Default::default(),
+                indexer: RefCell::new(None),
                 store: gio::ListStore::new::<ImageObject>(),
                 selection: RefCell::new(None),
                 grid_view: RefCell::new(None),
@@ -125,6 +134,7 @@ mod imp {
             }
             self.obj().setup_grid();
             self.obj().setup_actions();
+            self.obj().setup_indexer();
             self.obj().maybe_cycle();
         }
     }
@@ -512,6 +522,60 @@ impl VitrineWindow {
         ));
     }
 
+    /// Spawn the background indexer and start draining its progress into the
+    /// banner on the main context. The index lives in the app's private data
+    /// dir (per-app under Flatpak), so it never touches the browsed folders.
+    fn setup_indexer(&self) {
+        let db_path = glib::user_data_dir().join("vitrine").join("index.sqlite");
+        let indexer = Indexer::spawn(db_path);
+        let progress = indexer.progress.clone();
+        *self.imp().indexer.borrow_mut() = Some(indexer);
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                while let Ok(msg) = progress.recv().await {
+                    window.on_index_progress(msg);
+                }
+            }
+        ));
+    }
+
+    /// Reflect indexer progress in the banner (a transient status line; browsing
+    /// is unaffected either way).
+    fn on_index_progress(&self, msg: IndexProgress) {
+        let banner = &self.imp().index_banner;
+        match msg {
+            IndexProgress::Started { total } => {
+                if total > 0 {
+                    banner.set_title(&gettextrs::gettext("Indexing library…"));
+                    banner.set_revealed(true);
+                }
+            }
+            IndexProgress::Advanced { done, total } => {
+                banner.set_title(&format!(
+                    "{} ({done} / {total})",
+                    gettextrs::gettext("Indexing library…")
+                ));
+            }
+            IndexProgress::Finished { .. } => {
+                banner.set_revealed(false);
+            }
+        }
+    }
+
+    /// Enqueue a folder for background indexing, if it has a local path. Portal
+    /// document paths are indexed as-is; content-hash keying keeps tags stable
+    /// even as those opaque paths churn across sessions.
+    fn index_folder(&self, folder: &gio::File) {
+        if let Some(path) = folder.path() {
+            if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
+                indexer.request(path);
+            }
+        }
+    }
+
     fn open_folder_dialog(&self) {
         let dialog = gtk::FileDialog::builder()
             .title(gettextrs::gettext("Open Folder"))
@@ -552,6 +616,8 @@ impl VitrineWindow {
 
     /// Enumerate `folder`'s image children asynchronously and populate the grid.
     fn load_folder(&self, folder: gio::File) {
+        // Kick off background indexing in parallel — the grid never waits on it.
+        self.index_folder(&folder);
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = window)]
             self,
