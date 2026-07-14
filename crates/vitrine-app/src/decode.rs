@@ -76,6 +76,38 @@ pub async fn full(file: &gio::File, max_dim: u32) -> Result<gdk::Texture, glycin
     Ok(frame.texture())
 }
 
+/// Everything the background enrichment pass needs from one gated decode:
+/// original dimensions, the raw EXIF blob (parsed by the engine, pure), and a
+/// small frame whose pixels feed the perceptual hash.
+pub struct Probe {
+    pub width: u32,
+    pub height: u32,
+    pub exif: Option<Vec<u8>>,
+    pub frame: gdk::Texture,
+}
+
+/// Decode `file` once for indexing: read its metadata and a `phash_px`-scaled
+/// frame (perceptual hashing only needs a small image). Shares the decode gate
+/// with thumbnailing so background enrichment can't outrun the UI's decodes.
+pub async fn probe(file: &gio::File, phash_px: u32) -> Option<Probe> {
+    let _permit = decode_gate().acquire().await;
+    let image = Loader::new(file.clone()).load().await.ok()?;
+    let details = image.details();
+    let width = details.width();
+    let height = details.height();
+    let exif = details.metadata_exif().and_then(|b| b.get_full().ok());
+    let frame = image
+        .specific_frame(FrameRequest::new().scale(phash_px, phash_px))
+        .await
+        .ok()?;
+    Some(Probe {
+        width,
+        height,
+        exif,
+        frame: frame.texture(),
+    })
+}
+
 /// The MIME types Vitrine treats as browsable images — glycin's advertised set
 /// (includes AVIF, JXL, HEIF). Used to filter folder contents into the grid.
 pub fn is_supported_image(content_type: &str) -> bool {

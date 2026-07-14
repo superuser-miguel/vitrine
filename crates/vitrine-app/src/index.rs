@@ -12,13 +12,24 @@
 //! `Db`; requests and progress cross via `async-channel`, and the UI reads
 //! progress on the GLib main context.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use gtk::gdk;
+use gtk::gio;
 use gtk::glib;
+use gtk::prelude::*;
 
 use vitrine_engine::scanner::Change;
-use vitrine_engine::{classify, walk_images, Db, FileRecord};
+use vitrine_engine::{classify, walk_images, Db, Enrichment, FileRecord};
+
+/// How many un-enriched files the driver pulls per round-trip to the writer.
+const ENRICH_BATCH: i64 = 64;
+/// Frame size (px) requested for perceptual hashing — dHash reduces to 8×8, so a
+/// small decode is ample and keeps the enrichment pass cheap.
+const PHASH_PX: u32 = 64;
 
 /// Progress emitted by the indexer for the UI.
 #[derive(Debug, Clone)]
@@ -31,16 +42,36 @@ pub enum IndexProgress {
     Finished { added: usize },
 }
 
-/// Handle to the background indexer: enqueue folders, receive progress.
+/// Messages to the writer thread (which owns the one `Db`). Identity scans,
+/// enrichment writes, and batch queries all share this FIFO channel — so a
+/// batch's [`Request::Enrich`] writes are guaranteed applied before the next
+/// [`Request::TakeBatch`] query runs, which is what keeps enrichment from
+/// handing the same file out twice (no client-side de-dup needed).
+enum Request {
+    Scan(PathBuf),
+    Enrich {
+        path: String,
+        enrichment: Enrichment,
+    },
+    TakeBatch {
+        reply: async_channel::Sender<Vec<String>>,
+    },
+}
+
+/// Handle to the background indexer: enqueue folders, receive progress, drive
+/// enrichment. Lives on the main thread (not `Send`); the writer thread only
+/// ever sees the `Send` channel ends and the DB path.
 pub struct Indexer {
-    requests: async_channel::Sender<PathBuf>,
+    requests: async_channel::Sender<Request>,
     pub progress: async_channel::Receiver<IndexProgress>,
+    /// Guards against running more than one enrichment driver at a time.
+    enriching: Rc<Cell<bool>>,
 }
 
 impl Indexer {
     /// Spawn the indexer, writing to `db_path` (created if needed).
     pub fn spawn(db_path: PathBuf) -> Indexer {
-        let (req_tx, req_rx) = async_channel::unbounded::<PathBuf>();
+        let (req_tx, req_rx) = async_channel::unbounded::<Request>();
         let (prog_tx, prog_rx) = async_channel::unbounded::<IndexProgress>();
 
         std::thread::Builder::new()
@@ -51,18 +82,35 @@ impl Indexer {
         Indexer {
             requests: req_tx,
             progress: prog_rx,
+            enriching: Rc::new(Cell::new(false)),
         }
     }
 
     /// Enqueue a folder to index (non-blocking; ignored if the worker is gone).
     pub fn request(&self, folder: PathBuf) {
-        let _ = self.requests.try_send(folder);
+        let _ = self.requests.try_send(Request::Scan(folder));
+    }
+
+    /// Start (or, if already running, leave running) the enrichment driver: it
+    /// decodes un-enriched files in the background — dimensions, EXIF, pHash —
+    /// until the queue is empty, then stops. Safe to call after every scan and
+    /// on startup to mop up leftovers from a previous session.
+    pub fn start_enrichment(&self) {
+        if self.enriching.replace(true) {
+            return;
+        }
+        let requests = self.requests.clone();
+        let flag = self.enriching.clone();
+        glib::spawn_future_local(async move {
+            run_enrichment(requests).await;
+            flag.set(false);
+        });
     }
 }
 
 fn worker(
     db_path: PathBuf,
-    requests: async_channel::Receiver<PathBuf>,
+    requests: async_channel::Receiver<Request>,
     progress: async_channel::Sender<IndexProgress>,
 ) {
     if let Some(parent) = db_path.parent() {
@@ -76,13 +124,115 @@ fn worker(
         }
     };
 
-    // Process one folder at a time (single writer). recv_blocking parks the
+    // Single writer: process one request at a time. recv_blocking parks the
     // thread cheaply between requests.
-    while let Ok(folder) = requests.recv_blocking() {
-        if let Err(e) = scan(&db, &folder, &progress) {
-            glib::g_warning!("vitrine", "index scan {}: {e}", folder.display());
+    while let Ok(req) = requests.recv_blocking() {
+        match req {
+            Request::Scan(folder) => {
+                if let Err(e) = scan(&db, &folder, &progress) {
+                    glib::g_warning!("vitrine", "index scan {}: {e}", folder.display());
+                }
+            }
+            Request::Enrich { path, enrichment } => {
+                if let Err(e) = db.set_enrichment(&path, &enrichment) {
+                    glib::g_warning!("vitrine", "enrich {path}: {e}");
+                }
+            }
+            Request::TakeBatch { reply } => {
+                let batch = db
+                    .paths_needing_enrichment(ENRICH_BATCH)
+                    .unwrap_or_default();
+                let _ = reply.try_send(batch);
+            }
         }
     }
+}
+
+/// The enrichment driver (main thread). Pulls a batch of un-enriched paths,
+/// decodes them concurrently (gated by the shared decode limit), sends each
+/// result back to the writer, then repeats until a batch comes back empty.
+async fn run_enrichment(requests: async_channel::Sender<Request>) {
+    loop {
+        let (reply_tx, reply_rx) = async_channel::bounded(1);
+        if requests
+            .send(Request::TakeBatch { reply: reply_tx })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Ok(batch) = reply_rx.recv().await else {
+            return;
+        };
+        if batch.is_empty() {
+            return;
+        }
+
+        // Decode the whole batch concurrently (the decode gate bounds real
+        // parallelism); await all so every Enrich write is enqueued before the
+        // next TakeBatch, keeping the queue monotonic.
+        let mut handles = Vec::with_capacity(batch.len());
+        for path in batch {
+            let requests = requests.clone();
+            handles.push(glib::spawn_future_local(async move {
+                let enrichment = enrich_one(&path).await;
+                let _ = requests.send(Request::Enrich { path, enrichment }).await;
+            }));
+        }
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+}
+
+/// Decode one file and derive its enrichment. A decode failure yields the 0×0
+/// sentinel so the writer still clears `width IS NULL` and the file isn't
+/// retried forever.
+async fn enrich_one(path: &str) -> Enrichment {
+    let file = gio::File::for_path(path);
+    let Some(probe) = crate::decode::probe(&file, PHASH_PX).await else {
+        return Enrichment::default();
+    };
+    let exif = probe
+        .exif
+        .as_deref()
+        .map(vitrine_engine::parse_exif)
+        .unwrap_or_default();
+    let phash = phash_from_texture(&probe.frame);
+    Enrichment {
+        width: probe.width as i64,
+        height: probe.height as i64,
+        phash,
+        date_taken: exif.date_taken,
+        camera: exif.camera,
+        orientation: exif.orientation,
+    }
+}
+
+/// Compute the perceptual hash of a decoded frame by downloading its pixels as
+/// tightly-packed RGB8 (stride removed) and handing them to the engine.
+fn phash_from_texture(texture: &gdk::Texture) -> Option<i64> {
+    let width = texture.width() as usize;
+    let height = texture.height() as usize;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let mut downloader = gdk::TextureDownloader::new(texture);
+    downloader.set_format(gdk::MemoryFormat::R8g8b8);
+    let (bytes, stride) = downloader.download_bytes();
+    let data = bytes.as_ref();
+
+    let row = width * 3;
+    let mut rgb = Vec::with_capacity(row * height);
+    for y in 0..height {
+        let start = y * stride;
+        let end = start + row;
+        if end > data.len() {
+            return None;
+        }
+        rgb.extend_from_slice(&data[start..end]);
+    }
+    vitrine_engine::phash_rgb8(width as u32, height as u32, &rgb)
 }
 
 type ScanResult = Result<(), Box<dyn std::error::Error>>;

@@ -529,6 +529,8 @@ impl VitrineWindow {
         let db_path = glib::user_data_dir().join("vitrine").join("index.sqlite");
         let indexer = Indexer::spawn(db_path);
         let progress = indexer.progress.clone();
+        // Drain any files left un-enriched by a previous session.
+        indexer.start_enrichment();
         *self.imp().indexer.borrow_mut() = Some(indexer);
 
         glib::spawn_future_local(glib::clone!(
@@ -561,6 +563,10 @@ impl VitrineWindow {
             }
             IndexProgress::Finished { .. } => {
                 banner.set_revealed(false);
+                // Identity indexing done — now backfill dimensions/EXIF/pHash.
+                if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
+                    indexer.start_enrichment();
+                }
             }
         }
     }

@@ -28,6 +28,7 @@
 pub mod backup;
 pub mod cache_evict;
 pub mod db;
+pub mod exif;
 pub mod files;
 pub mod hash;
 pub mod lru;
@@ -37,7 +38,8 @@ pub mod schema;
 pub mod thumbnail_cache;
 
 pub use db::Db;
-pub use files::FileRecord;
+pub use exif::{parse_exif, ExifData};
+pub use files::{Enrichment, FileRecord};
 pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
 pub use scanner::{classify, walk_images, Change, ScannedFile};
 
