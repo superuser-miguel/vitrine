@@ -94,9 +94,11 @@ impl VitrineGridCell {
 }
 
 impl VitrineGridCell {
-    /// Bind this cell to `item`: show its name, and its thumbnail from the RAM
-    /// cache or via an async load (disk cache / decode).
-    pub fn bind(&self, item: &ImageObject, cache: &ThumbCache) {
+    /// Bind this cell to `item` and show what we have *synchronously* (no async
+    /// spawn — that's the expensive part during fast scroll). Returns `true` if
+    /// the thumbnail still needs loading, so the caller can queue it and load
+    /// only when scrolling settles.
+    pub fn bind(&self, item: &ImageObject, cache: &ThumbCache) -> bool {
         let imp = self.imp();
         imp.label.set_text(&item.display_name());
         *imp.item.borrow_mut() = Some(item.clone());
@@ -104,16 +106,21 @@ impl VitrineGridCell {
         let key = crate::thumbnails::ram_key(&item.file().uri(), self.load_size());
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             self.show_texture(&texture);
-            return;
+            return false;
         }
         if item.has_failed() {
             self.show_broken();
-            return;
+            return false;
         }
         // Placeholder while loading; keep whatever the recycled cell showed from
         // being mistaken for this item.
         self.show_pending();
-        self.spawn_thumbnail(item.clone(), cache.clone());
+        true
+    }
+
+    /// The item this cell currently displays, if any.
+    pub fn item(&self) -> Option<ImageObject> {
+        self.imp().item.borrow().clone()
     }
 
     /// Unbind on recycle: forget the item so late loads don't paint here.
@@ -122,6 +129,15 @@ impl VitrineGridCell {
         *imp.item.borrow_mut() = None;
         imp.picture.set_paintable(gtk::gdk::Paintable::NONE);
         imp.broken_icon.set_visible(false);
+    }
+
+    /// Start the async thumbnail load for `item` (called by the window when
+    /// scrolling has settled). No-op if the cell has since moved to another item.
+    pub fn load(&self, item: ImageObject, cache: ThumbCache) {
+        if !self.is_showing(&item) {
+            return;
+        }
+        self.spawn_thumbnail(item, cache);
     }
 
     fn spawn_thumbnail(&self, item: ImageObject, cache: ThumbCache) {
@@ -134,6 +150,12 @@ impl VitrineGridCell {
             #[weak(rename_to = cell)]
             self,
             async move {
+                // Throttle; and if this cell scrolled to another image while we
+                // waited for a slot, don't waste a load on it.
+                let _permit = crate::thumbnails::load_gate().acquire().await;
+                if !cell.is_showing(&item) {
+                    return;
+                }
                 match crate::thumbnails::load(file, mtime, load_size, renderer_widget).await {
                     Some(thumb) => {
                         // Insert into the bounded RAM cache (evicts LRU) so it is

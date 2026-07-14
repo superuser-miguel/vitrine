@@ -64,6 +64,11 @@ mod imp {
         pub viewer: RefCell<Option<VitrineViewer>>,
         /// Bounded RAM thumbnail cache, shared by the grid and the filmstrip.
         pub thumb_cache: crate::thumbnails::ThumbCache,
+        /// Cells bound while scrolling that still need a thumbnail load; drained
+        /// when scrolling settles so fast scroll doesn't spawn a load per cell.
+        pub pending: RefCell<Vec<(glib::WeakRef<VitrineGridCell>, ImageObject)>>,
+        /// Debounce timer for flushing `pending` after scrolling stops.
+        pub flush_source: RefCell<Option<glib::SourceId>>,
     }
 
     impl Default for VitrineWindow {
@@ -83,6 +88,8 @@ mod imp {
                 icon_index: std::cell::Cell::new(DEFAULT_ICON),
                 viewer: RefCell::new(None),
                 thumb_cache: crate::thumbnails::new_ram_cache(),
+                pending: RefCell::new(Vec::new()),
+                flush_source: RefCell::new(None),
             }
         }
     }
@@ -229,6 +236,40 @@ impl VitrineWindow {
         ));
     }
 
+    /// (Re)start the debounce that flushes queued thumbnail loads. Every cell
+    /// bind calls this, so during continuous scrolling the timer keeps resetting
+    /// and nothing loads until scrolling pauses — keeping the main loop free.
+    fn schedule_flush(&self) {
+        let imp = self.imp();
+        if let Some(id) = imp.flush_source.borrow_mut().take() {
+            id.remove();
+        }
+        let id = glib::timeout_add_local_once(
+            std::time::Duration::from_millis(90),
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move || {
+                    window.imp().flush_source.replace(None);
+                    window.flush_pending();
+                }
+            ),
+        );
+        imp.flush_source.replace(Some(id));
+    }
+
+    /// Load thumbnails for the cells queued since the last flush that are still
+    /// showing the item they were queued for (scrolled-past cells are skipped).
+    fn flush_pending(&self) {
+        let imp = self.imp();
+        let pending: Vec<_> = imp.pending.borrow_mut().drain(..).collect();
+        for (weak_cell, item) in pending {
+            if let Some(cell) = weak_cell.upgrade() {
+                cell.load(item, imp.thumb_cache.clone());
+            }
+        }
+    }
+
     /// The current thumbnail display size in pixels.
     fn icon_px(&self) -> u32 {
         ICON_SIZES[self.imp().icon_index.get()]
@@ -247,12 +288,25 @@ impl VitrineWindow {
             cell.set_icon_size(icon_px);
             list_item.set_child(Some(&cell));
         });
-        factory.connect_bind(move |_, list_item| {
-            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
-            let cell = list_item.child().and_downcast::<VitrineGridCell>().unwrap();
-            let item = list_item.item().and_downcast::<ImageObject>().unwrap();
-            cell.bind(&item, &cache);
-        });
+        factory.connect_bind(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, list_item| {
+                let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+                let cell = list_item.child().and_downcast::<VitrineGridCell>().unwrap();
+                let item = list_item.item().and_downcast::<ImageObject>().unwrap();
+                // Display synchronously; queue the load (spawned when scrolling
+                // settles) only if the thumbnail isn't already cached.
+                if cell.bind(&item, &cache) {
+                    window
+                        .imp()
+                        .pending
+                        .borrow_mut()
+                        .push((cell.downgrade(), item));
+                    window.schedule_flush();
+                }
+            }
+        ));
         factory.connect_unbind(|_, list_item| {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             if let Some(cell) = list_item.child().and_downcast::<VitrineGridCell>() {

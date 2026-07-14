@@ -19,6 +19,7 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::OnceLock;
 
 use gtk::gdk;
 use gtk::gio;
@@ -61,6 +62,24 @@ pub fn texture_cost(texture: &gdk::Texture) -> u64 {
 /// different icon sizes (e.g. 256 vs 512) doesn't collide.
 pub fn ram_key(uri: &str, target_px: u32) -> String {
     format!("{uri}#{}", ThumbBucket::for_target(target_px).pixels())
+}
+
+/// Admission gate for *all* thumbnail loads (cache reads included, not just
+/// glycin decodes). Fast-scrolling a big folder binds thousands of cells, each
+/// spawning a load; without a bound they flood the main loop (async I/O + PNG
+/// decode) and it stalls. Gating admission — plus each caller re-checking that
+/// its cell still wants the image after the wait — means cells scrolled past
+/// before their turn bail instead of doing work. Override VITRINE_LOAD_LIMIT.
+pub fn load_gate() -> &'static async_lock::Semaphore {
+    static GATE: OnceLock<async_lock::Semaphore> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let limit = std::env::var("VITRINE_LOAD_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(24);
+        async_lock::Semaphore::new(limit)
+    })
 }
 
 /// The shared freedesktop thumbnail cache (host cache; shared with Nautilus).
@@ -147,35 +166,41 @@ async fn read_cache(
     touch: bool,
 ) -> Option<gdk::Texture> {
     let path = dir.join(thumbnail_cache::relative_path(uri, bucket));
-    let file = gio::File::for_path(path);
 
-    let info = file
-        .query_info_future(
-            "time::modified",
-            gio::FileQueryInfoFlags::NONE,
-            glib::Priority::DEFAULT,
-        )
-        .await
-        .ok()?;
-    let cache_mtime = info.attribute_uint64("time::modified") as i64;
-    if !thumbnail_cache::is_current(cache_mtime, source_mtime) {
-        return None;
-    }
-
-    let (bytes, _etag) = file.load_bytes_future().await.ok()?;
-    let texture = gdk::Texture::from_bytes(&bytes).ok()?;
+    // Stat + read + PNG-decode entirely off the main thread — gdk::Texture is
+    // Send, so only the finished texture comes back. This is what keeps the main
+    // loop responsive while scrolling thousands of cached thumbnails.
+    let read_path = path.clone();
+    let (texture, cache_mtime) = gio::spawn_blocking(move || {
+        let meta = std::fs::metadata(&read_path).ok()?;
+        let cache_mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)?;
+        if !thumbnail_cache::is_current(cache_mtime, source_mtime) {
+            return None;
+        }
+        let bytes = std::fs::read(&read_path).ok()?;
+        let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
+        Some((texture, cache_mtime))
+    })
+    .await
+    .ok()
+    .flatten()?;
 
     // Record access for LRU eviction, throttled so scrolling isn't write-heavy.
     if touch {
         let now = now_secs();
         if cache_mtime < now - ACCESS_TOUCH_AFTER {
-            file.set_attribute_uint64(
-                "time::modified",
-                now as u64,
-                gio::FileQueryInfoFlags::NONE,
-                gio::Cancellable::NONE,
-            )
-            .ok();
+            gio::File::for_path(&path)
+                .set_attribute_uint64(
+                    "time::modified",
+                    now as u64,
+                    gio::FileQueryInfoFlags::NONE,
+                    gio::Cancellable::NONE,
+                )
+                .ok();
         }
     }
     Some(texture)
