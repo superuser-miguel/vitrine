@@ -28,6 +28,7 @@
 pub mod cache_evict;
 pub mod db;
 pub mod files;
+pub mod hash;
 pub mod lru;
 pub mod png_meta;
 pub mod scanner;
@@ -36,6 +37,7 @@ pub mod thumbnail_cache;
 
 pub use db::Db;
 pub use files::FileRecord;
+pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
 pub use scanner::{classify, walk_images, Change, ScannedFile};
 
 pub use lru::SizedLru;
