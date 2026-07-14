@@ -1,0 +1,208 @@
+//! The `files` table: one row per indexed image, content-hash keyed so tags
+//! survive renames. This module is the CRUD/query surface the scanner and the
+//! app's ingestion use; it does no I/O beyond SQLite.
+
+use rusqlite::{OptionalExtension, Row};
+
+use crate::db::Db;
+
+/// A row of the `files` table. `id` is `None` before insertion.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FileRecord {
+    pub id: Option<i64>,
+    pub path: String,
+    pub content_hash: String,
+    pub phash: Option<i64>,
+    pub size: i64,
+    pub mtime: i64,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub format: Option<String>,
+    pub date_taken: Option<i64>,
+    pub camera: Option<String>,
+    pub orientation: Option<i64>,
+    pub indexed_at: i64,
+    pub missing: bool,
+}
+
+impl FileRecord {
+    fn from_row(row: &Row) -> rusqlite::Result<FileRecord> {
+        Ok(FileRecord {
+            id: Some(row.get("id")?),
+            path: row.get("path")?,
+            content_hash: row.get("content_hash")?,
+            phash: row.get("phash")?,
+            size: row.get("size")?,
+            mtime: row.get("mtime")?,
+            width: row.get("width")?,
+            height: row.get("height")?,
+            format: row.get("format")?,
+            date_taken: row.get("date_taken")?,
+            camera: row.get("camera")?,
+            orientation: row.get("orientation")?,
+            indexed_at: row.get("indexed_at")?,
+            missing: row.get::<_, i64>("missing")? != 0,
+        })
+    }
+}
+
+const SELECT_COLS: &str = "id, path, content_hash, phash, size, mtime, width, height, \
+     format, date_taken, camera, orientation, indexed_at, missing";
+
+impl Db {
+    /// Insert or replace the row for `record.path` (path is unique). Returns the
+    /// row id. `missing` is cleared and `indexed_at` taken from the record.
+    pub fn upsert_file(&self, record: &FileRecord) -> rusqlite::Result<i64> {
+        self.conn().execute(
+            "INSERT INTO files
+               (path, content_hash, phash, size, mtime, width, height, format,
+                date_taken, camera, orientation, indexed_at, missing)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
+             ON CONFLICT(path) DO UPDATE SET
+               content_hash=excluded.content_hash, phash=excluded.phash,
+               size=excluded.size, mtime=excluded.mtime, width=excluded.width,
+               height=excluded.height, format=excluded.format,
+               date_taken=excluded.date_taken, camera=excluded.camera,
+               orientation=excluded.orientation, indexed_at=excluded.indexed_at,
+               missing=excluded.missing",
+            rusqlite::params![
+                record.path,
+                record.content_hash,
+                record.phash,
+                record.size,
+                record.mtime,
+                record.width,
+                record.height,
+                record.format,
+                record.date_taken,
+                record.camera,
+                record.orientation,
+                record.indexed_at,
+                record.missing as i64,
+            ],
+        )?;
+        // ON CONFLICT means last_insert_rowid may be stale; fetch by path.
+        self.conn().query_row(
+            "SELECT id FROM files WHERE path = ?1",
+            [&record.path],
+            |r| r.get(0),
+        )
+    }
+
+    /// Fetch a file row by exact path.
+    pub fn file_by_path(&self, path: &str) -> rusqlite::Result<Option<FileRecord>> {
+        self.conn()
+            .query_row(
+                &format!("SELECT {SELECT_COLS} FROM files WHERE path = ?1"),
+                [path],
+                FileRecord::from_row,
+            )
+            .optional()
+    }
+
+    /// All file rows with a given content hash (an exact-duplicate set).
+    pub fn files_by_hash(&self, content_hash: &str) -> rusqlite::Result<Vec<FileRecord>> {
+        let mut stmt = self.conn().prepare(&format!(
+            "SELECT {SELECT_COLS} FROM files WHERE content_hash = ?1 ORDER BY path"
+        ))?;
+        let rows = stmt.query_map([content_hash], FileRecord::from_row)?;
+        rows.collect()
+    }
+
+    /// Move an existing row to a new path (a rename/move of the same content),
+    /// clearing `missing`. Returns true if a row was updated.
+    pub fn relink_path(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        mtime: i64,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn().execute(
+            "UPDATE files SET path = ?2, mtime = ?3, missing = 0 WHERE path = ?1",
+            rusqlite::params![old_path, new_path, mtime],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Flag paths as missing (source vanished); kept for hash reconcile/tags.
+    pub fn mark_missing(&self, path: &str) -> rusqlite::Result<()> {
+        self.conn()
+            .execute("UPDATE files SET missing = 1 WHERE path = ?1", [path])?;
+        Ok(())
+    }
+
+    /// Total number of indexed (non-missing) files.
+    pub fn file_count(&self) -> rusqlite::Result<i64> {
+        self.conn()
+            .query_row("SELECT count(*) FROM files WHERE missing = 0", [], |r| {
+                r.get(0)
+            })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rec(path: &str, hash: &str) -> FileRecord {
+        FileRecord {
+            path: path.into(),
+            content_hash: hash.into(),
+            size: 100,
+            mtime: 42,
+            indexed_at: 1,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn upsert_and_fetch() {
+        let db = Db::open_in_memory().unwrap();
+        let id = db.upsert_file(&rec("/a.jpg", "hashA")).unwrap();
+        let got = db.file_by_path("/a.jpg").unwrap().unwrap();
+        assert_eq!(got.id, Some(id));
+        assert_eq!(got.content_hash, "hashA");
+        assert!(db.file_by_path("/missing.jpg").unwrap().is_none());
+    }
+
+    #[test]
+    fn upsert_updates_in_place_by_path() {
+        let db = Db::open_in_memory().unwrap();
+        let id1 = db.upsert_file(&rec("/a.jpg", "hashA")).unwrap();
+        let mut updated = rec("/a.jpg", "hashB");
+        updated.size = 999;
+        let id2 = db.upsert_file(&updated).unwrap();
+        assert_eq!(id1, id2, "same path keeps the same row id");
+        let got = db.file_by_path("/a.jpg").unwrap().unwrap();
+        assert_eq!(got.content_hash, "hashB");
+        assert_eq!(got.size, 999);
+        assert_eq!(db.file_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn files_by_hash_groups_duplicates() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_file(&rec("/a.jpg", "dup")).unwrap();
+        db.upsert_file(&rec("/b.jpg", "dup")).unwrap();
+        db.upsert_file(&rec("/c.jpg", "other")).unwrap();
+        let dups = db.files_by_hash("dup").unwrap();
+        assert_eq!(dups.len(), 2);
+        assert_eq!(dups[0].path, "/a.jpg");
+        assert_eq!(dups[1].path, "/b.jpg");
+    }
+
+    #[test]
+    fn relink_and_missing() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_file(&rec("/old.jpg", "h")).unwrap();
+        db.mark_missing("/old.jpg").unwrap();
+        assert_eq!(db.file_count().unwrap(), 0); // missing excluded
+
+        assert!(db.relink_path("/old.jpg", "/new.jpg", 55).unwrap());
+        assert!(db.file_by_path("/old.jpg").unwrap().is_none());
+        let moved = db.file_by_path("/new.jpg").unwrap().unwrap();
+        assert!(!moved.missing);
+        assert_eq!(moved.mtime, 55);
+        assert_eq!(db.file_count().unwrap(), 1);
+    }
+}
