@@ -16,7 +16,9 @@
 //! *write* to the app-private cache — never polluting the shared cache with keys
 //! the host can't reproduce.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gtk::gdk;
 use gtk::gio;
@@ -26,8 +28,26 @@ use gtk::gsk;
 use gtk::prelude::*;
 
 use vitrine_engine::thumbnail_cache::{self, ThumbBucket};
+use vitrine_engine::SizedLru;
 
-use crate::image_object::ImageObject;
+/// Budget for the in-RAM thumbnail cache (~1500 × 256px textures). This is the
+/// bound that keeps memory flat regardless of folder size: items no longer hold
+/// their textures, so browsing a 27k-image folder can't accumulate GBs (→ OOM).
+const RAM_CACHE_BYTES: u64 = 384 * 1024 * 1024;
+
+/// Size-bounded, LRU RAM cache of decoded thumbnails, keyed by file URI. Shared
+/// (single-threaded, `Rc`) between the grid and the viewer's filmstrip.
+pub type ThumbCache = Rc<RefCell<SizedLru<String, gdk::Texture>>>;
+
+/// Create the shared RAM thumbnail cache.
+pub fn new_ram_cache() -> ThumbCache {
+    Rc::new(RefCell::new(SizedLru::new(RAM_CACHE_BYTES)))
+}
+
+/// A texture's approximate cost in bytes (RGBA).
+pub fn texture_cost(texture: &gdk::Texture) -> u64 {
+    texture.width() as u64 * texture.height() as u64 * 4
+}
 
 /// The shared freedesktop thumbnail cache (host cache; shared with Nautilus).
 fn shared_dir() -> PathBuf {
@@ -171,25 +191,6 @@ async fn store(
             )
             .await;
     }
-}
-
-/// Ensure `item` has a thumbnail, loading/decoding once and caching it on the
-/// item's `texture` property so property bindings update every view showing it.
-/// A no-op if a thumbnail already exists, a load failed, or one is in flight.
-pub fn ensure_thumbnail(widget: &impl IsA<gtk::Widget>, item: &ImageObject, target_px: u32) {
-    if item.texture().is_some() || item.has_failed() || !item.begin_load() {
-        return;
-    }
-    let renderer_widget = renderer_source(widget);
-    let file = item.file();
-    let mtime = item.mtime();
-    let item = item.clone();
-    glib::spawn_future_local(async move {
-        match load(file, mtime, target_px, renderer_widget).await {
-            Some(texture) => item.set_texture(Some(texture)),
-            None => item.mark_failed(),
-        }
-    });
 }
 
 /// Downscale `texture` so its longest edge is at most `max` px, preserving

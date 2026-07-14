@@ -13,6 +13,7 @@ use gtk::subclass::prelude::*;
 use gtk::CompositeTemplate;
 
 use crate::image_object::ImageObject;
+use crate::thumbnails::ThumbCache;
 
 /// Thumbnail decode resolution (fits within THUMB_SIZE×THUMB_SIZE).
 pub const THUMB_SIZE: u32 = 256;
@@ -67,14 +68,15 @@ impl Default for VitrineGridCell {
 }
 
 impl VitrineGridCell {
-    /// Bind this cell to `item`: show its name, and its thumbnail from cache or
-    /// via an async decode.
-    pub fn bind(&self, item: &ImageObject) {
+    /// Bind this cell to `item`: show its name, and its thumbnail from the RAM
+    /// cache or via an async load (disk cache / decode).
+    pub fn bind(&self, item: &ImageObject, cache: &ThumbCache) {
         let imp = self.imp();
         imp.label.set_text(&item.display_name());
         *imp.item.borrow_mut() = Some(item.clone());
 
-        if let Some(texture) = item.texture() {
+        let uri = item.file().uri().to_string();
+        if let Some(texture) = cache.borrow_mut().get(&uri).cloned() {
             self.show_texture(&texture);
             return;
         }
@@ -82,16 +84,13 @@ impl VitrineGridCell {
             self.show_broken();
             return;
         }
-        // Placeholder while decoding; keep whatever the recycled cell showed
-        // from being mistaken for this item.
+        // Placeholder while loading; keep whatever the recycled cell showed from
+        // being mistaken for this item.
         self.show_pending();
-
-        if item.begin_load() {
-            self.spawn_thumbnail(item.clone());
-        }
+        self.spawn_thumbnail(item.clone(), cache.clone());
     }
 
-    /// Unbind on recycle: forget the item so late decodes don't paint here.
+    /// Unbind on recycle: forget the item so late loads don't paint here.
     pub fn unbind(&self) {
         let imp = self.imp();
         *imp.item.borrow_mut() = None;
@@ -99,8 +98,9 @@ impl VitrineGridCell {
         imp.broken_icon.set_visible(false);
     }
 
-    fn spawn_thumbnail(&self, item: ImageObject) {
+    fn spawn_thumbnail(&self, item: ImageObject, cache: ThumbCache) {
         let file = item.file();
+        let uri = file.uri().to_string();
         let mtime = item.mtime();
         let renderer_widget = crate::thumbnails::renderer_source(self);
         glib::spawn_future_local(glib::clone!(
@@ -109,8 +109,13 @@ impl VitrineGridCell {
             async move {
                 match crate::thumbnails::load(file, mtime, THUMB_SIZE, renderer_widget).await {
                     Some(thumb) => {
-                        // Cache on the item so re-scroll is instant.
-                        item.set_texture(Some(thumb.clone()));
+                        // Insert into the bounded RAM cache (evicts LRU) so it is
+                        // not held forever per item.
+                        cache.borrow_mut().put(
+                            uri,
+                            thumb.clone(),
+                            crate::thumbnails::texture_cost(&thumb),
+                        );
                         if cell.is_showing(&item) {
                             cell.show_texture(&thumb);
                         }

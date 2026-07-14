@@ -1,17 +1,16 @@
 //! `ImageObject` — the grid/filmstrip model item.
 //!
-//! A lightweight GObject wrapping one `gio::File`. Construction is cheap (no
-//! decode); the thumbnail `texture` property is filled asynchronously when a
-//! cell for this item is bound and scrolled into view. Because the same
-//! `ImageObject` instance is reused for the item's lifetime, a thumbnail decoded
-//! once survives cell recycling and re-scrolling.
+//! A lightweight GObject wrapping one `gio::File` plus its mtime. It deliberately
+//! does **not** hold the decoded thumbnail: with tens of thousands of items in a
+//! folder, caching a texture per item is an unbounded leak (→ OOM on large
+//! libraries). Thumbnails live in a size-bounded RAM cache
+//! ([`crate::thumbnails::ThumbCache`]) keyed by URI instead; items only remember
+//! whether a decode failed, so a broken file isn't retried forever.
 
 use std::cell::{Cell, RefCell};
 
-use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
-use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
 mod imp {
@@ -23,11 +22,8 @@ mod imp {
         pub display_name: RefCell<String>,
         /// Source mtime (unix seconds), for validating cached thumbnails.
         pub mtime: Cell<i64>,
-        pub texture: RefCell<Option<gdk::Texture>>,
-        /// True once a thumbnail load has started, so binds don't re-issue it.
-        pub load_started: RefCell<bool>,
         /// True if decoding failed — the cell shows a broken-image placeholder.
-        pub failed: RefCell<bool>,
+        pub failed: Cell<bool>,
     }
 
     #[glib::object_subclass]
@@ -36,37 +32,7 @@ mod imp {
         type Type = super::ImageObject;
     }
 
-    impl ObjectImpl for ImageObject {
-        fn properties() -> &'static [glib::ParamSpec] {
-            use std::sync::OnceLock;
-            static PROPERTIES: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
-            PROPERTIES.get_or_init(|| {
-                vec![
-                    glib::ParamSpecString::builder("display-name")
-                        .read_only()
-                        .build(),
-                    glib::ParamSpecObject::builder::<gdk::Texture>("texture").build(),
-                ]
-            })
-        }
-
-        fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
-            match pspec.name() {
-                "display-name" => self.display_name.borrow().to_value(),
-                "texture" => self.texture.borrow().to_value(),
-                _ => unimplemented!(),
-            }
-        }
-
-        fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
-            match pspec.name() {
-                "texture" => {
-                    *self.texture.borrow_mut() = value.get().ok().flatten();
-                }
-                _ => unimplemented!(),
-            }
-        }
-    }
+    impl ObjectImpl for ImageObject {}
 }
 
 glib::wrapper! {
@@ -99,31 +65,11 @@ impl ImageObject {
         self.imp().mtime.get()
     }
 
-    pub fn texture(&self) -> Option<gdk::Texture> {
-        self.imp().texture.borrow().clone()
-    }
-
-    pub fn set_texture(&self, texture: Option<gdk::Texture>) {
-        self.set_property("texture", texture);
-    }
-
-    /// Returns true and marks the load started if it had not started yet — used
-    /// by the cell bind to issue the thumbnail decode exactly once per item.
-    pub fn begin_load(&self) -> bool {
-        let mut started = self.imp().load_started.borrow_mut();
-        if *started {
-            false
-        } else {
-            *started = true;
-            true
-        }
-    }
-
     pub fn mark_failed(&self) {
-        *self.imp().failed.borrow_mut() = true;
+        self.imp().failed.set(true);
     }
 
     pub fn has_failed(&self) -> bool {
-        *self.imp().failed.borrow()
+        self.imp().failed.get()
     }
 }

@@ -22,7 +22,7 @@ mod imp {
     use super::*;
     use std::cell::RefCell;
 
-    #[derive(Debug, CompositeTemplate)]
+    #[derive(CompositeTemplate)]
     #[template(resource = "/io/github/superuser_miguel/Vitrine/window.ui")]
     pub struct VitrineWindow {
         #[template_child]
@@ -44,6 +44,8 @@ mod imp {
         pub selection: RefCell<Option<gtk::MultiSelection>>,
         /// The viewer page, created lazily on first activation.
         pub viewer: RefCell<Option<VitrineViewer>>,
+        /// Bounded RAM thumbnail cache, shared by the grid and the filmstrip.
+        pub thumb_cache: crate::thumbnails::ThumbCache,
     }
 
     impl Default for VitrineWindow {
@@ -58,6 +60,7 @@ mod imp {
                 store: gio::ListStore::new::<ImageObject>(),
                 selection: RefCell::new(None),
                 viewer: RefCell::new(None),
+                thumb_cache: crate::thumbnails::new_ram_cache(),
             }
         }
     }
@@ -120,7 +123,8 @@ impl VitrineWindow {
             let cell = VitrineGridCell::default();
             list_item.set_child(Some(&cell));
         });
-        factory.connect_bind(|_, list_item| {
+        let cache = imp.thumb_cache.clone();
+        factory.connect_bind(move |_, list_item| {
             let list_item = list_item
                 .downcast_ref::<gtk::ListItem>()
                 .expect("factory item is a ListItem");
@@ -132,7 +136,7 @@ impl VitrineWindow {
                 .item()
                 .and_downcast::<ImageObject>()
                 .expect("model holds ImageObjects");
-            cell.bind(&item);
+            cell.bind(&item, &cache);
         });
         factory.connect_unbind(|_, list_item| {
             let list_item = list_item
@@ -260,7 +264,7 @@ impl VitrineWindow {
             .borrow_mut()
             .get_or_insert_with(VitrineViewer::new)
             .clone();
-        viewer.open(imp.store.clone(), position);
+        viewer.open(imp.store.clone(), position, imp.thumb_cache.clone());
         if imp.nav_view.find_page("viewer").is_none() {
             imp.nav_view.push(&viewer);
         } else {
@@ -352,6 +356,42 @@ impl VitrineWindow {
             }
         }
         self.maybe_screenshot();
+        self.maybe_scrolltest();
+    }
+
+    /// Dev aid: if `VITRINE_SCROLLTEST` is set, fast-scroll the grid top→bottom
+    /// (churning thousands of cells) then quit — for verifying bounded memory.
+    fn maybe_scrolltest(&self) {
+        if std::env::var_os("VITRINE_SCROLLTEST").is_none() {
+            return;
+        }
+        let step = std::rc::Rc::new(std::cell::Cell::new(0u32));
+        let scroller = self.imp().grid_scroller.clone();
+        glib::timeout_add_local(
+            std::time::Duration::from_millis(15),
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    let adj = scroller.vadjustment();
+                    let s = step.get();
+                    step.set(s + 1);
+                    let span = (adj.upper() - adj.page_size() - adj.lower()).max(0.0);
+                    let frac = (s as f64 / 600.0).min(1.0);
+                    adj.set_value(adj.lower() + frac * span);
+                    if s >= 600 {
+                        if let Some(app) = window.application() {
+                            app.quit();
+                        }
+                        glib::ControlFlow::Break
+                    } else {
+                        glib::ControlFlow::Continue
+                    }
+                }
+            ),
+        );
     }
 
     /// Dev aid: if `VITRINE_SHOT=/path.png` is set, snapshot the window (after a

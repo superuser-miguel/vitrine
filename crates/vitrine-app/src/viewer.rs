@@ -62,7 +62,10 @@ mod imp {
         pub zoom: Cell<Option<f64>>,
         /// Natural pixel size of the currently displayed texture.
         pub natural: Cell<(i32, i32)>,
+        /// Viewer-resolution texture cache (large images).
         pub cache: TextureCache,
+        /// Shared RAM thumbnail cache (for the filmstrip); set on `open`.
+        pub thumb_cache: RefCell<Option<crate::thumbnails::ThumbCache>>,
         /// Guards the filmstrip-selection ↔ show-position feedback loop.
         pub syncing: Cell<bool>,
     }
@@ -83,6 +86,7 @@ mod imp {
                 zoom: Cell::new(None),
                 natural: Cell::new((0, 0)),
                 cache: Rc::new(RefCell::new(SizedLru::new(CACHE_BYTES))),
+                thumb_cache: RefCell::new(None),
                 syncing: Cell::new(false),
             }
         }
@@ -134,9 +138,16 @@ impl VitrineViewer {
     }
 
     /// Show `store`'s image at `position`, (re)pointing the filmstrip at it.
-    pub fn open(&self, store: gio::ListStore, position: u32) {
+    /// `thumb_cache` is the window's shared RAM thumbnail cache.
+    pub fn open(
+        &self,
+        store: gio::ListStore,
+        position: u32,
+        thumb_cache: crate::thumbnails::ThumbCache,
+    ) {
         let imp = self.imp();
         *imp.store.borrow_mut() = Some(store.clone());
+        *imp.thumb_cache.borrow_mut() = Some(thumb_cache);
         if let Some(filmstrip) = imp.filmstrip.borrow().as_ref() {
             filmstrip.set_model(Some(&store));
         }
@@ -158,24 +169,20 @@ impl VitrineViewer {
                 .build();
             list_item.set_child(Some(&pic));
         });
-        factory.connect_bind(|_, list_item| {
-            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
-            let pic = list_item.child().and_downcast::<gtk::Picture>().unwrap();
-            let item = list_item.item().and_downcast::<ImageObject>().unwrap();
-            // Reactive: any view that decodes this item updates the filmstrip.
-            let binding = item
-                .bind_property("texture", &pic, "paintable")
-                .sync_create()
-                .build();
-            unsafe { list_item.set_data("tex-binding", binding) };
-            crate::thumbnails::ensure_thumbnail(&pic, &item, THUMB_SIZE);
-        });
+        factory.connect_bind(glib::clone!(
+            #[weak(rename_to = viewer)]
+            self,
+            move |_, list_item| {
+                let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+                let pic = list_item.child().and_downcast::<gtk::Picture>().unwrap();
+                let item = list_item.item().and_downcast::<ImageObject>().unwrap();
+                viewer.bind_filmstrip_cell(list_item, &pic, &item);
+            }
+        ));
         factory.connect_unbind(|_, list_item| {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
-            unsafe {
-                if let Some(binding) = list_item.steal_data::<glib::Binding>("tex-binding") {
-                    binding.unbind();
-                }
+            if let Some(pic) = list_item.child().and_downcast::<gtk::Picture>() {
+                pic.set_paintable(gtk::gdk::Paintable::NONE);
             }
         });
 
@@ -206,6 +213,55 @@ impl VitrineViewer {
         imp.filmstrip_scroller.set_child(Some(&list_view));
         *imp.filmstrip.borrow_mut() = Some(selection);
         *imp.filmstrip_view.borrow_mut() = Some(list_view);
+    }
+
+    /// Fill one filmstrip cell from the shared RAM cache, or load it, guarding
+    /// against the list item being recycled to a different image mid-load.
+    fn bind_filmstrip_cell(
+        &self,
+        list_item: &gtk::ListItem,
+        pic: &gtk::Picture,
+        item: &ImageObject,
+    ) {
+        let Some(cache) = self.imp().thumb_cache.borrow().clone() else {
+            return;
+        };
+        let uri = item.file().uri().to_string();
+        if let Some(texture) = cache.borrow_mut().get(&uri).cloned() {
+            pic.set_paintable(Some(&texture));
+            return;
+        }
+        pic.set_paintable(gtk::gdk::Paintable::NONE);
+        if item.has_failed() {
+            return;
+        }
+
+        let renderer_widget = crate::thumbnails::renderer_source(pic);
+        let file = item.file();
+        let mtime = item.mtime();
+        let item = item.clone();
+        let list_item = list_item.downgrade();
+        glib::spawn_future_local(async move {
+            let Some(texture) =
+                crate::thumbnails::load(file, mtime, THUMB_SIZE, renderer_widget).await
+            else {
+                item.mark_failed();
+                return;
+            };
+            cache.borrow_mut().put(
+                uri,
+                texture.clone(),
+                crate::thumbnails::texture_cost(&texture),
+            );
+            if let Some(list_item) = list_item.upgrade() {
+                let still = list_item.item().and_downcast::<ImageObject>();
+                if still.as_ref() == Some(&item) {
+                    if let Some(pic) = list_item.child().and_downcast::<gtk::Picture>() {
+                        pic.set_paintable(Some(&texture));
+                    }
+                }
+            }
+        });
     }
 
     fn setup_controls(&self) {
