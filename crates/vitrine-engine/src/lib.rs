@@ -26,8 +26,10 @@
 //!   testable without GTK.
 
 pub mod lru;
+pub mod thumbnail_cache;
 
 pub use lru::SizedLru;
+pub use thumbnail_cache::{cache_key, relative_path, ThumbBucket};
 
 /// Crate version, surfaced by the app's About dialog to prove the app↔engine
 /// wiring end-to-end in Phase 0.

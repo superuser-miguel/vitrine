@@ -12,3 +12,4 @@ authors.workspace = true
 # ashpd here, ever. Enforced by build-aux/checks.sh and CI. This crate deals
 # only in plain paths, byte streams, SQLite rows, and data types.
 [dependencies]
+md-5 = "0.11.0"
