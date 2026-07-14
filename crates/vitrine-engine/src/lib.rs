@@ -30,11 +30,13 @@ pub mod db;
 pub mod files;
 pub mod lru;
 pub mod png_meta;
+pub mod scanner;
 pub mod schema;
 pub mod thumbnail_cache;
 
 pub use db::Db;
 pub use files::FileRecord;
+pub use scanner::{classify, walk_images, Change, ScannedFile};
 
 pub use lru::SizedLru;
 pub use thumbnail_cache::{cache_key, relative_path, ThumbBucket};
