@@ -13,3 +13,4 @@ authors.workspace = true
 # only in plain paths, byte streams, SQLite rows, and data types.
 [dependencies]
 md-5 = "0.11.0"
+rusqlite = { version = "0.37", features = ["bundled"] }

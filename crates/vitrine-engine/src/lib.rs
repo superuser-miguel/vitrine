@@ -26,9 +26,13 @@
 //!   testable without GTK.
 
 pub mod cache_evict;
+pub mod db;
 pub mod lru;
 pub mod png_meta;
+pub mod schema;
 pub mod thumbnail_cache;
+
+pub use db::Db;
 
 pub use lru::SizedLru;
 pub use thumbnail_cache::{cache_key, relative_path, ThumbBucket};

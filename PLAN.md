@@ -436,3 +436,129 @@ Embedded metadata write via rexiv2 (activates `sync_state`); sidecar-only mode; 
 path-based tag rules (activates `source='rule'`); Lua/Rhai scripting tier; batch
 rename/convert/rotate; "find similar" UI over the already-indexed pHash; WASM plugin tier
 with Flatpak `add-extension`; editing tools; device import; slideshow.
+
+---
+
+## 10. v2+ feature drafts (design intent — refine before building)
+
+> Cleaned-up brainstorming for the §9 deferred items. Some of this restates work
+> already scheduled for v1 (dedup = Phase 4, collections = Phase 3, BLAKE3 =
+> §5/Phase 2) — flagged inline. Treat as intent, not committed scope.
+
+### 10.1 Duplicate finder — fuller spec
+
+Core dedup already ships in **v1 Phase 4**; this is the expanded spec.
+
+**Goal:** better than gThumb's — fast, accurate, visual, non-destructive.
+
+**Core (engine, `vitrine-engine::dedup`, zero GTK):**
+- **Exact:** group by `content_hash` (BLAKE3).
+- **Near:** perceptual hash (`image_hasher`) + Hamming distance (configurable, default ≤ 8 bits).
+- Clustering via union-find (connected components).
+- Operate purely on DB rows (linear scan is fine at personal scale; optional BK-tree later).
+
+**Inputs:**
+- Scope: current folder, collection, or entire library.
+- Filters: min size, date range, file types.
+
+**Outputs (to app):**
+- Clusters, each with a representative (largest / oldest / best quality) and its files + metadata (size, date, path, preview hash).
+- Actions: keep one (auto or manual), trash the rest via `gio::File::trash`.
+
+**UI (app layer):**
+- Dedicated page/dialog with a cluster list (thumbnails side-by-side).
+- Bulk actions: "keep largest", "keep newest", "keep manual".
+- Preview: reuse the viewer for side-by-side compare.
+
+**Perf & safety:** incremental (only scan new/changed files); progress banner; dry-run mode.
+
+**Forward (v2+):** WASM plugin for custom similarity metrics (e.g. AI embeddings).
+
+### 10.2 Catalogs / Collections — integration outline
+
+This is **v1 Phase 3** (schema in §5); kept here as the fuller outline. Unified
+"Collections" (smart + catalog) in the sidebar, SQLite as source of truth.
+
+- **Schema (`schema.rs`):** `collections` (`id`, `name`, `kind` `smart`|`catalog`, `query` JSON for smart); `collection_items` (catalogs, ordered by `position`).
+- **Engine API (`query.rs` + `collections.rs`):**
+  - Smart: JSON predicate → SQL (tags any/all, rating ≥, date range, EXIF).
+  - Catalog: manual add / remove / reorder (DnD in UI).
+  - Live counts + change signals.
+- **Scanner integration:** on file change/move, smart-collection memberships update automatically.
+- **App layer (`sidebar.rs`):** one unified list — smart (predicate builder) + catalogs; drag-from-grid to catalog; "Add to Collection" context menu.
+- **Persistence:** backup/export includes collections (JSON keyed by `content_hash`).
+
+**Acceptance:**
+- Rename a tagged file → survives in the catalog / smart collection.
+- Smart collections update live when tags/ratings change.
+
+### 10.3 Scripting tier — Lua/Rhai (ImageMagick investigation)
+
+ImageMagick ships Lua support (the `magick` Lua module): full access to its
+processing (resize, convert, effects, composites, format conversion, metadata),
+run via `magick -script script.lua` or embedded; hot-reload friendly.
+
+**Fit for Vitrine:**
+- *Pros:* powerful for batch/editing rules; mature; callable via subprocess (safe).
+- *Cons:* heavy if embedded (C API); Vitrine prefers pure Lua/Rhai in-process for rules + WASM for heavy compute.
+- **Recommendation:** `rhai` or `mlua` for lightweight rules / renames / predicates; offload heavy ImageMagick-style ops to a WASM plugin (or an optional Lua + ImageMagick subprocess extension). Strong case for Lua in v2 — familiar to users from ImageMagick workflows.
+
+### 10.4 BLAKE3 hashing — implementation notes
+
+This is **v1** (`hash.rs`, §5/Phase 2); notes for reference. Extremely fast
+(SIMD), cryptographic, parallelizable, content-based identity that survives
+renames. Crate: `blake3` (official, maintained, `no_std`-friendly).
+
+```rust
+// crates/vitrine-engine/src/hash.rs
+pub fn compute_blake3(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string() // 64-char hex
+}
+
+// Streaming / large files (memory-efficient)
+pub fn blake3_from_reader<R: std::io::Read>(mut reader: R) -> std::io::Result<String> {
+    let mut hasher = blake3::Hasher::new();
+    std::io::copy(&mut reader, &mut hasher)?;
+    Ok(hasher.finalize().to_hex().to_string())
+}
+```
+
+- **Ingestion (one pass with the glycin decode):** raw bytes → BLAKE3; downscaled thumbnail pixels → `image_hasher`; store both (`content_hash` + `phash`) in `files`.
+- **Perf:** rayon-parallelizable for batch ingestion; handles multi-GB libraries.
+- **Testing:** fixtures (exact match, rename survival).
+
+### 10.5 WASM plugin tier (v2/v3)
+
+**Architecture:**
+- Tier: **compute plugins only** (no UI injection).
+- Runtime: `wasmtime` (mature, secure, Rust-native) or Extism (higher-level, marketplace-friendly).
+- Distribution: separate Flatpaks via an `add-extension` point (same mechanism glycin loaders use).
+
+**Plugin contract (declarative params + compute):**
+
+```rust
+// Host declares the schema
+struct PluginManifest {
+    name: String,
+    version: String,
+    parameters: Vec<Param>, // float slider, enum, color, …
+    entrypoint: String,     // e.g. "process_image"
+}
+
+// Plugin (WASM) receives
+struct PluginInput {
+    image_data: Vec<u8>, // or a temp-file path
+    params: serde_json::Value,
+}
+
+// …and returns
+struct PluginOutput {
+    result: Vec<u8>,                           // processed image or JSON
+    metadata_delta: Option<serde_json::Value>,
+}
+```
+
+- **Host responsibilities:** render UI controls from the manifest (sliders, etc.); sandbox execution (memory/time limits); run the plugin in a worker/isolated context; apply results (image edits or DB tag updates).
+- **Use cases (prioritized):** custom duplicate-similarity metrics; advanced filters/effects; batch converters/watermarking; AI-based tagging (future).
+- **Implementation (v2):** add `wasmtime` + `serde` to the engine (optional feature); define safe host functions (`host_log`, `host_decode_image`); plugin manager in the app (load from the extension point); strict capabilities (no filesystem access unless granted).
+- **Complementary Lua tier:** `mlua`/`rhai` for rules, rename patterns, smart-collection predicates — hot-reloadable, embedded.
