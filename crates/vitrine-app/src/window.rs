@@ -35,6 +35,8 @@ mod imp {
         pub places_list: TemplateChild<gtk::ListBox>,
         #[template_child]
         pub nav_view: TemplateChild<adw::NavigationView>,
+        #[template_child]
+        pub toast_overlay: TemplateChild<adw::ToastOverlay>,
 
         /// Backing model for the grid (one row per image file).
         pub store: gio::ListStore,
@@ -52,6 +54,7 @@ mod imp {
                 open_button: Default::default(),
                 places_list: Default::default(),
                 nav_view: Default::default(),
+                toast_overlay: Default::default(),
                 store: gio::ListStore::new::<ImageObject>(),
                 selection: RefCell::new(None),
                 viewer: RefCell::new(None),
@@ -153,8 +156,97 @@ impl VitrineWindow {
             move |_, position| window.open_viewer(position)
         ));
 
+        // Delete trashes the selection; Space quick-previews the first selected.
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, key, _, _| match key {
+                gtk::gdk::Key::Delete => {
+                    window.trash_selected();
+                    glib::Propagation::Stop
+                }
+                gtk::gdk::Key::space | gtk::gdk::Key::KP_Space => {
+                    window.preview_selected();
+                    glib::Propagation::Stop
+                }
+                _ => glib::Propagation::Proceed,
+            }
+        ));
+        grid_view.add_controller(keys);
+
         imp.grid_scroller.set_child(Some(&grid_view));
         *imp.selection.borrow_mut() = Some(selection);
+    }
+
+    /// Positions currently selected in the grid, ascending.
+    fn selected_positions(&self) -> Vec<u32> {
+        let Some(selection) = self.imp().selection.borrow().clone() else {
+            return Vec::new();
+        };
+        let n = self.imp().store.n_items();
+        (0..n).filter(|&pos| selection.is_selected(pos)).collect()
+    }
+
+    /// Space: quick-preview the first selected image in the viewer.
+    fn preview_selected(&self) {
+        if let Some(&pos) = self.selected_positions().first() {
+            self.open_viewer(pos);
+        }
+    }
+
+    /// Delete: move the selected images to the trash (reversible — never unlink),
+    /// dropping each from the grid as it is trashed.
+    fn trash_selected(&self) {
+        let items: Vec<ImageObject> = self
+            .selected_positions()
+            .into_iter()
+            .filter_map(|pos| self.imp().store.item(pos).and_downcast::<ImageObject>())
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+        let total = items.len();
+        for item in items {
+            let file = item.file();
+            file.trash_async(
+                glib::Priority::DEFAULT,
+                gio::Cancellable::NONE,
+                glib::clone!(
+                    #[weak(rename_to = window)]
+                    self,
+                    #[strong]
+                    item,
+                    move |result| match result {
+                        Ok(()) => window.remove_item(&item),
+                        Err(err) => window.toast(&format!(
+                            "Couldn’t move to trash: {}",
+                            err.message()
+                        )),
+                    }
+                ),
+            );
+        }
+        self.toast(&match total {
+            1 => "Moved 1 image to Trash".to_string(),
+            n => format!("Moved {n} images to Trash"),
+        });
+    }
+
+    fn remove_item(&self, item: &ImageObject) {
+        let imp = self.imp();
+        if let Some(pos) = imp.store.find(item) {
+            imp.store.remove(pos);
+        }
+        if imp.store.n_items() == 0 {
+            imp.content_stack.set_visible_child_name("empty");
+        }
+    }
+
+    fn toast(&self, message: &str) {
+        self.imp().toast_overlay.add_toast(adw::Toast::new(message));
     }
 
     /// Push the viewer page showing the image at `position`.

@@ -89,25 +89,27 @@ template $VitrineWindow: Adw.ApplicationWindow {
               }
             }
 
-            content: Gtk.Stack content_stack {
-              Gtk.StackPage {
-                name: "empty";
+            content: Adw.ToastOverlay toast_overlay {
+              child: Gtk.Stack content_stack {
+                Gtk.StackPage {
+                  name: "empty";
 
-                child: Adw.StatusPage {
-                  icon-name: "image-x-generic-symbolic";
-                  title: _("No Folder Open");
-                  description: _("Open a folder of images to start browsing.");
-                };
-              }
+                  child: Adw.StatusPage {
+                    icon-name: "image-x-generic-symbolic";
+                    title: _("No Folder Open");
+                    description: _("Open a folder of images to start browsing.");
+                  };
+                }
 
-              Gtk.StackPage {
-                name: "grid";
+                Gtk.StackPage {
+                  name: "grid";
 
-                child: Gtk.ScrolledWindow grid_scroller {
-                  hexpand: true;
-                  vexpand: true;
-                };
-              }
+                  child: Gtk.ScrolledWindow grid_scroller {
+                    hexpand: true;
+                    vexpand: true;
+                  };
+                }
+              };
             };
           };
         }
