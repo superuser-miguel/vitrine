@@ -6,7 +6,7 @@
 //! `ImageObject` instance is reused for the item's lifetime, a thumbnail decoded
 //! once survives cell recycling and re-scrolling.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use gtk::gdk;
 use gtk::gio;
@@ -21,6 +21,8 @@ mod imp {
     pub struct ImageObject {
         pub file: RefCell<Option<gio::File>>,
         pub display_name: RefCell<String>,
+        /// Source mtime (unix seconds), for validating cached thumbnails.
+        pub mtime: Cell<i64>,
         pub texture: RefCell<Option<gdk::Texture>>,
         /// True once a thumbnail load has started, so binds don't re-issue it.
         pub load_started: RefCell<bool>,
@@ -72,11 +74,12 @@ glib::wrapper! {
 }
 
 impl ImageObject {
-    pub fn new(file: gio::File, display_name: &str) -> Self {
+    pub fn new(file: gio::File, display_name: &str, mtime: i64) -> Self {
         let obj: Self = glib::Object::new();
         let imp = obj.imp();
         *imp.file.borrow_mut() = Some(file);
         *imp.display_name.borrow_mut() = display_name.to_string();
+        imp.mtime.set(mtime);
         obj
     }
 
@@ -90,6 +93,10 @@ impl ImageObject {
 
     pub fn display_name(&self) -> String {
         self.imp().display_name.borrow().clone()
+    }
+
+    pub fn mtime(&self) -> i64 {
+        self.imp().mtime.get()
     }
 
     pub fn texture(&self) -> Option<gdk::Texture> {

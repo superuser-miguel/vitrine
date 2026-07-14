@@ -16,7 +16,7 @@ use crate::viewer::VitrineViewer;
 
 /// Gio attributes fetched per child when enumerating a folder.
 const ENUMERATE_ATTRS: &str =
-    "standard::name,standard::display-name,standard::content-type,standard::type";
+    "standard::name,standard::display-name,standard::content-type,standard::type,time::modified";
 
 mod imp {
     use super::*;
@@ -145,7 +145,12 @@ impl VitrineWindow {
 
         let selection = gtk::MultiSelection::new(Some(imp.store.clone()));
         let grid_view = gtk::GridView::new(Some(selection.clone()), Some(factory));
-        grid_view.set_max_columns(16);
+        // NOTE: do NOT raise max-columns here. A high cap (e.g. 16) makes
+        // GtkGridView realize a working set that scales with the *folder* size
+        // rather than the viewport — 800 cells bound for an 800-image folder.
+        // Leaving the default keeps the bound working set constant (~225) no
+        // matter how large the folder is. (See Phase 1 perf notes.)
+        grid_view.set_min_columns(2);
         grid_view.set_enable_rubberband(true);
         grid_view.set_vexpand(true);
 
@@ -416,7 +421,8 @@ async fn collect_images(folder: &gio::File) -> Result<Vec<ImageObject>, glib::Er
             }
             let child = enumerator.child(&info);
             let display = info.display_name();
-            items.push(ImageObject::new(child, &display));
+            let mtime = info.attribute_uint64("time::modified") as i64;
+            items.push(ImageObject::new(child, &display, mtime));
         }
     }
 

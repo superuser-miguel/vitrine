@@ -12,7 +12,6 @@ use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 use gtk::CompositeTemplate;
 
-use crate::decode;
 use crate::image_object::ImageObject;
 
 /// Thumbnail decode resolution (fits within THUMB_SIZE×THUMB_SIZE).
@@ -102,31 +101,21 @@ impl VitrineGridCell {
 
     fn spawn_thumbnail(&self, item: ImageObject) {
         let file = item.file();
+        let mtime = item.mtime();
+        let renderer = self.native().and_then(|native| native.renderer());
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = cell)]
             self,
             async move {
-                let result = decode::thumbnail(&file, THUMB_SIZE).await;
-                match result {
-                    Ok(texture) => {
-                        // glycin may hand back a full-resolution texture; shrink
-                        // it to thumbnail size so we don't cache tens of MB per
-                        // cell, then let the big texture drop.
-                        let thumb = cell
-                            .native()
-                            .and_then(|native| native.renderer())
-                            .map(|renderer| {
-                                crate::thumbnails::downscale(&texture, THUMB_SIZE, &renderer)
-                            })
-                            .unwrap_or(texture);
+                match crate::thumbnails::load(file, mtime, THUMB_SIZE, renderer).await {
+                    Some(thumb) => {
                         // Cache on the item so re-scroll is instant.
                         item.set_texture(Some(thumb.clone()));
                         if cell.is_showing(&item) {
                             cell.show_texture(&thumb);
                         }
                     }
-                    Err(err) => {
-                        glib::g_warning!("vitrine", "thumbnail {}: {err}", item.file().uri());
+                    None => {
                         item.mark_failed();
                         if cell.is_showing(&item) {
                             cell.show_broken();
