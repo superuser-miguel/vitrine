@@ -102,12 +102,12 @@ impl VitrineGridCell {
     fn spawn_thumbnail(&self, item: ImageObject) {
         let file = item.file();
         let mtime = item.mtime();
-        let renderer = self.native().and_then(|native| native.renderer());
+        let renderer_widget = crate::thumbnails::renderer_source(self);
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = cell)]
             self,
             async move {
-                match crate::thumbnails::load(file, mtime, THUMB_SIZE, renderer).await {
+                match crate::thumbnails::load(file, mtime, THUMB_SIZE, renderer_widget).await {
                     Some(thumb) => {
                         // Cache on the item so re-scroll is instant.
                         item.set_texture(Some(thumb.clone()));

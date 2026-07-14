@@ -241,12 +241,27 @@ impl VitrineViewer {
                     gdk::Key::plus | gdk::Key::equal | gdk::Key::KP_Add => v.zoom_by(ZOOM_STEP),
                     gdk::Key::minus | gdk::Key::KP_Subtract => v.zoom_by(1.0 / ZOOM_STEP),
                     gdk::Key::_0 | gdk::Key::KP_0 => v.zoom_fit(),
+                    gdk::Key::_1 | gdk::Key::KP_1 => v.zoom_actual(),
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
             }
         ));
         self.add_controller(keys);
+
+        // Double-click the image toggles fit ↔ 100%.
+        let click = gtk::GestureClick::new();
+        click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        click.connect_pressed(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_, n_press, _, _| {
+                if n_press == 2 {
+                    v.zoom_toggle();
+                }
+            }
+        ));
+        imp.picture.add_controller(click);
 
         // Ctrl+scroll zooms; plain scroll pans (ScrolledWindow default).
         let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
@@ -422,14 +437,34 @@ impl VitrineViewer {
     }
 
     fn zoom_by(&self, factor: f64) {
+        // Starting from fit means "fit scale" ≈ 1.0 baseline for the first step.
+        let current = self.imp().zoom.get().unwrap_or(1.0);
+        self.apply_zoom(current * factor);
+    }
+
+    /// 100% — one image pixel per screen pixel (of the decoded texture).
+    fn zoom_actual(&self) {
+        self.apply_zoom(1.0);
+    }
+
+    /// Double-click / dedicated key toggles between fit and 100%.
+    fn zoom_toggle(&self) {
+        if self.imp().zoom.get().is_none() {
+            self.zoom_actual();
+        } else {
+            self.zoom_fit();
+        }
+    }
+
+    /// Set an absolute zoom factor over the texture's pixels and pan via the
+    /// scroller.
+    fn apply_zoom(&self, factor: f64) {
         let imp = self.imp();
         let (nw, nh) = imp.natural.get();
         if nw == 0 || nh == 0 {
             return;
         }
-        // Starting from fit means "fit scale" ≈ 1.0 baseline for the first step.
-        let current = imp.zoom.get().unwrap_or(1.0);
-        let zoom = (current * factor).clamp(ZOOM_MIN, ZOOM_MAX);
+        let zoom = factor.clamp(ZOOM_MIN, ZOOM_MAX);
         imp.zoom.set(Some(zoom));
         imp.picture.set_content_fit(gtk::ContentFit::Fill);
         imp.picture.set_halign(gtk::Align::Center);

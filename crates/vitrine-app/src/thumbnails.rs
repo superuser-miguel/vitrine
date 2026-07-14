@@ -39,16 +39,22 @@ fn private_dir() -> PathBuf {
     glib::user_cache_dir().join("thumbnails")
 }
 
+/// A weak reference used only to obtain a GSK renderer after decoding.
+pub fn renderer_source(widget: &impl IsA<gtk::Widget>) -> glib::WeakRef<gtk::Widget> {
+    widget.clone().upcast::<gtk::Widget>().downgrade()
+}
+
 /// Load a thumbnail for `file` at roughly `target_px`, from cache or by decoding.
 ///
-/// `source_mtime` (unix seconds) validates cached entries; `renderer`, if given,
-/// GPU-downscales a fresh full-resolution decode to thumbnail size. Returns
-/// `None` if the image cannot be decoded.
+/// `source_mtime` (unix seconds) validates cached entries. `renderer_widget` is
+/// resolved to a GSK renderer *after* decoding (so a not-yet-realized cell still
+/// works) to GPU-downscale a full-resolution decode; the shrunk result is cached.
+/// Returns `None` if the image cannot be decoded.
 pub async fn load(
     file: gio::File,
     source_mtime: i64,
     target_px: u32,
-    renderer: Option<gsk::Renderer>,
+    renderer_widget: glib::WeakRef<gtk::Widget>,
 ) -> Option<gdk::Texture> {
     let bucket = ThumbBucket::for_target(target_px);
     let uri = file.uri().to_string();
@@ -69,15 +75,30 @@ pub async fn load(
     };
 
     // glycin may return full resolution; shrink for cache + display. Only cache
-    // when we actually downscaled — never store a multi-MB "thumbnail".
+    // when we actually downscaled — never store a multi-MB "thumbnail". Resolve
+    // the renderer now that decoding is done and the cell is realized.
+    let renderer = renderer_widget
+        .upgrade()
+        .and_then(|w| w.native())
+        .and_then(|n| n.renderer());
     match renderer {
         Some(renderer) => {
             let thumb = downscale(&texture, bucket.pixels(), &renderer);
-            store_private(&uri, bucket, &thumb).await;
+            store(&uri, source_mtime, bucket, &thumb, is_shareable(&file)).await;
             Some(thumb)
         }
         None => Some(texture),
     }
+}
+
+/// Whether a decode for `file` may be written to the *shared* cache: only for
+/// real paths, whose URI matches the host's. Document-portal paths
+/// (`/run/user/<uid>/doc/…`) present a sandbox-only URI, so their key wouldn't
+/// match the host — we keep those app-private and never pollute the shared cache.
+fn is_shareable(file: &gio::File) -> bool {
+    file.path()
+        .map(|p| !p.starts_with("/run/user"))
+        .unwrap_or(false)
 }
 
 /// Read and validate a cached thumbnail from `dir`. A cache entry is used only
@@ -108,23 +129,48 @@ async fn read_cache(
     gdk::Texture::from_bytes(&bytes).ok()
 }
 
-/// Write `texture` to the app-private cache (best-effort; ignore failures).
-async fn store_private(uri: &str, bucket: ThumbBucket, texture: &gdk::Texture) {
-    let dir = private_dir().join(bucket.dir());
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
+/// Write `texture` to the thumbnail cache(s), tagged with the freedesktop
+/// `Thumb::URI`/`Thumb::MTime` metadata so any thumbnailer can validate it.
+/// Always writes the app-private cache; also the shared cache when `shareable`
+/// (real-path files), contributing thumbnails back to Nautilus/GNOME.
+/// Best-effort — failures are ignored.
+async fn store(
+    uri: &str,
+    source_mtime: i64,
+    bucket: ThumbBucket,
+    texture: &gdk::Texture,
+    shareable: bool,
+) {
+    let png = texture.save_to_png_bytes();
+    let mtime = source_mtime.to_string();
+    let png = vitrine_engine::png_meta::add_text_chunks(
+        &png,
+        &[("Thumb::URI", uri), ("Thumb::MTime", &mtime)],
+    )
+    .unwrap_or_else(|| png.to_vec());
+
+    let mut roots = vec![private_dir()];
+    let shared = shared_dir();
+    if shareable && shared != private_dir() {
+        roots.push(shared);
     }
-    let path = dir.join(format!("{}.png", thumbnail_cache::cache_key(uri)));
-    let bytes = texture.save_to_png_bytes();
-    let file = gio::File::for_path(path);
-    let _ = file
-        .replace_contents_future(
-            bytes.to_vec(),
-            None,
-            false,
-            gio::FileCreateFlags::REPLACE_DESTINATION,
-        )
-        .await;
+
+    let rel = format!("{}.png", thumbnail_cache::cache_key(uri));
+    for root in roots {
+        let dir = root.join(bucket.dir());
+        if std::fs::create_dir_all(&dir).is_err() {
+            continue;
+        }
+        let file = gio::File::for_path(dir.join(&rel));
+        let _ = file
+            .replace_contents_future(
+                png.clone(),
+                None,
+                false,
+                gio::FileCreateFlags::REPLACE_DESTINATION,
+            )
+            .await;
+    }
 }
 
 /// Ensure `item` has a thumbnail, loading/decoding once and caching it on the
@@ -134,12 +180,12 @@ pub fn ensure_thumbnail(widget: &impl IsA<gtk::Widget>, item: &ImageObject, targ
     if item.texture().is_some() || item.has_failed() || !item.begin_load() {
         return;
     }
-    let renderer = widget.native().and_then(|n| n.renderer());
+    let renderer_widget = renderer_source(widget);
     let file = item.file();
     let mtime = item.mtime();
     let item = item.clone();
     glib::spawn_future_local(async move {
-        match load(file, mtime, target_px, renderer).await {
+        match load(file, mtime, target_px, renderer_widget).await {
             Some(texture) => item.set_texture(Some(texture)),
             None => item.mark_failed(),
         }

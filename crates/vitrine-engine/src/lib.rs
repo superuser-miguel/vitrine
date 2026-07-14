@@ -26,6 +26,7 @@
 //!   testable without GTK.
 
 pub mod lru;
+pub mod png_meta;
 pub mod thumbnail_cache;
 
 pub use lru::SizedLru;
