@@ -35,6 +35,14 @@ use vitrine_engine::SizedLru;
 /// their textures, so browsing a 27k-image folder can't accumulate GBs (→ OOM).
 const RAM_CACHE_BYTES: u64 = 384 * 1024 * 1024;
 
+/// Byte budget for the app-private disk cache (the higher-res buckets GNOME
+/// doesn't generate). Pruned to this on startup, evicting least-recently-used.
+const PRIVATE_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// On a cache hit, only bump the file's mtime (to record access) if it is older
+/// than this many seconds — so scrolling doesn't cause a write per read.
+const ACCESS_TOUCH_AFTER: i64 = 6 * 3600;
+
 /// Size-bounded, LRU RAM cache of decoded thumbnails, keyed by file URI. Shared
 /// (single-threaded, `Rc`) between the grid and the viewer's filmstrip.
 pub type ThumbCache = Rc<RefCell<SizedLru<String, gdk::Texture>>>;
@@ -85,10 +93,12 @@ pub async fn load(
     let bucket = ThumbBucket::for_target(target_px);
     let uri = file.uri().to_string();
 
-    if let Some(texture) = read_cache(shared_dir(), &uri, bucket, source_mtime).await {
+    // Shared cache is GNOME's — read but never re-touch it.
+    if let Some(texture) = read_cache(shared_dir(), &uri, bucket, source_mtime, false).await {
         return Some(texture);
     }
-    if let Some(texture) = read_cache(private_dir(), &uri, bucket, source_mtime).await {
+    // Private cache is ours — mark access so eviction is LRU, not FIFO.
+    if let Some(texture) = read_cache(private_dir(), &uri, bucket, source_mtime, true).await {
         return Some(texture);
     }
 
@@ -134,6 +144,7 @@ async fn read_cache(
     uri: &str,
     bucket: ThumbBucket,
     source_mtime: i64,
+    touch: bool,
 ) -> Option<gdk::Texture> {
     let path = dir.join(thumbnail_cache::relative_path(uri, bucket));
     let file = gio::File::for_path(path);
@@ -152,7 +163,68 @@ async fn read_cache(
     }
 
     let (bytes, _etag) = file.load_bytes_future().await.ok()?;
-    gdk::Texture::from_bytes(&bytes).ok()
+    let texture = gdk::Texture::from_bytes(&bytes).ok()?;
+
+    // Record access for LRU eviction, throttled so scrolling isn't write-heavy.
+    if touch {
+        let now = now_secs();
+        if cache_mtime < now - ACCESS_TOUCH_AFTER {
+            file.set_attribute_uint64(
+                "time::modified",
+                now as u64,
+                gio::FileQueryInfoFlags::NONE,
+                gio::Cancellable::NONE,
+            )
+            .ok();
+        }
+    }
+    Some(texture)
+}
+
+/// Current unix time in seconds.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Prune the app-private disk cache to [`PRIVATE_CACHE_BYTES`], evicting the
+/// least-recently-used files. Runs off the main thread; best-effort.
+pub fn prune_private_cache() {
+    // Cap override (MB) — a hook for future user-facing cache controls.
+    let cap = std::env::var("VITRINE_CACHE_CAP_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(|mb| mb * 1024 * 1024)
+        .unwrap_or(PRIVATE_CACHE_BYTES);
+    std::thread::spawn(move || {
+        let root = private_dir();
+        let mut files: Vec<PathBuf> = Vec::new();
+        let mut facts: Vec<(u64, i64)> = Vec::new();
+        for bucket in ["normal", "large", "x-large", "xx-large"] {
+            let Ok(entries) = std::fs::read_dir(root.join(bucket)) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_file() {
+                    continue;
+                }
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                files.push(entry.path());
+                facts.push((meta.len(), mtime));
+            }
+        }
+        for i in vitrine_engine::cache_evict::evict_lru(&facts, cap) {
+            let _ = std::fs::remove_file(&files[i]);
+        }
+    });
 }
 
 /// Write `texture` to the thumbnail cache(s), tagged with the freedesktop

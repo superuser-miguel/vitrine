@@ -49,6 +49,8 @@ fn main() -> glib::ExitCode {
     app.connect_startup(|app| {
         setup_actions(app);
         load_css();
+        // Keep the app-private thumbnail cache within budget (LRU eviction).
+        thumbnails::prune_private_cache();
     });
     app.connect_activate(|app| present(&window_for(app)));
     app.connect_open(|app, files, _hint| {

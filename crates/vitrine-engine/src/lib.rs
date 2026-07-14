@@ -25,6 +25,7 @@
 //! - Phase 1: LRU texture-cache eviction policy is hosted here so it is
 //!   testable without GTK.
 
+pub mod cache_evict;
 pub mod lru;
 pub mod png_meta;
 pub mod thumbnail_cache;
