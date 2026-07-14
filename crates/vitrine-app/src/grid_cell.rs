@@ -125,7 +125,8 @@ impl VitrineGridCell {
                             cell.show_texture(&thumb);
                         }
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        glib::g_warning!("vitrine", "thumbnail {}: {err}", item.file().uri());
                         item.mark_failed();
                         if cell.is_showing(&item) {
                             cell.show_broken();
