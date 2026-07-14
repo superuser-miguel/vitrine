@@ -221,10 +221,8 @@ impl VitrineWindow {
                     item,
                     move |result| match result {
                         Ok(()) => window.remove_item(&item),
-                        Err(err) => window.toast(&format!(
-                            "Couldn’t move to trash: {}",
-                            err.message()
-                        )),
+                        Err(err) =>
+                            window.toast(&format!("Couldn’t move to trash: {}", err.message())),
                     }
                 ),
             );

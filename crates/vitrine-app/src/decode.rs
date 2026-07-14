@@ -21,10 +21,15 @@ use glycin::{FrameRequest, Loader};
 /// Cap on concurrent glycin decodes. glycin's pool is unbounded
 /// (`max_parallel_operations = usize::MAX`), so a grid that fans out one decode
 /// per visible cell spawns a burst of sandboxed loader subprocesses at once —
-/// which on the single-threaded GLib main loop starves/stalls and no decode ever
-/// finishes (observed: hundreds of images → a blank grid). Gating admission to a
-/// small number keeps loaders warm and the pipeline flowing. Override with
-/// `VITRINE_DECODE_LIMIT` for experiments.
+/// which on the single-threaded GLib main loop starves and *no* decode ever
+/// finishes (measured: 0 completions for an ~800-image folder; a blank grid).
+///
+/// The heavy work is already parallel — each decode runs in its own subprocess
+/// across all cores — so this only gates the *coordinator*. Measured throughput
+/// on a 12-core box plateaus by ~8 concurrent (1→200, 4→482, 8→513, 20→513,
+/// unbounded→0 completions/12s): past core-count, more admissions add coordinator
+/// churn without decoding faster. So the default tracks core count, capped at 8,
+/// floored at 4. Override with `VITRINE_DECODE_LIMIT`.
 fn decode_gate() -> &'static async_lock::Semaphore {
     static GATE: OnceLock<async_lock::Semaphore> = OnceLock::new();
     GATE.get_or_init(|| {
@@ -32,7 +37,12 @@ fn decode_gate() -> &'static async_lock::Semaphore {
             .ok()
             .and_then(|s| s.parse().ok())
             .filter(|&n| n > 0)
-            .unwrap_or(4);
+            .unwrap_or_else(|| {
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4)
+                    .clamp(4, 8)
+            });
         async_lock::Semaphore::new(limit)
     })
 }
