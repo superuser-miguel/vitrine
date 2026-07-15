@@ -170,6 +170,12 @@ template $VitrineWindow: Adw.ApplicationWindow {
               }
 
               [end]
+              ToggleButton filter_button {
+                icon-name: "funnel-symbolic";
+                tooltip-text: _("Filter");
+              }
+
+              [end]
               MenuButton sort_button {
                 icon-name: "view-sort-descending-symbolic";
                 tooltip-text: _("Sort");
@@ -197,6 +203,50 @@ template $VitrineWindow: Adw.ApplicationWindow {
             [top]
             Adw.Banner index_banner {
               revealed: false;
+            }
+
+            [top]
+            Gtk.Revealer filter_revealer {
+              reveal-child: bind filter_button.active bidirectional;
+
+              child: Gtk.Box {
+                spacing: 8;
+                margin-start: 12;
+                margin-end: 12;
+                margin-top: 6;
+                margin-bottom: 6;
+
+                styles [
+                  "toolbar",
+                ]
+
+                Gtk.Label {
+                  label: _("Rating");
+                  styles ["dim-label"]
+                }
+
+                Gtk.DropDown rating_filter {
+                  model: Gtk.StringList {
+                    strings [_("Any"), "★", "★★", "★★★", "★★★★", "★★★★★"]
+                  };
+                }
+
+                Gtk.Label {
+                  label: _("Tag");
+                  margin-start: 8;
+                  styles ["dim-label"]
+                }
+
+                Gtk.DropDown tag_filter {
+                  hexpand: true;
+                  halign: start;
+                }
+
+                Gtk.Button filter_clear {
+                  label: _("Clear");
+                  styles ["flat"]
+                }
+              };
             }
 
             content: Adw.ToastOverlay toast_overlay {

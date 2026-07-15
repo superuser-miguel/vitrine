@@ -8,5 +8,6 @@
     <!-- App-bundled symbolic icons (registered on the default IconTheme in
          main.rs); GTK recolors them like any theme icon. -->
     <file compressed="true" alias="icons/scalable/actions/tag-symbolic.svg">icons/hicolor/scalable/actions/tag-symbolic.svg</file>
+    <file compressed="true" alias="icons/scalable/actions/funnel-symbolic.svg">icons/hicolor/scalable/actions/funnel-symbolic.svg</file>
   </gresource>
 </gresources>

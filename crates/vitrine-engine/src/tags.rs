@@ -47,6 +47,17 @@ impl Db {
         rows.collect()
     }
 
+    /// Every content hash carrying tag `name` (case-insensitive) — for filtering
+    /// the grid to a tag without a per-item query.
+    pub fn hashes_with_tag(&self, name: &str) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self.conn().prepare(
+            "SELECT ft.content_hash FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+             WHERE t.name = ?1",
+        )?;
+        let rows = stmt.query_map([name.trim()], |r| r.get::<_, String>(0))?;
+        rows.collect()
+    }
+
     /// Tag names on a content hash, ordered by name.
     pub fn tags_for_hash(&self, content_hash: &str) -> rusqlite::Result<Vec<String>> {
         let mut stmt = self.conn().prepare(
@@ -185,6 +196,16 @@ mod tests {
             .find(|t| t.name == "car")
             .unwrap();
         assert_eq!(car.count, 1, "only the present file counts");
+    }
+
+    #[test]
+    fn hashes_with_tag_lists_members() {
+        let db = Db::open_in_memory().unwrap();
+        db.apply_tag("beach", &hashes(&["h1", "h3"])).unwrap();
+        let mut got = db.hashes_with_tag("BEACH").unwrap(); // case-insensitive
+        got.sort();
+        assert_eq!(got, vec!["h1".to_string(), "h3".to_string()]);
+        assert!(db.hashes_with_tag("nope").unwrap().is_empty());
     }
 
     #[test]

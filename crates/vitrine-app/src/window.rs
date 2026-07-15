@@ -7,6 +7,7 @@
 //! the [`crate::viewer`] page onto the `AdwNavigationView`, sharing the store.
 
 use std::cell::Cell;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -69,6 +70,15 @@ impl Default for SortState {
     }
 }
 
+/// The browser filter bar's live state, read by the grid's `CustomFilter`.
+#[derive(Default)]
+pub struct FilterState {
+    /// Minimum star rating (0 = any).
+    min_rating: i32,
+    /// If set, only items whose content hash is in this set pass (one tag).
+    tag_hashes: Option<HashSet<String>>,
+}
+
 /// Gio attributes fetched per child when enumerating a folder.
 const ENUMERATE_ATTRS: &str = "standard::name,standard::display-name,standard::content-type,\
      standard::type,standard::size,time::modified";
@@ -124,6 +134,23 @@ mod imp {
         pub index_banner: TemplateChild<adw::Banner>,
         #[template_child]
         pub tag_button: TemplateChild<gtk::MenuButton>,
+        #[template_child]
+        pub filter_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub filter_revealer: TemplateChild<gtk::Revealer>,
+        #[template_child]
+        pub rating_filter: TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub tag_filter: TemplateChild<gtk::DropDown>,
+        #[template_child]
+        pub filter_clear: TemplateChild<gtk::Button>,
+
+        /// The grid filter (min-rating + tag); `changed()` re-runs it.
+        pub filter: RefCell<Option<gtk::CustomFilter>>,
+        /// Live filter criteria the `CustomFilter` reads.
+        pub filter_state: Rc<RefCell<FilterState>>,
+        /// Tag names parallel to `tag_filter` rows (offset by the "All tags" row).
+        pub tag_names: RefCell<Vec<String>>,
 
         /// The tag popover's entry + existing-tag chip box (rebuilt on open).
         pub tag_entry: RefCell<Option<gtk::Entry>>,
@@ -183,6 +210,14 @@ mod imp {
                 icon_larger: Default::default(),
                 index_banner: Default::default(),
                 tag_button: Default::default(),
+                filter_button: Default::default(),
+                filter_revealer: Default::default(),
+                rating_filter: Default::default(),
+                tag_filter: Default::default(),
+                filter_clear: Default::default(),
+                filter: RefCell::new(None),
+                filter_state: Rc::new(RefCell::new(FilterState::default())),
+                tag_names: RefCell::new(Vec::new()),
                 tag_entry: RefCell::new(None),
                 tag_flowbox: RefCell::new(None),
                 indexer: RefCell::new(None),
@@ -230,6 +265,7 @@ mod imp {
             self.obj().setup_indexer();
             self.obj().setup_tagging();
             self.obj().setup_collections();
+            self.obj().setup_filtering();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -270,13 +306,34 @@ impl VitrineWindow {
         // changing the criterion is a `sorter.changed()` away — GTK re-sorts in
         // place, keeping selection and scroll (no rebuild). Sorting uses only
         // per-item filesystem facts, so it's instant and index-independent.
+        // Filter (min-rating + tag) closest to the store, then sort. Both read
+        // per-item facts already stamped onto the item — no DB hit per item.
+        let filter_state = imp.filter_state.clone();
+        let filter = gtk::CustomFilter::new(move |obj| {
+            let Some(item) = obj.downcast_ref::<ImageObject>() else {
+                return true;
+            };
+            let state = filter_state.borrow();
+            if item.rating() < state.min_rating {
+                return false;
+            }
+            if let Some(hashes) = &state.tag_hashes {
+                if !hashes.contains(&item.content_hash()) {
+                    return false;
+                }
+            }
+            true
+        });
+        let filter_model = gtk::FilterListModel::new(Some(imp.store.clone()), Some(filter.clone()));
+
         let state = imp.sort_state.clone();
         let sorter = gtk::CustomSorter::new(move |a, b| {
             let a = a.downcast_ref::<ImageObject>().unwrap();
             let b = b.downcast_ref::<ImageObject>().unwrap();
             compare_images(a, b, state.get())
         });
-        let sort_model = gtk::SortListModel::new(Some(imp.store.clone()), Some(sorter.clone()));
+        let sort_model = gtk::SortListModel::new(Some(filter_model), Some(sorter.clone()));
+        *imp.filter.borrow_mut() = Some(filter);
 
         let selection = gtk::MultiSelection::new(Some(sort_model.clone()));
         let grid_view =
@@ -598,6 +655,7 @@ impl VitrineWindow {
         if rated == 0 {
             self.toast("Rating needs the image indexed — try again in a moment");
         }
+        self.refilter(); // ratings changed → re-evaluate a rating filter
     }
 
     // --- tagging -------------------------------------------------------------
@@ -730,6 +788,100 @@ impl VitrineWindow {
             n => format!("Tagged {n} images “{name}”"),
         });
         self.imp().tag_button.popdown();
+    }
+
+    // --- filter bar ----------------------------------------------------------
+
+    /// Wire the filter bar: min-rating + tag dropdowns and a clear button. The
+    /// bar's visibility is bound to the header toggle in Blueprint.
+    fn setup_filtering(&self) {
+        let imp = self.imp();
+
+        imp.rating_filter.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |dropdown| {
+                window.imp().filter_state.borrow_mut().min_rating = dropdown.selected() as i32;
+                window.refilter();
+            }
+        ));
+        imp.tag_filter.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |dropdown| window.apply_tag_filter(dropdown.selected())
+        ));
+        imp.filter_clear.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| {
+                let imp = window.imp();
+                imp.rating_filter.set_selected(0);
+                imp.tag_filter.set_selected(0);
+            }
+        ));
+        // Refresh the tag list from the index whenever the bar is opened.
+        imp.filter_revealer
+            .connect_reveal_child_notify(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move |revealer| {
+                    if revealer.reveals_child() {
+                        window.refresh_tag_filter();
+                    }
+                }
+            ));
+    }
+
+    /// Rebuild the tag dropdown from the index (an "All tags" row + each tag).
+    fn refresh_tag_filter(&self) {
+        let imp = self.imp();
+        self.ensure_read_db();
+        let tags: Vec<String> = {
+            let db = imp.read_db.borrow();
+            match db.as_ref() {
+                Some(db) => db
+                    .all_tags()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.name)
+                    .collect(),
+                None => Vec::new(),
+            }
+        };
+        let mut labels = vec![gettextrs::gettext("All tags")];
+        labels.extend(tags.iter().cloned());
+        let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
+        imp.tag_filter.set_model(Some(&gtk::StringList::new(&refs)));
+        *imp.tag_names.borrow_mut() = tags;
+        // set_model resets selection to 0 → clears any prior tag filter.
+    }
+
+    /// Apply the tag dropdown selection (0 = All tags → no tag filter).
+    fn apply_tag_filter(&self, selected: u32) {
+        let imp = self.imp();
+        let hashes = if selected == 0 {
+            None
+        } else {
+            let name = imp.tag_names.borrow().get((selected - 1) as usize).cloned();
+            name.map(|name| {
+                self.ensure_read_db();
+                let db = imp.read_db.borrow();
+                db.as_ref()
+                    .and_then(|db| db.hashes_with_tag(&name).ok())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect::<HashSet<String>>()
+            })
+        };
+        imp.filter_state.borrow_mut().tag_hashes = hashes;
+        self.refilter();
+    }
+
+    /// Re-run the grid filter (after criteria or ratings change).
+    fn refilter(&self) {
+        if let Some(filter) = self.imp().filter.borrow().as_ref() {
+            filter.changed(gtk::FilterChange::Different);
+        }
     }
 
     // --- collections ---------------------------------------------------------
@@ -933,6 +1085,7 @@ impl VitrineWindow {
             .filter_map(|i| self.imp().store.item(i).and_downcast::<ImageObject>())
             .collect();
         self.stamp_annotations(&items);
+        self.refilter(); // freshly-stamped ratings may change a rating filter
     }
 
     fn ensure_read_db(&self) {
@@ -1266,6 +1419,30 @@ impl VitrineWindow {
         self.maybe_loadtest();
         self.maybe_sorttest();
         self.maybe_tagtest();
+        self.maybe_filtertest();
+    }
+
+    /// Dev aid: if `VITRINE_FILTER=<n>` is set, reveal the filter bar and apply a
+    /// minimum-rating filter of `n` — for verifying grid filtering.
+    fn maybe_filtertest(&self) {
+        let Some(spec) = std::env::var_os("VITRINE_FILTER") else {
+            return;
+        };
+        let min: u32 = spec.to_string_lossy().parse().unwrap_or(0);
+        glib::timeout_add_seconds_local_once(
+            1,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move || {
+                    let imp = window.imp();
+                    imp.filter_button.set_active(true);
+                    imp.rating_filter.set_selected(min);
+                    let shown = window.model().map_or(0, |m| m.n_items());
+                    eprintln!("VITRINE_FILTER min={min} → {shown} visible");
+                }
+            ),
+        );
     }
 
     /// Dev aid: if `VITRINE_TAG=<name>` is set, select all, apply that tag to the
