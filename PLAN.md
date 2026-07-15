@@ -616,3 +616,50 @@ struct PluginOutput {
 - **Use cases (prioritized):** custom duplicate-similarity metrics; advanced filters/effects; batch converters/watermarking; AI-based tagging (future).
 - **Implementation (v2):** add `wasmtime` + `serde` to the engine (optional feature); define safe host functions (`host_log`, `host_decode_image`); plugin manager in the app (load from the extension point); strict capabilities (no filesystem access unless granted).
 - **Complementary Lua tier:** `mlua`/`rhai` for rules, rename patterns, smart-collection predicates — hot-reloadable, embedded.
+
+### 10.6 Sidebar navigation — Tree + Bookmarks + view switcher (user request, 2026-07-15)
+
+The sidebar is currently a placeholder (`window.blp`: an `AdwNavigationSplitView`
+sidebar with a `places_list` ListBox and an "Open Folder…" row). Replace it with a
+gThumb-style **switchable** left pane. Near-term (pairs with **Phase 3**, which also
+wants a Collections sidebar — §10.2); slot as **Phase 3a**.
+
+**Shape — one stack, an icon switcher.** An `AdwViewStack` holding the sidebar views,
+with an **`AdwViewSwitcherBar` pinned to the bottom of the sidebar** (gThumb's bottom
+icon row — click an icon to switch the pane). Design it as an **N-page** switcher from
+the start so **Collections** (Phase 3) drops in as a third page for free — gThumb's
+Folders / Catalogs split is exactly Tree / Bookmarks / Collections. All pages funnel
+into the existing `open_location(gio::File)` → grid + background index.
+
+**Tree view.** `GtkTreeListModel` + `GtkListView` with `GtkTreeExpander` (the modern,
+non-deprecated tree), lazily enumerating each folder's *sub-directories* only when
+expanded (directories filtered in). Click a node → load its images.
+- ⚠ **Sandbox scoping (the one real constraint).** We keep **no** `--filesystem=home`
+  (§4). A tree rooted at `/` or `$HOME` can only show what's granted: `xdg-pictures`
+  plus folders opened/added via the portal. So **root the tree at the accessible
+  locations** — Pictures, the library roots, and portal-opened folders — not `/`. A
+  full host filesystem tree is out of scope without breaking the sandbox posture (and
+  scoping to photo locations is the right behaviour anyway).
+
+**Bookmarks (Nautilus-style, our own list).**
+- **Persistence:** a `[Bookmarks]` list in the existing `settings.rs` KeyFile (numbered
+  keys, like library roots). Our own list — the host's GTK bookmarks
+  (`~/.config/gtk-3.0/bookmarks`) aren't readable in-sandbox.
+- **Bookmarks ≠ Library Roots** (keep distinct): roots are *indexed in the background*;
+  bookmarks are *quick-nav shortcuts*. They overlap in practice → offer an "Add to
+  Library" affordance on a bookmark, but two lists.
+- **Drag-to-add** (the explicit ask): a `GtkDropTarget` accepting `GdkFileList`. Sources:
+  (1) external file-manager DnD (drag a folder from Nautilus — the real Nautilus
+  gesture); (2) from the Tree view; (3) **plus** a reliable "Bookmark this folder"
+  action (`Ctrl+D` / star button) — the grid holds *images*, not folders, so you can't
+  drag out of it. Reorder via in-list DnD; remove via context menu / hover button.
+- ⚠ A bookmark to an arbitrary host folder is only usable while its portal grant
+  persists (same caveat as roots). Graceful path: on click, if access is denied,
+  re-prompt via the portal.
+
+**Recommendation:** build the N-page switcher (Tree + Bookmarks now, Collections at
+Phase 3), tree rooted at accessible locations, bookmarks in the settings KeyFile with
+drag-add + a `Ctrl+D` action. Self-contained navigation; doesn't disturb grid/index/sort.
+
+> Note: the **filmstrip** (viewer bottom bar, Phase 1) is unrelated — it moves *within*
+> the current folder image-to-image; the sidebar moves *between* folders.
