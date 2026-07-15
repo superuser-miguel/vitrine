@@ -11,6 +11,15 @@ use rusqlite::Connection;
 
 use crate::schema::MIGRATIONS;
 
+/// Current unix time in seconds — the `created_at` / `updated_at` stamp for
+/// annotations written here.
+pub(crate) fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 /// A handle to the Vitrine index database.
 pub struct Db {
     conn: Connection,
@@ -111,12 +120,13 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM sqlite_master
                  WHERE type='table' AND name IN
-                 ('meta','files','tags','file_tags','ratings','collections','collection_items')",
+                 ('meta','files','tags','file_tags','ratings','collections',
+                  'collection_items','comments')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 7);
+        assert_eq!(count, 8);
     }
 
     #[test]

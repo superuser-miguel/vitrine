@@ -72,6 +72,17 @@ CREATE TABLE collection_items (
   PRIMARY KEY (collection_id, content_hash)
 );
 "#,
+    // v2 — per-image free-text comment (Phase 3). Mirrors `ratings`:
+    // content-hash keyed so it survives renames; `sync_state` seam for the
+    // deferred v2 embedded-write (dc:description). See PLAN Phase 3 task 2a.
+    r#"
+CREATE TABLE comments (
+  content_hash TEXT PRIMARY KEY,
+  body         TEXT NOT NULL,
+  sync_state   TEXT NOT NULL DEFAULT 'db-only',
+  updated_at   INTEGER NOT NULL
+);
+"#,
 ];
 
 /// The schema version this build targets (number of migrations).

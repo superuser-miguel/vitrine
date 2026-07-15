@@ -25,6 +25,7 @@
 //! - Phase 1: LRU texture-cache eviction policy is hosted here so it is
 //!   testable without GTK.
 
+pub mod annotations;
 pub mod backup;
 pub mod cache_evict;
 pub mod db;
@@ -36,6 +37,7 @@ pub mod png_meta;
 pub mod query;
 pub mod scanner;
 pub mod schema;
+pub mod tags;
 pub mod thumbnail_cache;
 
 pub use db::Db;
@@ -44,6 +46,7 @@ pub use files::{Enrichment, FileRecord};
 pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
 pub use query::{Direction, Query, SortKey};
 pub use scanner::{classify, walk_images, Change, ScannedFile};
+pub use tags::Tag;
 
 pub use lru::SizedLru;
 pub use thumbnail_cache::{cache_key, relative_path, ThumbBucket};

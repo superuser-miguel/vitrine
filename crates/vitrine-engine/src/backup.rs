@@ -13,15 +13,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 
-/// Current export format version.
-pub const EXPORT_VERSION: u32 = 1;
+/// Current export format version. v2 adds `comments` (defaulted, so v1 exports
+/// still import).
+pub const EXPORT_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct Export {
     pub version: u32,
     pub file_tags: Vec<FileTagsExport>,
     pub ratings: Vec<RatingExport>,
+    #[serde(default)]
+    pub comments: Vec<CommentExport>,
     pub collections: Vec<CollectionExport>,
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
+pub struct CommentExport {
+    pub content_hash: String,
+    pub body: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq)]
@@ -92,6 +101,17 @@ impl Db {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
+        let mut stmt =
+            conn.prepare("SELECT content_hash, body FROM comments ORDER BY content_hash")?;
+        let comments = stmt
+            .query_map([], |r| {
+                Ok(CommentExport {
+                    content_hash: r.get(0)?,
+                    body: r.get(1)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
         let mut stmt = conn.prepare("SELECT id, name, kind, query FROM collections ORDER BY id")?;
         let colls = stmt
             .query_map([], |r| {
@@ -123,6 +143,7 @@ impl Db {
             version: EXPORT_VERSION,
             file_tags,
             ratings,
+            comments,
             collections,
         })
     }
@@ -163,6 +184,13 @@ impl Db {
                 rusqlite::params![rating.content_hash, rating.rating],
             )?;
         }
+        for comment in &export.comments {
+            conn.execute(
+                "INSERT INTO comments(content_hash, body, updated_at) VALUES (?1, ?2, 0)
+                 ON CONFLICT(content_hash) DO UPDATE SET body = excluded.body",
+                rusqlite::params![comment.content_hash, comment.body],
+            )?;
+        }
         for coll in &export.collections {
             conn.execute(
                 "INSERT INTO collections(name, kind, query, created_at) VALUES (?1, ?2, ?3, 0)",
@@ -196,6 +224,7 @@ mod tests {
                  INSERT INTO file_tags(content_hash, tag_id, created_at) VALUES
                    ('H1', 1, 0), ('H1', 2, 0), ('H2', 1, 0);
                  INSERT INTO ratings(content_hash, rating, updated_at) VALUES ('H1', 5, 0);
+                 INSERT INTO comments(content_hash, body, updated_at) VALUES ('H1','golden hour',0);
                  INSERT INTO collections(name, kind, query, created_at)
                    VALUES ('Cars','catalog',NULL,0);
                  INSERT INTO collection_items(collection_id, content_hash, position)
