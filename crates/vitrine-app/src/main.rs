@@ -123,5 +123,6 @@ fn setup_actions(app: &adw::Application) {
     app.add_action(&about);
     app.set_accels_for_action("app.about", &["F1"]);
     app.set_accels_for_action("win.preferences", &["<Ctrl>comma"]);
+    app.set_accels_for_action("win.bookmark-current", &["<Ctrl>d"]);
     app.set_accels_for_action("window.close", &["<Ctrl>w"]);
 }

@@ -119,11 +119,23 @@ mod imp {
         #[template_child]
         pub new_collection_button: TemplateChild<gtk::Button>,
         #[template_child]
-        pub collections_heading: TemplateChild<gtk::Label>,
-        #[template_child]
         pub collections_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub bookmarks_heading: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub bookmarks_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub folder_tree: TemplateChild<gtk::ListView>,
+        #[template_child]
+        pub back_button: TemplateChild<gtk::Button>,
         /// Collection ids parallel to `collections_list` rows (by index).
         pub collection_ids: RefCell<Vec<i64>>,
+        /// Bookmarked folders parallel to `bookmarks_list` rows (by index).
+        pub bookmark_paths: RefCell<Vec<PathBuf>>,
+        /// Back-navigation history of visited folders (the current one excluded).
+        pub history: RefCell<Vec<PathBuf>>,
+        /// True while navigating back, so `load_folder` doesn't re-record history.
+        pub navigating_back: Cell<bool>,
         /// The lazily-built "Duplicates" page + its content box (rebuilt per scan).
         pub duplicates_page: RefCell<Option<adw::NavigationPage>>,
         pub duplicates_content: RefCell<Option<gtk::Box>>,
@@ -210,9 +222,15 @@ mod imp {
                 open_button: Default::default(),
                 places_list: Default::default(),
                 new_collection_button: Default::default(),
-                collections_heading: Default::default(),
                 collections_list: Default::default(),
+                bookmarks_heading: Default::default(),
+                bookmarks_list: Default::default(),
+                folder_tree: Default::default(),
+                back_button: Default::default(),
                 collection_ids: RefCell::new(Vec::new()),
+                bookmark_paths: RefCell::new(Vec::new()),
+                history: RefCell::new(Vec::new()),
+                navigating_back: Cell::new(false),
                 duplicates_page: RefCell::new(None),
                 duplicates_content: RefCell::new(None),
                 dedup_near: Cell::new(false),
@@ -279,6 +297,7 @@ mod imp {
             self.obj().setup_tagging();
             self.obj().setup_collections();
             self.obj().setup_filtering();
+            self.obj().setup_navigation();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -970,6 +989,249 @@ impl VitrineWindow {
         dialog.present(Some(self));
     }
 
+    // --- navigation: bookmarks, folder tree, back button ---------------------
+
+    fn setup_navigation(&self) {
+        let imp = self.imp();
+
+        imp.back_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.go_back()
+        ));
+
+        // Bookmarks: click to open.
+        imp.bookmarks_list.connect_row_activated(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, row| {
+                let idx = row.index();
+                if let Some(path) = window
+                    .imp()
+                    .bookmark_paths
+                    .borrow()
+                    .get(idx as usize)
+                    .cloned()
+                {
+                    window.open_location(gio::File::for_path(&path));
+                }
+            }
+        ));
+
+        // Drop folders onto the bookmarks list to add them (Nautilus gesture).
+        let drop = gtk::DropTarget::new(
+            gtk::gdk::FileList::static_type(),
+            gtk::gdk::DragAction::COPY,
+        );
+        drop.connect_drop(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            false,
+            move |_, value, _, _| {
+                let Ok(list) = value.get::<gtk::gdk::FileList>() else {
+                    return false;
+                };
+                let settings = crate::settings::Settings::load();
+                let mut added = false;
+                for file in list.files() {
+                    if let Some(path) = file.path() {
+                        if path.is_dir() && settings.add_bookmark(&path) {
+                            added = true;
+                        }
+                    }
+                }
+                if added {
+                    window.refresh_bookmarks();
+                }
+                added
+            }
+        ));
+        imp.bookmarks_list.add_controller(drop);
+
+        // Ctrl+D bookmarks the current folder.
+        let bookmark = gio::SimpleAction::new("bookmark-current", None);
+        bookmark.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| window.bookmark_current()
+        ));
+        self.add_action(&bookmark);
+
+        self.refresh_bookmarks();
+        self.setup_folder_tree();
+    }
+
+    /// Go to the previously-visited folder.
+    fn go_back(&self) {
+        let Some(previous) = self.imp().history.borrow_mut().pop() else {
+            return;
+        };
+        self.imp().navigating_back.set(true);
+        self.open_location(gio::File::for_path(&previous));
+        self.imp().navigating_back.set(false);
+        self.update_back_sensitivity();
+    }
+
+    fn update_back_sensitivity(&self) {
+        let has_history = !self.imp().history.borrow().is_empty();
+        self.imp().back_button.set_sensitive(has_history);
+    }
+
+    /// Bookmark the folder currently shown.
+    fn bookmark_current(&self) {
+        let Some(folder) = self.imp().current_folder.borrow().clone() else {
+            self.toast("Open a folder to bookmark it");
+            return;
+        };
+        if crate::settings::Settings::load().add_bookmark(&folder) {
+            self.refresh_bookmarks();
+            self.toast("Bookmarked");
+        } else {
+            self.toast("Already bookmarked");
+        }
+    }
+
+    /// Rebuild the bookmarks list from settings.
+    fn refresh_bookmarks(&self) {
+        let imp = self.imp();
+        while let Some(row) = imp.bookmarks_list.row_at_index(0) {
+            imp.bookmarks_list.remove(&row);
+        }
+        imp.bookmark_paths.borrow_mut().clear();
+
+        let bookmarks = crate::settings::Settings::load().bookmarks();
+        imp.bookmarks_heading.set_visible(!bookmarks.is_empty());
+        for path in bookmarks {
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.set_margin_start(6);
+            row.set_margin_end(6);
+            row.set_margin_top(6);
+            row.set_margin_bottom(6);
+            row.append(&gtk::Image::from_icon_name("folder-symbolic"));
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned());
+            row.append(
+                &gtk::Label::builder()
+                    .label(name)
+                    .halign(gtk::Align::Start)
+                    .hexpand(true)
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .build(),
+            );
+            let remove = gtk::Button::builder()
+                .icon_name("window-close-symbolic")
+                .css_classes(["flat", "circular"])
+                .valign(gtk::Align::Center)
+                .tooltip_text(gettextrs::gettext("Remove bookmark"))
+                .build();
+            let path_for_remove = path.clone();
+            remove.connect_clicked(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move |_| {
+                    crate::settings::Settings::load().remove_bookmark(&path_for_remove);
+                    window.refresh_bookmarks();
+                }
+            ));
+            row.append(&remove);
+            imp.bookmarks_list.append(&row);
+            imp.bookmark_paths.borrow_mut().push(path);
+        }
+    }
+
+    /// The folders the sandbox can browse (Pictures + library roots), deduped.
+    fn accessible_roots(&self) -> Vec<gio::File> {
+        let mut roots = Vec::new();
+        let mut seen = HashSet::new();
+        let mut push = |path: PathBuf| {
+            if seen.insert(path.clone()) {
+                roots.push(gio::File::for_path(path));
+            }
+        };
+        if let Some(pictures) = glib::user_special_dir(glib::UserDirectory::Pictures) {
+            push(pictures);
+        }
+        for root in crate::settings::Settings::load().roots() {
+            push(root);
+        }
+        roots
+    }
+
+    /// Build the lazy directory tree (rooted at the accessible locations — the
+    /// sandbox can't see a full host tree, §4).
+    fn setup_folder_tree(&self) {
+        let root_store = gio::ListStore::new::<gio::File>();
+        for root in self.accessible_roots() {
+            root_store.append(&root);
+        }
+        let tree = gtk::TreeListModel::new(root_store, false, false, |item| {
+            item.downcast_ref::<gio::File>().and_then(dir_children)
+        });
+        let selection = gtk::SingleSelection::new(Some(tree));
+
+        let factory = gtk::SignalListItemFactory::new();
+        factory.connect_setup(|_, list_item| {
+            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            content.append(&gtk::Image::from_icon_name("folder-symbolic"));
+            content.append(
+                &gtk::Label::builder()
+                    .ellipsize(gtk::pango::EllipsizeMode::End)
+                    .build(),
+            );
+            let expander = gtk::TreeExpander::new();
+            expander.set_child(Some(&content));
+            list_item.set_child(Some(&expander));
+        });
+        factory.connect_bind(|_, list_item| {
+            let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
+            let Some(expander) = list_item.child().and_downcast::<gtk::TreeExpander>() else {
+                return;
+            };
+            let Some(row) = list_item.item().and_downcast::<gtk::TreeListRow>() else {
+                return;
+            };
+            expander.set_list_row(Some(&row));
+            if let Some(file) = row.item().and_downcast::<gio::File>() {
+                if let Some(label) = expander
+                    .child()
+                    .and_downcast::<gtk::Box>()
+                    .and_then(|b| b.last_child())
+                    .and_downcast::<gtk::Label>()
+                {
+                    let name = file
+                        .basename()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    label.set_text(&name);
+                }
+            }
+        });
+
+        let listview = &self.imp().folder_tree;
+        listview.set_model(Some(&selection));
+        listview.set_factory(Some(&factory));
+        listview.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[strong]
+            selection,
+            move |_, pos| {
+                if let Some(file) = selection
+                    .item(pos)
+                    .and_downcast::<gtk::TreeListRow>()
+                    .and_then(|r| r.item())
+                    .and_downcast::<gio::File>()
+                {
+                    window.open_location(file);
+                }
+            }
+        ));
+    }
+
     // --- duplicates ----------------------------------------------------------
 
     /// Open (or refresh) the Duplicates page and push it onto the nav view.
@@ -1252,7 +1514,6 @@ impl VitrineWindow {
             }
         };
 
-        imp.collections_heading.set_visible(!collections.is_empty());
         for collection in collections {
             let icon = match collection.kind {
                 vitrine_engine::CollectionKind::Smart => "folder-saved-search-symbolic",
@@ -1788,8 +2049,19 @@ impl VitrineWindow {
 
     /// Enumerate `folder`'s image children asynchronously and populate the grid.
     fn load_folder(&self, folder: gio::File) {
+        let imp = self.imp();
+        let new_path = folder.path();
+        // Record where we're leaving, so Back can return there.
+        if !imp.navigating_back.get() {
+            if let Some(previous) = imp.current_folder.borrow().clone() {
+                if new_path.as_ref() != Some(&previous) {
+                    imp.history.borrow_mut().push(previous);
+                }
+            }
+        }
         // Remember the folder so the rating stamp can scope to it.
-        *self.imp().current_folder.borrow_mut() = folder.path();
+        *imp.current_folder.borrow_mut() = new_path;
+        self.update_back_sensitivity();
         // Kick off background indexing in parallel — the grid never waits on it.
         self.index_folder(&folder);
         glib::spawn_future_local(glib::clone!(
@@ -2124,6 +2396,38 @@ fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Or
         Ordering::Equal => gtk::Ordering::Equal,
         Ordering::Greater => gtk::Ordering::Larger,
     }
+}
+
+/// The sub-directories of `dir` as a `ListModel` of `gio::File` for the folder
+/// tree, or `None` if it has none (so the tree shows no expander). Hidden dirs
+/// are skipped; enumerated synchronously (only on user expand).
+fn dir_children(dir: &gio::File) -> Option<gio::ListModel> {
+    let enumerator = dir
+        .enumerate_children(
+            "standard::name,standard::type",
+            gio::FileQueryInfoFlags::NONE,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    let mut dirs: Vec<gio::File> = Vec::new();
+    while let Ok(Some(info)) = enumerator.next_file(gio::Cancellable::NONE) {
+        if info.file_type() == gio::FileType::Directory
+            && !info.name().to_string_lossy().starts_with('.')
+        {
+            dirs.push(enumerator.child(&info));
+        }
+    }
+    if dirs.is_empty() {
+        return None;
+    }
+    dirs.sort_by_key(|f| {
+        f.basename()
+            .map(|p| p.to_string_lossy().to_lowercase())
+            .unwrap_or_default()
+    });
+    let store = gio::ListStore::new::<gio::File>();
+    store.extend_from_slice(&dirs);
+    Some(store.upcast())
 }
 
 /// Async-enumerate `folder`, returning its browsable images sorted by name.

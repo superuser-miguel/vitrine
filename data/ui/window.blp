@@ -85,60 +85,123 @@ template $VitrineWindow: Adw.ApplicationWindow {
       child: Adw.ToolbarView {
         [top]
         Adw.HeaderBar {
-          [end]
-          Gtk.Button new_collection_button {
-            icon-name: "list-add-symbolic";
-            tooltip-text: _("New Catalog from Selection");
-          }
+          title-widget: Adw.WindowTitle {
+            title: _("Vitrine");
+          };
         }
 
-        content: Gtk.ScrolledWindow {
-          hscrollbar-policy: never;
+        // gThumb-style switchable pane: Places / Folders / Collections.
+        content: Adw.ViewStack sidebar_stack {
+          Adw.ViewStackPage {
+            name: "places";
+            title: _("Places");
+            icon-name: "user-bookmarks-symbolic";
 
-          child: Gtk.Box {
-            orientation: vertical;
+            child: Gtk.ScrolledWindow {
+              hscrollbar-policy: never;
 
-            Gtk.ListBox places_list {
-              selection-mode: none;
-              styles ["navigation-sidebar"]
+              child: Gtk.Box {
+                orientation: vertical;
 
-              Gtk.ListBoxRow open_row {
-                child: Gtk.Box {
-                  spacing: 12;
+                Gtk.ListBox places_list {
+                  selection-mode: none;
+                  styles ["navigation-sidebar"]
+
+                  Gtk.ListBoxRow open_row {
+                    child: Gtk.Box {
+                      spacing: 12;
+                      margin-start: 6;
+                      margin-end: 6;
+                      margin-top: 8;
+                      margin-bottom: 8;
+
+                      Gtk.Image {
+                        icon-name: "folder-open-symbolic";
+                      }
+
+                      Gtk.Label {
+                        label: _("Open Folder…");
+                        halign: start;
+                      }
+                    };
+                  }
+                }
+
+                Gtk.Label bookmarks_heading {
+                  label: _("Bookmarks");
+                  halign: start;
+                  margin-start: 12;
+                  margin-top: 10;
+                  margin-bottom: 2;
+                  visible: false;
+                  styles ["caption", "dim-label"]
+                }
+
+                // Populated from settings; drop a folder here or press Ctrl+D.
+                Gtk.ListBox bookmarks_list {
+                  selection-mode: none;
+                  styles ["navigation-sidebar"]
+                }
+              };
+            };
+          }
+
+          Adw.ViewStackPage {
+            name: "folders";
+            title: _("Folders");
+            icon-name: "folder-symbolic";
+
+            child: Gtk.ScrolledWindow {
+              hscrollbar-policy: never;
+
+              // A lazy directory tree, built in window.rs (GtkTreeListModel).
+              child: Gtk.ListView folder_tree {
+                styles ["navigation-sidebar"]
+              };
+            };
+          }
+
+          Adw.ViewStackPage {
+            name: "collections";
+            title: _("Collections");
+            icon-name: "view-list-symbolic";
+
+            child: Gtk.ScrolledWindow {
+              hscrollbar-policy: never;
+
+              child: Gtk.Box {
+                orientation: vertical;
+
+                Gtk.Button new_collection_button {
+                  tooltip-text: _("New Catalog from Selection");
                   margin-start: 6;
                   margin-end: 6;
-                  margin-top: 8;
-                  margin-bottom: 8;
+                  margin-top: 6;
 
-                  Gtk.Image {
-                    icon-name: "folder-open-symbolic";
-                  }
+                  styles [
+                    "flat",
+                  ]
 
-                  Gtk.Label {
-                    label: _("Open Folder…");
-                    halign: start;
-                  }
-                };
-              }
-            }
+                  child: Adw.ButtonContent {
+                    icon-name: "list-add-symbolic";
+                    label: _("New Catalog");
+                  };
+                }
 
-            Gtk.Label collections_heading {
-              label: _("Collections");
-              halign: start;
-              margin-start: 12;
-              margin-top: 10;
-              margin-bottom: 2;
-              visible: false;
-              styles ["caption", "dim-label"]
-            }
-
-            // Populated in window.rs from the index (catalogs + smart collections).
-            Gtk.ListBox collections_list {
-              selection-mode: none;
-              styles ["navigation-sidebar"]
-            }
-          };
+                Gtk.ListBox collections_list {
+                  selection-mode: none;
+                  styles ["navigation-sidebar"]
+                }
+              };
+            };
+          }
         };
+
+        [bottom]
+        Adw.ViewSwitcherBar {
+          stack: sidebar_stack;
+          reveal: true;
+        }
       };
     };
 
@@ -153,6 +216,13 @@ template $VitrineWindow: Adw.ApplicationWindow {
           child: Adw.ToolbarView {
             [top]
             Adw.HeaderBar {
+              [start]
+              Gtk.Button back_button {
+                icon-name: "go-previous-symbolic";
+                tooltip-text: _("Back");
+                sensitive: false;
+              }
+
               [start]
               Gtk.Button open_button {
                 child: Adw.ButtonContent {

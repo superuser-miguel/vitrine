@@ -20,6 +20,7 @@ const KEY_CACHE_MB: &str = "thumbnail-mb";
 const GROUP_SORT: &str = "Sort";
 const KEY_SORT_FIELD: &str = "field";
 const KEY_SORT_DESC: &str = "descending";
+const GROUP_BOOKMARKS: &str = "Bookmarks";
 
 /// Default thumbnail-cache budget (MB) — matches the historical prune default.
 pub const DEFAULT_CACHE_MB: u64 = 2048;
@@ -121,6 +122,46 @@ impl Settings {
         self.key_file
             .set_boolean(GROUP_SORT, KEY_SORT_DESC, descending);
         self.save();
+    }
+
+    /// The user's bookmarked folders (Nautilus-style quick-nav shortcuts).
+    pub fn bookmarks(&self) -> Vec<PathBuf> {
+        let count = self
+            .key_file
+            .uint64(GROUP_BOOKMARKS, KEY_COUNT)
+            .unwrap_or(0);
+        (0..count)
+            .filter_map(|i| self.key_file.string(GROUP_BOOKMARKS, &i.to_string()).ok())
+            .map(|s| PathBuf::from(s.as_str()))
+            .collect()
+    }
+
+    fn set_bookmarks(&self, bookmarks: &[PathBuf]) {
+        for (i, bookmark) in bookmarks.iter().enumerate() {
+            if let Some(s) = bookmark.to_str() {
+                self.key_file.set_string(GROUP_BOOKMARKS, &i.to_string(), s);
+            }
+        }
+        self.key_file
+            .set_uint64(GROUP_BOOKMARKS, KEY_COUNT, bookmarks.len() as u64);
+        self.save();
+    }
+
+    /// Add a bookmark if not already present. Returns whether it was added.
+    pub fn add_bookmark(&self, path: &Path) -> bool {
+        let mut bookmarks = self.bookmarks();
+        if bookmarks.iter().any(|b| b == path) {
+            return false;
+        }
+        bookmarks.push(path.to_path_buf());
+        self.set_bookmarks(&bookmarks);
+        true
+    }
+
+    /// Remove a bookmark.
+    pub fn remove_bookmark(&self, path: &Path) {
+        let bookmarks: Vec<PathBuf> = self.bookmarks().into_iter().filter(|b| b != path).collect();
+        self.set_bookmarks(&bookmarks);
     }
 
     fn save(&self) {
