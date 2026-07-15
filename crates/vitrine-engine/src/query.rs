@@ -13,12 +13,13 @@
 //! them in.
 
 use rusqlite::types::Value;
+use serde::{Deserialize, Serialize};
 
 use crate::db::Db;
 use crate::files::{FileRecord, SELECT_COLS};
 
 /// What to order results by. Closed set → the column name is never user input.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SortKey {
     /// File path (the browser's default; always present).
     #[default]
@@ -50,7 +51,7 @@ impl SortKey {
 }
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Direction {
     #[default]
     Asc,
@@ -68,10 +69,21 @@ impl Direction {
 
 /// A sort/filter over indexed files. Build with `..Default::default()` and set
 /// only the fields you need; the default is every present file, by name ascending.
-#[derive(Debug, Clone, Default)]
+///
+/// It is also a **smart collection's stored predicate**: `#[serde(default)]` lets
+/// a saved query hold only the fields it constrains, and every value is a bound
+/// parameter (tag names, camera, etc.), so a persisted query can never inject SQL.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Query {
     /// Restrict to a folder subtree (files whose path is under this directory).
     pub under: Option<String>,
+    /// Must carry *all* of these tags (case-insensitive).
+    pub tags_all: Vec<String>,
+    /// Must carry *at least one* of these tags (case-insensitive).
+    pub tags_any: Vec<String>,
+    /// Minimum star rating (inclusive).
+    pub rating_min: Option<i64>,
     /// Exact camera label match (as stored, "Make Model").
     pub camera: Option<String>,
     /// Exact format/content-type match.
@@ -122,6 +134,34 @@ impl Query {
             sql.push_str(" AND orientation = ?");
             params.push(Value::Integer(orientation));
         }
+        // Tags — names bound as parameters (never interpolated). `tags_all`
+        // counts distinct matches against the requested count; `tags_any` is an
+        // EXISTS. Matching uses the tags.name NOCASE collation (case-insensitive).
+        if !self.tags_all.is_empty() {
+            let names = dedup_ci(&self.tags_all);
+            sql.push_str(&format!(
+                " AND (SELECT count(*) FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                       WHERE ft.content_hash = files.content_hash AND t.name IN ({})) = ?",
+                placeholders(names.len())
+            ));
+            params.extend(names.iter().map(|n| Value::Text(n.clone())));
+            params.push(Value::Integer(names.len() as i64));
+        }
+        if !self.tags_any.is_empty() {
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
+                              WHERE ft.content_hash = files.content_hash AND t.name IN ({}))",
+                placeholders(self.tags_any.len())
+            ));
+            params.extend(self.tags_any.iter().map(|n| Value::Text(n.clone())));
+        }
+        if let Some(min) = self.rating_min {
+            sql.push_str(
+                " AND EXISTS (SELECT 1 FROM ratings r
+                              WHERE r.content_hash = files.content_hash AND r.rating >= ?)",
+            );
+            params.push(Value::Integer(min));
+        }
 
         let (expr, nullable) = self.sort.column();
         sql.push_str(" ORDER BY ");
@@ -148,6 +188,31 @@ impl Db {
         let rows = stmt.query_map(rusqlite::params_from_iter(params), FileRecord::from_row)?;
         rows.collect()
     }
+}
+
+/// `?,?,…` — `n` bound-parameter placeholders for an `IN (...)` list.
+fn placeholders(n: usize) -> String {
+    let mut s = String::with_capacity(n * 2);
+    for i in 0..n {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push('?');
+    }
+    s
+}
+
+/// De-duplicate tag names case-insensitively (so `tags_all` count matching is
+/// correct when a caller passes "Cat" and "cat").
+fn dedup_ci(names: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for n in names {
+        if seen.insert(n.to_lowercase()) {
+            out.push(n.clone());
+        }
+    }
+    out
 }
 
 /// Escape `\`, `%`, `_` for use inside a `LIKE ... ESCAPE '\'` pattern.
@@ -325,5 +390,74 @@ mod tests {
         };
         // Only the literal "/a_b" subtree, not "/axb".
         assert_eq!(paths(db.query(&q).unwrap()), ["/a_b/1.jpg"]);
+    }
+
+    #[test]
+    fn filter_by_tags_all_and_any() {
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "/a.jpg", 1, 1, None);
+        seed(&db, "/b.jpg", 1, 1, None);
+        seed(&db, "/c.jpg", 1, 1, None);
+        // seed sets content_hash = "h{path}".
+        db.apply_tag("beach", &["h/a.jpg".into(), "h/b.jpg".into()])
+            .unwrap();
+        db.apply_tag("sunset", &["h/a.jpg".into(), "h/c.jpg".into()])
+            .unwrap();
+
+        // tags_all: must have BOTH → only /a.jpg.
+        let q = Query {
+            tags_all: vec!["beach".into(), "SUNSET".into()], // case-insensitive
+            ..Default::default()
+        };
+        assert_eq!(paths(db.query(&q).unwrap()), ["/a.jpg"]);
+
+        // tags_any: at least one → all three.
+        let q = Query {
+            tags_any: vec!["beach".into(), "sunset".into()],
+            ..Default::default()
+        };
+        assert_eq!(paths(db.query(&q).unwrap()), ["/a.jpg", "/b.jpg", "/c.jpg"]);
+    }
+
+    #[test]
+    fn filter_by_rating_min() {
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "/a.jpg", 1, 1, None);
+        seed(&db, "/b.jpg", 1, 1, None);
+        db.set_rating("h/a.jpg", 5).unwrap();
+        db.set_rating("h/b.jpg", 3).unwrap();
+
+        let q = Query {
+            rating_min: Some(4),
+            ..Default::default()
+        };
+        assert_eq!(paths(db.query(&q).unwrap()), ["/a.jpg"]);
+    }
+
+    #[test]
+    fn tag_name_injection_is_a_harmless_literal() {
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "/a.jpg", 1, 1, None);
+        db.apply_tag("safe", &["h/a.jpg".into()]).unwrap();
+
+        // A malicious "tag name" is bound as a parameter — a literal that matches
+        // nothing; no injected SQL runs.
+        let q = Query {
+            tags_any: vec!["x'); DROP TABLE files;--".into()],
+            ..Default::default()
+        };
+        assert!(db.query(&q).unwrap().is_empty());
+        // files still intact.
+        assert_eq!(paths(db.query(&Query::default()).unwrap()), ["/a.jpg"]);
+    }
+
+    #[test]
+    fn query_serde_round_trips_partial_json() {
+        // A stored smart-collection predicate may hold only the fields it constrains.
+        let q: Query = serde_json::from_str(r#"{"tags_all":["fave"],"rating_min":4}"#).unwrap();
+        assert_eq!(q.tags_all, vec!["fave".to_string()]);
+        assert_eq!(q.rating_min, Some(4));
+        assert_eq!(q.sort, SortKey::Name); // defaulted
+        assert!(q.tags_any.is_empty());
     }
 }

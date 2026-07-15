@@ -28,6 +28,7 @@
 pub mod annotations;
 pub mod backup;
 pub mod cache_evict;
+pub mod collections;
 pub mod db;
 pub mod exif;
 pub mod files;
@@ -40,6 +41,7 @@ pub mod schema;
 pub mod tags;
 pub mod thumbnail_cache;
 
+pub use collections::{Collection, CollectionKind};
 pub use db::Db;
 pub use exif::{parse_exif, ExifData};
 pub use files::{Enrichment, FileRecord};
