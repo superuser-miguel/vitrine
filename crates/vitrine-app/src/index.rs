@@ -99,6 +99,10 @@ enum Request {
     DeleteCollection {
         id: i64,
     },
+    /// Mark paths missing in the index (e.g. after trashing duplicates).
+    MarkMissing {
+        paths: Vec<String>,
+    },
 }
 
 /// A cheap, cloneable handle for routing **annotation writes** to the single
@@ -162,6 +166,13 @@ impl Annotator {
     /// Delete the collection `id`.
     pub fn delete_collection(&self, id: i64) {
         let _ = self.requests.try_send(Request::DeleteCollection { id });
+    }
+
+    /// Mark paths missing in the index (after trashing them).
+    pub fn mark_missing(&self, paths: &[String]) {
+        let _ = self.requests.try_send(Request::MarkMissing {
+            paths: paths.to_vec(),
+        });
     }
 }
 
@@ -319,6 +330,13 @@ fn worker(
                 }
                 Err(e) => glib::g_warning!("vitrine", "delete collection {id}: {e}"),
             },
+            Request::MarkMissing { paths } => {
+                for path in paths {
+                    if let Err(e) = db.mark_missing(&path) {
+                        glib::g_warning!("vitrine", "mark missing {path}: {e}");
+                    }
+                }
+            }
         }
     }
 }

@@ -30,6 +30,7 @@ pub mod backup;
 pub mod cache_evict;
 pub mod collections;
 pub mod db;
+pub mod dedup;
 pub mod exif;
 pub mod files;
 pub mod hash;
@@ -43,6 +44,7 @@ pub mod thumbnail_cache;
 
 pub use collections::{Collection, CollectionKind};
 pub use db::Db;
+pub use dedup::DuplicateCluster;
 pub use exif::{parse_exif, ExifData};
 pub use files::{Enrichment, FileRecord};
 pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};

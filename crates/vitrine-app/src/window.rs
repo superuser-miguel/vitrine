@@ -124,6 +124,11 @@ mod imp {
         pub collections_list: TemplateChild<gtk::ListBox>,
         /// Collection ids parallel to `collections_list` rows (by index).
         pub collection_ids: RefCell<Vec<i64>>,
+        /// The lazily-built "Duplicates" page + its content box (rebuilt per scan).
+        pub duplicates_page: RefCell<Option<adw::NavigationPage>>,
+        pub duplicates_content: RefCell<Option<gtk::Box>>,
+        /// Duplicate mode: false = exact (byte-identical), true = near (pHash).
+        pub dedup_near: Cell<bool>,
         #[template_child]
         pub nav_view: TemplateChild<adw::NavigationView>,
         #[template_child]
@@ -208,6 +213,9 @@ mod imp {
                 collections_heading: Default::default(),
                 collections_list: Default::default(),
                 collection_ids: RefCell::new(Vec::new()),
+                duplicates_page: RefCell::new(None),
+                duplicates_content: RefCell::new(None),
+                dedup_near: Cell::new(false),
                 nav_view: Default::default(),
                 toast_overlay: Default::default(),
                 icon_smaller: Default::default(),
@@ -962,6 +970,243 @@ impl VitrineWindow {
         dialog.present(Some(self));
     }
 
+    // --- duplicates ----------------------------------------------------------
+
+    /// Open (or refresh) the Duplicates page and push it onto the nav view.
+    fn show_duplicates(&self) {
+        let imp = self.imp();
+        if imp.duplicates_page.borrow().is_none() {
+            self.build_duplicates_page();
+        }
+        self.refresh_duplicates();
+        if imp.nav_view.find_page("duplicates").is_none() {
+            if let Some(page) = imp.duplicates_page.borrow().as_ref() {
+                imp.nav_view.push(page);
+            }
+        } else {
+            imp.nav_view.pop_to_tag("duplicates");
+        }
+    }
+
+    /// Build the Duplicates page shell: a header with an Exact/Similar switch and
+    /// a scrollable content box (filled by `refresh_duplicates`).
+    fn build_duplicates_page(&self) {
+        let imp = self.imp();
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 12);
+        content.set_margin_top(12);
+        content.set_margin_bottom(12);
+        content.set_margin_start(12);
+        content.set_margin_end(12);
+        let scroller = gtk::ScrolledWindow::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .child(&content)
+            .build();
+
+        let mode = gtk::DropDown::from_strings(&[
+            &gettextrs::gettext("Exact"),
+            &gettextrs::gettext("Similar"),
+        ]);
+        mode.set_tooltip_text(Some(&gettextrs::gettext(
+            "Exact: byte-identical · Similar: visually alike (perceptual hash)",
+        )));
+        mode.connect_selected_notify(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |dropdown| {
+                window.imp().dedup_near.set(dropdown.selected() == 1);
+                window.refresh_duplicates();
+            }
+        ));
+
+        let header = adw::HeaderBar::new();
+        header.pack_end(&mode);
+        let toolbar = adw::ToolbarView::new();
+        toolbar.add_top_bar(&header);
+        toolbar.set_content(Some(&scroller));
+
+        let page = adw::NavigationPage::builder()
+            .title(gettextrs::gettext("Duplicates"))
+            .tag("duplicates")
+            .child(&toolbar)
+            .build();
+        *imp.duplicates_page.borrow_mut() = Some(page);
+        *imp.duplicates_content.borrow_mut() = Some(content);
+    }
+
+    /// Run the dedup scan and rebuild the cluster cards.
+    fn refresh_duplicates(&self) {
+        let imp = self.imp();
+        let Some(content) = imp.duplicates_content.borrow().clone() else {
+            return;
+        };
+        while let Some(child) = content.first_child() {
+            content.remove(&child);
+        }
+
+        self.ensure_read_db();
+        let near = imp.dedup_near.get();
+        let clusters = {
+            let db = imp.read_db.borrow();
+            match db.as_ref() {
+                Some(db) => if near {
+                    db.near_duplicates(8)
+                } else {
+                    db.exact_duplicates()
+                }
+                .unwrap_or_default(),
+                None => Vec::new(),
+            }
+        };
+
+        if clusters.is_empty() {
+            content.append(
+                &adw::StatusPage::builder()
+                    .icon_name("edit-copy-symbolic")
+                    .title(gettextrs::gettext("No Duplicates Found"))
+                    .description(if near {
+                        gettextrs::gettext("No visually-similar images in the index yet.")
+                    } else {
+                        gettextrs::gettext("No byte-identical images in the index yet.")
+                    })
+                    .vexpand(true)
+                    .build(),
+            );
+            return;
+        }
+        for cluster in &clusters {
+            content.append(&self.build_cluster_card(cluster));
+        }
+    }
+
+    /// One card per duplicate cluster: reclaimable size, the images (keeper
+    /// first), and a button to trash the extra copies.
+    fn build_cluster_card(&self, cluster: &vitrine_engine::DuplicateCluster) -> gtk::Widget {
+        let card = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        card.add_css_class("card");
+        card.set_margin_bottom(4);
+
+        let reclaimable: i64 = cluster.files.iter().skip(1).map(|f| f.size).sum();
+        let heading = gtk::Label::builder()
+            .label(format!(
+                "{} copies · {} reclaimable",
+                cluster.files.len(),
+                glib::format_size(reclaimable.max(0) as u64)
+            ))
+            .halign(gtk::Align::Start)
+            .css_classes(["heading"])
+            .margin_start(10)
+            .margin_top(10)
+            .build();
+        card.append(&heading);
+
+        let strip = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        strip.set_margin_start(10);
+        strip.set_margin_end(10);
+        for (i, file) in cluster.files.iter().enumerate() {
+            let picture = gtk::Picture::builder()
+                .content_fit(gtk::ContentFit::Cover)
+                .width_request(96)
+                .height_request(96)
+                .tooltip_text(&file.path)
+                .css_classes(if i == 0 {
+                    vec!["card", "dedup-keeper"]
+                } else {
+                    vec!["card"]
+                })
+                .build();
+            self.load_dedup_thumb(&picture, &file.path, file.mtime);
+            strip.append(&picture);
+        }
+        card.append(&strip);
+
+        let others: Vec<String> = cluster
+            .files
+            .iter()
+            .skip(1)
+            .map(|f| f.path.clone())
+            .collect();
+        let trash = gtk::Button::builder()
+            .label(match others.len() {
+                1 => gettextrs::gettext("Trash the other copy (keep largest)"),
+                n => format!("Trash the other {n} copies (keep largest)"),
+            })
+            .halign(gtk::Align::Start)
+            .css_classes(["destructive-action"])
+            .margin_start(10)
+            .margin_bottom(10)
+            .build();
+        trash.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.trash_duplicate_others(&others)
+        ));
+        card.append(&trash);
+        card.upcast()
+    }
+
+    /// Load a thumbnail for a path into a `Picture` (dedup cards, size 128).
+    fn load_dedup_thumb(&self, picture: &gtk::Picture, path: &str, mtime: i64) {
+        let file = gio::File::for_path(path);
+        let key = crate::thumbnails::ram_key(&file.uri(), 128);
+        let cache = self.imp().thumb_cache.clone();
+        if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
+            picture.set_paintable(Some(&texture));
+            return;
+        }
+        let renderer = crate::thumbnails::renderer_source(picture);
+        let weak = picture.downgrade();
+        glib::spawn_future_local(async move {
+            let _permit = crate::thumbnails::load_gate().acquire().await;
+            if let Some(texture) = crate::thumbnails::load(file, mtime, 128, renderer).await {
+                cache.borrow_mut().put(
+                    key,
+                    texture.clone(),
+                    crate::thumbnails::texture_cost(&texture),
+                );
+                if let Some(picture) = weak.upgrade() {
+                    picture.set_paintable(Some(&texture));
+                }
+            }
+        });
+    }
+
+    /// Trash the non-keeper copies of a cluster, drop them from the index, and
+    /// refresh the page.
+    fn trash_duplicate_others(&self, paths: &[String]) {
+        for path in paths {
+            gio::File::for_path(path).trash_async(
+                glib::Priority::DEFAULT,
+                gio::Cancellable::NONE,
+                glib::clone!(
+                    #[weak(rename_to = window)]
+                    self,
+                    move |result| {
+                        if let Err(err) = result {
+                            window.toast(&format!("Couldn’t move to trash: {}", err.message()));
+                        }
+                    }
+                ),
+            );
+        }
+        if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
+            indexer.annotator().mark_missing(paths);
+        }
+        self.toast(&match paths.len() {
+            1 => "Moved 1 copy to Trash".to_string(),
+            n => format!("Moved {n} copies to Trash"),
+        });
+        // Give the writer a beat to mark them missing, then rebuild the list.
+        glib::timeout_add_seconds_local_once(
+            1,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move || window.refresh_duplicates()
+            ),
+        );
+    }
+
     // --- collections ---------------------------------------------------------
 
     /// Wire the sidebar collections list + "new catalog" button, and do an
@@ -1392,6 +1637,14 @@ impl VitrineWindow {
             move |_, _| crate::preferences::present(&window)
         ));
         self.add_action(&preferences);
+
+        let find_duplicates = gio::SimpleAction::new("find-duplicates", None);
+        find_duplicates.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| window.show_duplicates()
+        ));
+        self.add_action(&find_duplicates);
     }
 
     /// Enqueue a library root for background indexing (used by Preferences).
@@ -1577,6 +1830,16 @@ impl VitrineWindow {
         self.maybe_sorttest();
         self.maybe_tagtest();
         self.maybe_filtertest();
+        if std::env::var_os("VITRINE_DUPES").is_some() {
+            glib::timeout_add_seconds_local_once(
+                1,
+                glib::clone!(
+                    #[weak(rename_to = window)]
+                    self,
+                    move || window.show_duplicates()
+                ),
+            );
+        }
     }
 
     /// Dev aid: if `VITRINE_FILTER=<n>` is set, reveal the filter bar and apply a

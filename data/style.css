@@ -13,3 +13,9 @@
   background-color: rgba(0, 0, 0, 0.6);
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
+
+/* Duplicates page: mark the copy that will be kept. */
+.dedup-keeper {
+  outline: 2px solid @accent_color;
+  outline-offset: -2px;
+}
