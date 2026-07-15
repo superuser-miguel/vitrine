@@ -358,6 +358,19 @@ Tasks:
    Batch-write in one transaction.
 2. Ratings: 0–5 stars on selection; keyboard 0–5 in grid and viewer; shown in cell overlay
    (small) and metadata panel.
+2a. **Comments** (per-image free-text caption). A third annotation alongside tags/stars,
+   content-hash keyed so it survives renames. New `comments` table mirroring `ratings`
+   (`content_hash` PK, `body TEXT`, `sync_state` v2 seam, `updated_at`); added as a
+   forward-only migration when built. **Store `dc:description`-compatible semantics from
+   day one** — same trick §8 uses for `Xmp.xmp.Rating`, so the deferred v2 embedded-write
+   (rexiv2, §9) is a pure sync and the field round-trips with gThumb/digiKam/Lightroom /
+   Nautilus properties. v2 read side: enrichment can seed the comment from an existing
+   embedded `dc:description`, importing comments users already made in gThumb. v1 is
+   **DB-only** (sidecar/embedded sync rides the same deferred write-back as tags/ratings).
+   UI: an editable row (AdwEntryRow / GtkTextView) in the viewer's properties sidebar —
+   the one editable field beside the read-only dimensions/camera/date. Backup/export gains
+   a content-hash-keyed `CommentExport`. Single free-text caption per image — **not** a
+   threaded/multi-comment model.
 3. Collections sidebar (one list, two kinds):
    - **Smart:** name + predicate builder (tags any/all, rating ≥, date range, camera,
      format). Stored as JSON in `collections.query`; engine compiles JSON → SQL. Live count.
