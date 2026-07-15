@@ -663,3 +663,87 @@ drag-add + a `Ctrl+D` action. Self-contained navigation; doesn't disturb grid/in
 
 > Note: the **filmstrip** (viewer bottom bar, Phase 1) is unrelated — it moves *within*
 > the current folder image-to-image; the sidebar moves *between* folders.
+
+---
+
+## 11. Test suite & debug tooling (QA plan — internal memo, 2026-07-15)
+
+Design intent for making Vitrine *testable* beyond the engine's headless unit
+tests. Not built as one block — grow it alongside the phases.
+
+### 11.1 What we have
+
+- **Engine unit tests** (65 as of Phase 3): pure, headless, fast; cover index/
+  scanner/hash/query/annotations/collections/backup. Enforced with the purity
+  gate (`build-aux/checks.sh`) so the engine never grows a GTK dep.
+- **Dev env hooks** (the seed of a UI harness — each sets up state, acts, and
+  self-quits, often writing a PNG via GTK's own GSK renderer so no compositor is
+  needed): `VITRINE_SHOT` (snapshot+quit), `VITRINE_OPEN` (auto-open viewer),
+  `VITRINE_INFO` (reveal properties sidebar), `VITRINE_PREFS` (open Preferences),
+  `VITRINE_SORT=<field>[:desc]`, `VITRINE_SCROLLTEST` (fling+time), `VITRINE_LOADTEST`
+  (worst main-loop stall), `VITRINE_CYCLE` (cycle folders, leak hunt), `VITRINE_ICON`,
+  `VITRINE_LOAD_LIMIT`, `VITRINE_DECODE_LIMIT`, `VITRINE_CACHE_CAP_MB`.
+
+### 11.2 UI behaviour tests to build (screenshot / assertion harness)
+
+Formalize the hooks into a `build-aux/uitest.sh` that runs the release binary
+with a scripted hook against a fixture folder and asserts on the result
+(stderr markers and/or PNG hashes). Categories:
+
+- **Thumbnail rendering**
+  - *Unordered* (enumerate order) vs *ordered* (each sort field/direction): assert
+    the grid's item order via a `VITRINE_DUMPORDER` hook (print the first N display
+    names) — extend the existing `VITRINE_SORT` dump.
+  - No blank cells after scroll settles (extend `VITRINE_SCROLLTEST` to count
+    still-pending cells at the end).
+  - **Recycling correctness**: a fast scroll must never paint image A into a cell
+    since rebound to B (the §8 guard) — assert via a fixture of distinctly-coloured
+    images and a pixel check at known cells.
+- **Filmstrip**
+  - Sync: arrow-flipping the viewer moves the filmstrip highlight and auto-scrolls
+    it into view; click-to-jump changes the main image. Hook: `VITRINE_FLIPTEST`
+    (open viewer, step ±N, assert current position + filmstrip selected match).
+  - Order follows the grid sort (shares the sorted model).
+- **UI resize / adaptivity**
+  - Launch size (default 1100×720), minimum size (360×240), **fullscreen** toggle,
+    and the split-view collapse breakpoints (sidebar / properties overlay when
+    narrow). Hook: `VITRINE_SIZE=<wxh>` sets the window size then snapshots; assert
+    the sidebar collapses below the breakpoint.
+
+### 11.3 Debug tooling
+
+- **App**: a single `VITRINE_DEBUG=1` that (a) adds the `.devel` styling, (b)
+  turns on `glib::g_debug` logging under the `vitrine` domain (gate verbose logs
+  behind it), and (c) shows an optional on-screen **debug overlay** — live FD
+  count (`/proc/self/fd`), RSS, RAM/disk thumbnail-cache stats, decode-gate
+  inflight, main-loop stall high-water. Complements `GTK_DEBUG=interactive` (the
+  GTK Inspector) which already works. Keep the ad-hoc `VITRINE_*` hooks; document
+  them in `HACKING.md`.
+- **Extensions system** (v2, §10.3 Lua + §10.5 WASM): needs its own harness from
+  day one —
+  - a **dry-run/REPL**: load a script (or `.wasm`), feed it a fixture item, print
+    the result + any host-call log, without touching the real DB;
+  - a **capabilities inspector**: show what each extension declared/was granted
+    (Lua: none but read-only item context; WASM: memory/time limits, host fns);
+  - **hot-reload** + clear **error surfacing** (script/trap errors as a toast +
+    log, never a crash); resource-limit visibility (WASM fuel/time);
+  - a bundled **"echo" test extension** fixture + assertions (custom sort key,
+    predicate) so the tier has regression coverage before real plugins exist.
+
+### 11.4 Flatpak sandbox testing
+
+The sandbox changes behaviour (portal doc-paths, `xdg-pictures` only, thumbnail-
+cache mapping, tighter FD limits), so tests must also run **inside** it:
+
+- `flatpak run --env=VITRINE_*=… --command=… io.github.…Vitrine <fixture>` to run
+  the same scripted hooks in-sandbox; snapshot to a path under the app's
+  granted dirs.
+- `flatpak-builder --run build-dir <manifest> <cmd>` to execute a command in the
+  freshly-built sandbox (CI-friendly: build, then run the uitest hook, assert).
+- Sandbox-specific assertions: FD stays flat cycling unique dirs (the dmabuf-leak
+  regression — already manually verified, automate it); shared thumbnail cache is
+  read-only-mapped and never polluted by portal-path writes; real-path vs doc-path
+  cache keying; library-root portal grants persist across runs.
+- Wire `checks.sh` (or a `checks-flatpak.sh`) to optionally run the in-sandbox
+  suite when a flatpak build exists, so regressions in sandbox posture are caught
+  before release.
