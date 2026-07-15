@@ -104,9 +104,12 @@ fn compile_resources(data_dir: &Path, out_dir: &Path) {
     fs::copy(data_dir.join("resources.gresource.xml"), &gresource_xml)
         .expect("copy resources.gresource.xml");
     run(
+        // Source .ui/style.css from OUT_DIR and static assets (icons) from data/.
         Command::new("glib-compile-resources")
             .arg("--sourcedir")
             .arg(out_dir)
+            .arg("--sourcedir")
+            .arg(data_dir)
             .arg("--target")
             .arg(out_dir.join("vitrine.gresource"))
             .arg(&gresource_xml),

@@ -690,13 +690,18 @@ impl VitrineViewer {
         self.apply_rating(new);
     }
 
-    /// Set the rating (0 clears), update the stars, and persist via the annotator.
+    /// Set the rating (0 clears): update the viewer stars, the shared grid item
+    /// (so its overlay repaints and the two views stay in sync), and persist via
+    /// the annotator. Works for both the star buttons and the number keys.
     fn apply_rating(&self, rating: i64) {
         let imp = self.imp();
         let Some(hash) = imp.current_hash.borrow().clone() else {
             return;
         };
         self.render_stars(rating);
+        if let Some(item) = self.item_at(self.current_position()) {
+            item.set_rating(rating as i32);
+        }
         if let Some(ann) = imp.annotator.borrow().as_ref() {
             ann.set_rating(&hash, if rating == 0 { None } else { Some(rating) });
         }

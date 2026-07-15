@@ -52,6 +52,7 @@ fn main() -> glib::ExitCode {
     app.connect_startup(|app| {
         setup_actions(app);
         load_css();
+        register_icons();
         // Keep the app-private thumbnail cache within budget (LRU eviction).
         thumbnails::prune_private_cache();
     });
@@ -77,6 +78,15 @@ fn present(window: &VitrineWindow) {
     // Fully qualified: adw::prelude globs several traits that each define
     // `present()`, so a bare method call is ambiguous.
     gtk::prelude::GtkWindowExt::present(window);
+}
+
+/// Make the app's bundled symbolic icons (in the gresource under `…/icons`)
+/// resolvable by name (e.g. `tag-symbolic`) on the default icon theme.
+fn register_icons() {
+    if let Some(display) = gtk::gdk::Display::default() {
+        gtk::IconTheme::for_display(&display)
+            .add_resource_path(&format!("{}/icons", config::GRESOURCE_PREFIX));
+    }
 }
 
 fn load_css() {

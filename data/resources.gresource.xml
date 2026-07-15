@@ -5,5 +5,8 @@
     <file compressed="true">grid_cell.ui</file>
     <file compressed="true">viewer.ui</file>
     <file compressed="true">style.css</file>
+    <!-- App-bundled symbolic icons (registered on the default IconTheme in
+         main.rs); GTK recolors them like any theme icon. -->
+    <file compressed="true" alias="icons/scalable/actions/tag-symbolic.svg">icons/hicolor/scalable/actions/tag-symbolic.svg</file>
   </gresource>
 </gresources>
