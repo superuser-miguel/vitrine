@@ -114,6 +114,12 @@ mod imp {
         pub icon_larger: TemplateChild<gtk::Button>,
         #[template_child]
         pub index_banner: TemplateChild<adw::Banner>,
+        #[template_child]
+        pub tag_button: TemplateChild<gtk::MenuButton>,
+
+        /// The tag popover's entry + existing-tag chip box (rebuilt on open).
+        pub tag_entry: RefCell<Option<gtk::Entry>>,
+        pub tag_flowbox: RefCell<Option<gtk::FlowBox>>,
 
         /// Background library indexer (created in `constructed`). Owns the one
         /// writer `Db`; the UI only enqueues folders and reads progress.
@@ -164,6 +170,9 @@ mod imp {
                 icon_smaller: Default::default(),
                 icon_larger: Default::default(),
                 index_banner: Default::default(),
+                tag_button: Default::default(),
+                tag_entry: RefCell::new(None),
+                tag_flowbox: RefCell::new(None),
                 indexer: RefCell::new(None),
                 read_db: RefCell::new(None),
                 current_folder: RefCell::new(None),
@@ -207,6 +216,7 @@ mod imp {
             self.obj().setup_grid();
             self.obj().setup_actions();
             self.obj().setup_indexer();
+            self.obj().setup_tagging();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -577,6 +587,151 @@ impl VitrineWindow {
         }
     }
 
+    // --- tagging -------------------------------------------------------------
+
+    /// Build the "Tag Selection" popover: a new-tag entry plus a chip cloud of
+    /// existing tags (click to apply), live-filtered by what you type.
+    fn setup_tagging(&self) {
+        let imp = self.imp();
+
+        let popover = gtk::Popover::new();
+        popover.set_width_request(260);
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 8);
+
+        let entry = gtk::Entry::builder()
+            .placeholder_text(gettextrs::gettext("Tag selection… (Enter)"))
+            .build();
+        content.append(&entry);
+
+        let flowbox = gtk::FlowBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .column_spacing(4)
+            .row_spacing(4)
+            .max_children_per_line(4)
+            .build();
+        let scroller = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .max_content_height(220)
+            .propagate_natural_height(true)
+            .child(&flowbox)
+            .build();
+        content.append(&scroller);
+        popover.set_child(Some(&content));
+        imp.tag_button.set_popover(Some(&popover));
+
+        // Enter applies the typed tag.
+        entry.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |entry| {
+                window.apply_tag_to_selection(&entry.text());
+                entry.set_text("");
+            }
+        ));
+        // Typing filters the existing-tag chips (case-insensitive substring).
+        let filter = std::rc::Rc::new(std::cell::RefCell::new(String::new()));
+        flowbox.set_filter_func(glib::clone!(
+            #[strong]
+            filter,
+            move |child| {
+                let needle = filter.borrow();
+                if needle.is_empty() {
+                    return true;
+                }
+                child
+                    .child()
+                    .and_downcast::<gtk::Button>()
+                    .and_then(|b| b.label())
+                    .map(|l| l.to_lowercase().contains(needle.as_str()))
+                    .unwrap_or(false)
+            }
+        ));
+        entry.connect_changed(glib::clone!(
+            #[weak]
+            flowbox,
+            move |entry| {
+                *filter.borrow_mut() = entry.text().to_lowercase();
+                flowbox.invalidate_filter();
+            }
+        ));
+        // Rebuild the chips (with fresh counts) each time the popover opens.
+        popover.connect_show(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[weak]
+            entry,
+            move |_| {
+                entry.set_text("");
+                window.rebuild_tag_chips();
+                entry.grab_focus();
+            }
+        ));
+
+        *imp.tag_entry.borrow_mut() = Some(entry);
+        *imp.tag_flowbox.borrow_mut() = Some(flowbox);
+    }
+
+    /// Repopulate the tag chip cloud from the index (existing tags + counts).
+    fn rebuild_tag_chips(&self) {
+        let Some(flowbox) = self.imp().tag_flowbox.borrow().clone() else {
+            return;
+        };
+        while let Some(child) = flowbox.first_child() {
+            flowbox.remove(&child);
+        }
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
+        let Some(db) = db.as_ref() else { return };
+        for tag in db.all_tags().unwrap_or_default() {
+            let chip = gtk::Button::builder()
+                .label(&tag.name)
+                .tooltip_text(format!("{} image(s)", tag.count))
+                .css_classes(["pill"])
+                .build();
+            let name = tag.name.clone();
+            chip.connect_clicked(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move |_| window.apply_tag_to_selection(&name)
+            ));
+            flowbox.insert(&chip, -1);
+        }
+    }
+
+    /// Apply `name` to the current grid selection (batch write, one transaction).
+    fn apply_tag_to_selection(&self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let hashes = self.selected_hashes();
+        if hashes.is_empty() {
+            self.toast("Select one or more indexed images to tag");
+            return;
+        }
+        if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
+            indexer.annotator().tag(name, &hashes, true);
+        }
+        self.toast(&match hashes.len() {
+            1 => format!("Tagged 1 image “{name}”"),
+            n => format!("Tagged {n} images “{name}”"),
+        });
+        self.imp().tag_button.popdown();
+    }
+
+    /// Content hashes of the selected items that are indexed (have a hash).
+    fn selected_hashes(&self) -> Vec<String> {
+        let Some(model) = self.model() else {
+            return Vec::new();
+        };
+        self.selected_positions()
+            .into_iter()
+            .filter_map(|pos| model.item(pos).and_downcast::<ImageObject>())
+            .map(|item| item.content_hash())
+            .filter(|h| !h.is_empty())
+            .collect()
+    }
+
     /// Stamp each item with its content hash + rating from the index, so cell
     /// overlays and rating writes need no per-cell database hit. Best-effort:
     /// items the index hasn't caught up on stay unstamped until the re-stamp on
@@ -941,6 +1096,34 @@ impl VitrineWindow {
         self.maybe_scrolltest();
         self.maybe_loadtest();
         self.maybe_sorttest();
+        self.maybe_tagtest();
+    }
+
+    /// Dev aid: if `VITRINE_TAG=<name>` is set, select all, apply that tag to the
+    /// selection, and reveal the tag popover — for verifying tagging end-to-end.
+    fn maybe_tagtest(&self) {
+        let Some(name) = std::env::var_os("VITRINE_TAG") else {
+            return;
+        };
+        let name = name.to_string_lossy().into_owned();
+        glib::timeout_add_seconds_local_once(
+            1,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move || {
+                    if let Some(sel) = window.imp().selection.borrow().as_ref() {
+                        sel.select_all();
+                    }
+                    let hashes = window.selected_hashes();
+                    if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                        indexer.annotator().tag(&name, &hashes, true);
+                    }
+                    eprintln!("VITRINE_TAG applied '{name}' to {} images", hashes.len());
+                    window.imp().tag_button.popup();
+                }
+            ),
+        );
     }
 
     /// Dev aid: if `VITRINE_PREFS` is set, open Preferences after a beat (for
