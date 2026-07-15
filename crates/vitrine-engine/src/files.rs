@@ -58,6 +58,7 @@ pub struct Enrichment {
     pub width: i64,
     pub height: i64,
     pub phash: Option<i64>,
+    pub format: Option<String>,
     pub date_taken: Option<i64>,
     pub camera: Option<String>,
     pub orientation: Option<i64>,
@@ -157,13 +158,14 @@ impl Db {
     /// alone). No-op if the path is gone. Called by the app's enrichment pass.
     pub fn set_enrichment(&self, path: &str, e: &Enrichment) -> rusqlite::Result<()> {
         self.conn().execute(
-            "UPDATE files SET width=?2, height=?3, phash=?4, date_taken=?5,
-                 camera=?6, orientation=?7 WHERE path=?1",
+            "UPDATE files SET width=?2, height=?3, phash=?4, format=?5,
+                 date_taken=?6, camera=?7, orientation=?8 WHERE path=?1",
             rusqlite::params![
                 path,
                 e.width,
                 e.height,
                 e.phash,
+                e.format,
                 e.date_taken,
                 e.camera,
                 e.orientation,
@@ -254,6 +256,7 @@ mod tests {
                 width: 4000,
                 height: 3000,
                 phash: Some(-42),
+                format: Some("JPEG".into()),
                 date_taken: Some(1_000_000_000),
                 camera: Some("SONY ILCE-7M3".into()),
                 orientation: Some(1),
@@ -266,6 +269,7 @@ mod tests {
         let a = db.file_by_path("/a.jpg").unwrap().unwrap();
         assert_eq!(a.width, Some(4000));
         assert_eq!(a.phash, Some(-42));
+        assert_eq!(a.format.as_deref(), Some("JPEG"));
         assert_eq!(a.camera.as_deref(), Some("SONY ILCE-7M3"));
         // Identity columns are untouched by enrichment.
         assert_eq!(a.content_hash, "hA");

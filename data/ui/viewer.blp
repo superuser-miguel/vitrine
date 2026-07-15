@@ -16,6 +16,12 @@ template $VitrineViewer: Adw.NavigationPage {
       };
 
       [end]
+      Gtk.ToggleButton info_button {
+        icon-name: "dialog-information-symbolic";
+        tooltip-text: _("Image Properties");
+      }
+
+      [end]
       Gtk.Button zoom_in_button {
         icon-name: "zoom-in-symbolic";
         tooltip-text: _("Zoom In");
@@ -34,13 +40,74 @@ template $VitrineViewer: Adw.NavigationPage {
       }
     }
 
-    content: Gtk.ScrolledWindow picture_scroller {
-      hexpand: true;
-      vexpand: true;
+    content: Adw.OverlaySplitView info_split {
+      sidebar-position: end;
+      collapsed: true;
+      max-sidebar-width: 340;
+      show-sidebar: bind info_button.active bidirectional;
 
-      child: Gtk.Picture picture {
-        content-fit: contain;
-        can-shrink: true;
+      content: Gtk.ScrolledWindow picture_scroller {
+        hexpand: true;
+        vexpand: true;
+
+        child: Gtk.Picture picture {
+          content-fit: contain;
+          can-shrink: true;
+        };
+      };
+
+      sidebar: Adw.PreferencesPage {
+        width-request: 280;
+
+        Adw.PreferencesGroup {
+          title: _("Properties");
+
+          Adw.ActionRow meta_name_row {
+            title: _("Name");
+            subtitle-selectable: true;
+            subtitle-lines: 0;
+          }
+
+          Adw.ActionRow meta_folder_row {
+            title: _("Folder");
+            subtitle-selectable: true;
+            subtitle-lines: 0;
+          }
+        }
+
+        Adw.PreferencesGroup {
+          Adw.ActionRow meta_dimensions_row {
+            title: _("Dimensions");
+            subtitle-selectable: true;
+          }
+
+          Adw.ActionRow meta_size_row {
+            title: _("File Size");
+            subtitle-selectable: true;
+          }
+
+          Adw.ActionRow meta_format_row {
+            title: _("Format");
+            subtitle-selectable: true;
+          }
+        }
+
+        Adw.PreferencesGroup {
+          Adw.ActionRow meta_date_row {
+            title: _("Date Taken");
+            subtitle-selectable: true;
+          }
+
+          Adw.ActionRow meta_camera_row {
+            title: _("Camera");
+            subtitle-selectable: true;
+          }
+
+          Adw.ActionRow meta_orientation_row {
+            title: _("Orientation");
+            subtitle-selectable: true;
+          }
+        }
       };
     };
 

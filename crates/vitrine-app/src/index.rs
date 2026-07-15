@@ -211,6 +211,7 @@ async fn enrich_one(path: &str) -> Enrichment {
         width: probe.width as i64,
         height: probe.height as i64,
         phash,
+        format: probe.format,
         date_taken: exif.date_taken,
         camera: exif.camera,
         orientation: exif.orientation,

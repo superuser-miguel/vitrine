@@ -10,12 +10,13 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use adw::prelude::ActionRowExt;
 use adw::subclass::prelude::*;
 use gtk::gdk;
 use gtk::prelude::*;
 use gtk::{gio, glib, CompositeTemplate};
 
-use vitrine_engine::SizedLru;
+use vitrine_engine::{Db, FileRecord, SizedLru};
 
 use crate::grid_cell::THUMB_SIZE;
 use crate::image_object::ImageObject;
@@ -52,6 +53,28 @@ mod imp {
         pub zoom_out_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub zoom_fit_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub info_split: TemplateChild<adw::OverlaySplitView>,
+        #[template_child]
+        pub meta_name_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub meta_folder_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub meta_dimensions_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub meta_size_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub meta_format_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub meta_date_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub meta_camera_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub meta_orientation_row: TemplateChild<adw::ActionRow>,
+
+        /// Read-only index connection, opened lazily to look up metadata for the
+        /// shown image (the writer lives on the indexer thread).
+        pub read_db: RefCell<Option<Db>>,
 
         /// Shared, ordered image model (same store the grid shows).
         pub store: RefCell<Option<gio::ListStore>>,
@@ -80,6 +103,16 @@ mod imp {
                 zoom_in_button: Default::default(),
                 zoom_out_button: Default::default(),
                 zoom_fit_button: Default::default(),
+                info_split: Default::default(),
+                meta_name_row: Default::default(),
+                meta_folder_row: Default::default(),
+                meta_dimensions_row: Default::default(),
+                meta_size_row: Default::default(),
+                meta_format_row: Default::default(),
+                meta_date_row: Default::default(),
+                meta_camera_row: Default::default(),
+                meta_orientation_row: Default::default(),
+                read_db: RefCell::new(None),
                 store: RefCell::new(None),
                 filmstrip: RefCell::new(None),
                 filmstrip_view: RefCell::new(None),
@@ -152,6 +185,10 @@ impl VitrineViewer {
             filmstrip.set_model(Some(&store));
         }
         self.show_position(position);
+        // Dev aid: VITRINE_INFO reveals the properties sidebar (for screenshots).
+        if std::env::var_os("VITRINE_INFO").is_some() {
+            imp.info_split.set_show_sidebar(true);
+        }
     }
 
     // --- setup ---------------------------------------------------------------
@@ -389,6 +426,7 @@ impl VitrineViewer {
         let imp = self.imp();
 
         imp.title.set_title(&item.display_name());
+        self.update_metadata(&item);
 
         // Keep the filmstrip selection + scroll in step without re-entering.
         imp.syncing.set(true);
@@ -474,6 +512,72 @@ impl VitrineViewer {
             .map_or(gtk::INVALID_LIST_POSITION, |f| f.selected())
     }
 
+    // --- metadata sidebar ----------------------------------------------------
+
+    /// Fill the properties sidebar for `item` from the index. Fields the index
+    /// hasn't backfilled yet (enrichment still pending, or an un-indexed folder)
+    /// show an em dash and fill in once the image is revisited.
+    fn update_metadata(&self, item: &ImageObject) {
+        let imp = self.imp();
+        const DASH: &str = "—";
+
+        imp.meta_name_row.set_subtitle(&item.display_name());
+        let folder = item
+            .file()
+            .parent()
+            .and_then(|p| p.path())
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| DASH.to_string());
+        imp.meta_folder_row.set_subtitle(&folder);
+
+        let record = self.lookup_record(item);
+        let text = |value: Option<String>| value.unwrap_or_else(|| DASH.to_string());
+
+        let dimensions = record
+            .as_ref()
+            .and_then(|r| r.width.zip(r.height))
+            .map(|(w, h)| format!("{w} × {h}"));
+        imp.meta_dimensions_row.set_subtitle(&text(dimensions));
+
+        let size = record.as_ref().map(|r| human_size(r.size));
+        imp.meta_size_row.set_subtitle(&text(size));
+
+        let format = record.as_ref().and_then(|r| r.format.clone());
+        imp.meta_format_row.set_subtitle(&text(format));
+
+        let date = record.as_ref().and_then(|r| r.date_taken).map(format_date);
+        imp.meta_date_row.set_subtitle(&text(date));
+
+        let camera = record.as_ref().and_then(|r| r.camera.clone());
+        imp.meta_camera_row.set_subtitle(&text(camera));
+
+        let orientation = record
+            .as_ref()
+            .and_then(|r| r.orientation)
+            .map(orientation_label);
+        imp.meta_orientation_row.set_subtitle(&text(orientation));
+    }
+
+    /// Look up the index row for `item`, opening the read connection on first use.
+    fn lookup_record(&self, item: &ImageObject) -> Option<FileRecord> {
+        let path = item.file().path()?;
+        let imp = self.imp();
+        if imp.read_db.borrow().is_none() {
+            match Db::open(crate::index::index_db_path()) {
+                Ok(db) => *imp.read_db.borrow_mut() = Some(db),
+                Err(e) => {
+                    glib::g_warning!("vitrine", "viewer read db: {e}");
+                    return None;
+                }
+            }
+        }
+        let db = imp.read_db.borrow();
+        db.as_ref()?
+            .file_by_path(&path.to_string_lossy())
+            .ok()
+            .flatten()
+    }
+
     // --- zoom ----------------------------------------------------------------
 
     fn set_texture(&self, texture: &gdk::Texture) {
@@ -530,4 +634,33 @@ impl VitrineViewer {
             (nh as f64 * zoom).round() as i32,
         );
     }
+}
+
+/// Human-readable file size (e.g. "1.2 MB"), via GLib's localized formatter.
+fn human_size(bytes: i64) -> String {
+    glib::format_size(bytes.max(0) as u64).to_string()
+}
+
+/// Format a unix-seconds capture time (stored UTC) as "YYYY-MM-DD HH:MM".
+fn format_date(secs: i64) -> String {
+    glib::DateTime::from_unix_utc(secs)
+        .and_then(|dt| dt.format("%Y-%m-%d %H:%M"))
+        .map(|s| s.to_string())
+        .unwrap_or_default()
+}
+
+/// A readable label for an EXIF orientation value (1..=8).
+fn orientation_label(o: i64) -> String {
+    match o {
+        1 => "Normal",
+        2 => "Mirrored horizontally",
+        3 => "Rotated 180°",
+        4 => "Mirrored vertically",
+        5 => "Mirrored, rotated 90° CCW",
+        6 => "Rotated 90° CW",
+        7 => "Mirrored, rotated 90° CW",
+        8 => "Rotated 90° CCW",
+        _ => "Normal",
+    }
+    .to_string()
 }

@@ -82,6 +82,7 @@ pub async fn full(file: &gio::File, max_dim: u32) -> Result<gdk::Texture, glycin
 pub struct Probe {
     pub width: u32,
     pub height: u32,
+    pub format: Option<String>,
     pub exif: Option<Vec<u8>>,
     pub frame: gdk::Texture,
 }
@@ -95,6 +96,7 @@ pub async fn probe(file: &gio::File, phash_px: u32) -> Option<Probe> {
     let details = image.details();
     let width = details.width();
     let height = details.height();
+    let format = details.info_format_name().map(str::to_string);
     let exif = details.metadata_exif().and_then(|b| b.get_full().ok());
     let frame = image
         .specific_frame(FrameRequest::new().scale(phash_px, phash_px))
@@ -103,6 +105,7 @@ pub async fn probe(file: &gio::File, phash_px: u32) -> Option<Probe> {
     Some(Probe {
         width,
         height,
+        format,
         exif,
         frame: frame.texture(),
     })
