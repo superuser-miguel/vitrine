@@ -97,7 +97,7 @@ template $VitrineWindow: Adw.ApplicationWindow {
             title: _("Places");
             icon-name: "user-bookmarks-symbolic";
 
-            child: Gtk.ScrolledWindow {
+            child: Gtk.ScrolledWindow places_scroller {
               hscrollbar-policy: never;
 
               child: Gtk.Box {
@@ -221,15 +221,6 @@ template $VitrineWindow: Adw.ApplicationWindow {
                 icon-name: "go-previous-symbolic";
                 tooltip-text: _("Back");
                 sensitive: false;
-              }
-
-              [start]
-              Gtk.Button open_button {
-                child: Adw.ButtonContent {
-                  icon-name: "folder-open-symbolic";
-                  label: _("Open Folder");
-                };
-                tooltip-text: _("Open a folder of images");
               }
 
               [start]

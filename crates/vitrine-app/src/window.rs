@@ -113,7 +113,7 @@ mod imp {
         #[template_child]
         pub grid_scroller: TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
-        pub open_button: TemplateChild<gtk::Button>,
+        pub places_scroller: TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub places_list: TemplateChild<gtk::ListBox>,
         #[template_child]
@@ -219,7 +219,7 @@ mod imp {
             Self {
                 content_stack: Default::default(),
                 grid_scroller: Default::default(),
-                open_button: Default::default(),
+                places_scroller: Default::default(),
                 places_list: Default::default(),
                 new_collection_button: Default::default(),
                 collections_list: Default::default(),
@@ -1019,9 +1019,11 @@ impl VitrineWindow {
         ));
 
         // Drop folders onto the bookmarks list to add them (Nautilus gesture).
+        // Drop folders anywhere on the Places pane (a ListBox only spans its own
+        // rows, so target the whole scroller as the drop zone).
         let drop = gtk::DropTarget::new(
             gtk::gdk::FileList::static_type(),
-            gtk::gdk::DragAction::COPY,
+            gtk::gdk::DragAction::COPY | gtk::gdk::DragAction::MOVE,
         );
         drop.connect_drop(glib::clone!(
             #[weak(rename_to = window)]
@@ -1043,11 +1045,12 @@ impl VitrineWindow {
                 }
                 if added {
                     window.refresh_bookmarks();
+                    window.toast("Folder bookmarked");
                 }
                 added
             }
         ));
-        imp.bookmarks_list.add_controller(drop);
+        imp.places_scroller.add_controller(drop);
 
         // Ctrl+D bookmarks the current folder.
         let bookmark = gio::SimpleAction::new("bookmark-current", None);
@@ -1834,12 +1837,6 @@ impl VitrineWindow {
 
     fn setup_actions(&self) {
         let imp = self.imp();
-
-        imp.open_button.connect_clicked(glib::clone!(
-            #[weak(rename_to = window)]
-            self,
-            move |_| window.open_folder_dialog()
-        ));
 
         imp.places_list.connect_row_activated(glib::clone!(
             #[weak(rename_to = window)]
