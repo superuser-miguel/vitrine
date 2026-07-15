@@ -495,6 +495,14 @@ This is **v1 Phase 3** (schema in §5); kept here as the fuller outline. Unified
 
 ### 10.3 Scripting tier — Lua/Rhai (ImageMagick investigation)
 
+> **Two extension tiers, distinct jobs (do not conflate):**
+> **Lua/Rhai (§10.3)** = the *lightweight, in-process* tier — rules, rename
+> patterns, smart-collection predicates, and custom **sort keys** (§10.3.1); pure,
+> hot-reloadable, no heavy deps.
+> **WASM (§10.5)** = the *heavy-compute* tier — image processing, custom
+> similarity metrics / AI embeddings; sandboxed, out-of-process, shipped as
+> add-extensions. Built later.
+
 ImageMagick ships Lua support (the `magick` Lua module): full access to its
 processing (resize, convert, effects, composites, format conversion, metadata),
 run via `magick -script script.lua` or embedded; hot-reload friendly.
