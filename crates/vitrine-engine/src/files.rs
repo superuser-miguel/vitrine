@@ -26,7 +26,7 @@ pub struct FileRecord {
 }
 
 impl FileRecord {
-    fn from_row(row: &Row) -> rusqlite::Result<FileRecord> {
+    pub(crate) fn from_row(row: &Row) -> rusqlite::Result<FileRecord> {
         Ok(FileRecord {
             id: Some(row.get("id")?),
             path: row.get("path")?,
@@ -46,8 +46,8 @@ impl FileRecord {
     }
 }
 
-const SELECT_COLS: &str = "id, path, content_hash, phash, size, mtime, width, height, \
-     format, date_taken, camera, orientation, indexed_at, missing";
+pub(crate) const SELECT_COLS: &str = "id, path, content_hash, phash, size, mtime, width, \
+     height, format, date_taken, camera, orientation, indexed_at, missing";
 
 /// The decode-derived fields written by the app's enrichment pass, once per file
 /// (after identity indexing). `width`/`height` double as the "enriched" marker:

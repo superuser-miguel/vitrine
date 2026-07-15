@@ -33,6 +33,7 @@ pub mod files;
 pub mod hash;
 pub mod lru;
 pub mod png_meta;
+pub mod query;
 pub mod scanner;
 pub mod schema;
 pub mod thumbnail_cache;
@@ -41,6 +42,7 @@ pub use db::Db;
 pub use exif::{parse_exif, ExifData};
 pub use files::{Enrichment, FileRecord};
 pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
+pub use query::{Direction, Query, SortKey};
 pub use scanner::{classify, walk_images, Change, ScannedFile};
 
 pub use lru::SizedLru;
