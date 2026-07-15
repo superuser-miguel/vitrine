@@ -20,8 +20,13 @@ mod imp {
     pub struct ImageObject {
         pub file: RefCell<Option<gio::File>>,
         pub display_name: RefCell<String>,
-        /// Source mtime (unix seconds), for validating cached thumbnails.
+        /// Source mtime (unix seconds), for validating cached thumbnails and the
+        /// "Modified" sort.
         pub mtime: Cell<i64>,
+        /// File size in bytes (from the folder enumerate), for the "Size" sort.
+        pub size: Cell<i64>,
+        /// Content type (MIME), for the "Type" sort.
+        pub content_type: RefCell<String>,
         /// True if decoding failed — the cell shows a broken-image placeholder.
         pub failed: Cell<bool>,
     }
@@ -40,12 +45,20 @@ glib::wrapper! {
 }
 
 impl ImageObject {
-    pub fn new(file: gio::File, display_name: &str, mtime: i64) -> Self {
+    pub fn new(
+        file: gio::File,
+        display_name: &str,
+        mtime: i64,
+        size: i64,
+        content_type: &str,
+    ) -> Self {
         let obj: Self = glib::Object::new();
         let imp = obj.imp();
         *imp.file.borrow_mut() = Some(file);
         *imp.display_name.borrow_mut() = display_name.to_string();
         imp.mtime.set(mtime);
+        imp.size.set(size);
+        *imp.content_type.borrow_mut() = content_type.to_string();
         obj
     }
 
@@ -63,6 +76,14 @@ impl ImageObject {
 
     pub fn mtime(&self) -> i64 {
         self.imp().mtime.get()
+    }
+
+    pub fn size(&self) -> i64 {
+        self.imp().size.get()
+    }
+
+    pub fn content_type(&self) -> String {
+        self.imp().content_type.borrow().clone()
     }
 
     pub fn mark_failed(&self) {

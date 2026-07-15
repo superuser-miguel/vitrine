@@ -76,8 +76,8 @@ mod imp {
         /// shown image (the writer lives on the indexer thread).
         pub read_db: RefCell<Option<Db>>,
 
-        /// Shared, ordered image model (same store the grid shows).
-        pub store: RefCell<Option<gio::ListStore>>,
+        /// Shared, ordered image model (the same sorted model the grid shows).
+        pub store: RefCell<Option<gio::ListModel>>,
         /// Filmstrip selection = the current image; single source of "current".
         pub filmstrip: RefCell<Option<gtk::SingleSelection>>,
         pub filmstrip_view: RefCell<Option<gtk::ListView>>,
@@ -174,7 +174,7 @@ impl VitrineViewer {
     /// `thumb_cache` is the window's shared RAM thumbnail cache.
     pub fn open(
         &self,
-        store: gio::ListStore,
+        store: gio::ListModel,
         position: u32,
         thumb_cache: crate::thumbnails::ThumbCache,
     ) {

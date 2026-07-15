@@ -20,34 +20,44 @@ menu primary_menu {
 
 menu sort_menu {
   section {
+    label: _("Sort By");
+
     item {
       label: _("_Name");
-      action: "win.sort";
+      action: "win.sort-field";
       target: "name";
     }
 
     item {
-      label: _("_Newest First");
-      action: "win.sort";
-      target: "newest";
-    }
-
-    item {
-      label: _("_Oldest First");
-      action: "win.sort";
-      target: "oldest";
-    }
-
-    item {
-      label: _("_Largest First");
-      action: "win.sort";
-      target: "largest";
-    }
-
-    item {
-      label: _("Biggest _File Size");
-      action: "win.sort";
+      label: _("_Size");
+      action: "win.sort-field";
       target: "size";
+    }
+
+    item {
+      label: _("_Modified");
+      action: "win.sort-field";
+      target: "modified";
+    }
+
+    item {
+      label: _("_Type");
+      action: "win.sort-field";
+      target: "type";
+    }
+  }
+
+  section {
+    item {
+      label: _("_Ascending");
+      action: "win.sort-direction";
+      target: "ascending";
+    }
+
+    item {
+      label: _("_Descending");
+      action: "win.sort-direction";
+      target: "descending";
     }
   }
 }

@@ -17,6 +17,9 @@ const GROUP_ROOTS: &str = "Roots";
 const KEY_COUNT: &str = "count";
 const GROUP_CACHE: &str = "Cache";
 const KEY_CACHE_MB: &str = "thumbnail-mb";
+const GROUP_SORT: &str = "Sort";
+const KEY_SORT_FIELD: &str = "field";
+const KEY_SORT_DESC: &str = "descending";
 
 /// Default thumbnail-cache budget (MB) — matches the historical prune default.
 pub const DEFAULT_CACHE_MB: u64 = 2048;
@@ -91,6 +94,32 @@ impl Settings {
     /// Set the thumbnail-cache budget in MB.
     pub fn set_cache_mb(&self, mb: u64) {
         self.key_file.set_uint64(GROUP_CACHE, KEY_CACHE_MB, mb);
+        self.save();
+    }
+
+    /// The remembered grid sort field id ("name"/"size"/"modified"/"type").
+    pub fn sort_field(&self) -> String {
+        self.key_file
+            .string(GROUP_SORT, KEY_SORT_FIELD)
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_else(|_| "name".to_string())
+    }
+
+    pub fn set_sort_field(&self, field: &str) {
+        self.key_file.set_string(GROUP_SORT, KEY_SORT_FIELD, field);
+        self.save();
+    }
+
+    /// Whether the grid sort is descending (default ascending).
+    pub fn sort_descending(&self) -> bool {
+        self.key_file
+            .boolean(GROUP_SORT, KEY_SORT_DESC)
+            .unwrap_or(false)
+    }
+
+    pub fn set_sort_descending(&self, descending: bool) {
+        self.key_file
+            .set_boolean(GROUP_SORT, KEY_SORT_DESC, descending);
         self.save();
     }
 
