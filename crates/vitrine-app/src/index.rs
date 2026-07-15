@@ -46,6 +46,8 @@ pub enum IndexProgress {
     Advanced { done: usize, total: usize },
     /// The current scan finished; `added` new/changed rows were written.
     Finished { added: usize },
+    /// A collection was created/changed — the sidebar should refresh.
+    CollectionsChanged,
 }
 
 /// Messages to the writer thread (which owns the one `Db`). Identity scans,
@@ -77,6 +79,20 @@ enum Request {
         name: String,
         hashes: Vec<String>,
         add: bool,
+    },
+    /// Create a catalog and seed it with `hashes` (empty for an empty catalog).
+    CreateCatalog {
+        name: String,
+        hashes: Vec<String>,
+    },
+    /// Append `hashes` to an existing catalog.
+    AddToCatalog {
+        id: i64,
+        hashes: Vec<String>,
+    },
+    /// Delete a collection.
+    DeleteCollection {
+        id: i64,
     },
 }
 
@@ -112,6 +128,27 @@ impl Annotator {
             hashes: hashes.to_vec(),
             add,
         });
+    }
+
+    /// Create a catalog named `name`, seeded with `hashes`.
+    pub fn create_catalog(&self, name: &str, hashes: &[String]) {
+        let _ = self.requests.try_send(Request::CreateCatalog {
+            name: name.to_string(),
+            hashes: hashes.to_vec(),
+        });
+    }
+
+    /// Append `hashes` to the catalog `id`.
+    pub fn add_to_catalog(&self, id: i64, hashes: &[String]) {
+        let _ = self.requests.try_send(Request::AddToCatalog {
+            id,
+            hashes: hashes.to_vec(),
+        });
+    }
+
+    /// Delete the collection `id`.
+    pub fn delete_collection(&self, id: i64) {
+        let _ = self.requests.try_send(Request::DeleteCollection { id });
     }
 }
 
@@ -234,6 +271,33 @@ fn worker(
                     glib::g_warning!("vitrine", "tag {name}: {e}");
                 }
             }
+            Request::CreateCatalog { name, hashes } => {
+                let r = db.create_catalog(&name).and_then(|id| {
+                    if hashes.is_empty() {
+                        Ok(())
+                    } else {
+                        db.add_to_catalog(id, &hashes)
+                    }
+                });
+                match r {
+                    Ok(()) => {
+                        let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                    }
+                    Err(e) => glib::g_warning!("vitrine", "create catalog {name}: {e}"),
+                }
+            }
+            Request::AddToCatalog { id, hashes } => match db.add_to_catalog(id, &hashes) {
+                Ok(()) => {
+                    let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                }
+                Err(e) => glib::g_warning!("vitrine", "add to catalog {id}: {e}"),
+            },
+            Request::DeleteCollection { id } => match db.delete_collection(id) {
+                Ok(()) => {
+                    let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                }
+                Err(e) => glib::g_warning!("vitrine", "delete collection {id}: {e}"),
+            },
         }
     }
 }

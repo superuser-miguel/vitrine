@@ -105,6 +105,14 @@ mod imp {
         #[template_child]
         pub places_list: TemplateChild<gtk::ListBox>,
         #[template_child]
+        pub new_collection_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub collections_heading: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub collections_list: TemplateChild<gtk::ListBox>,
+        /// Collection ids parallel to `collections_list` rows (by index).
+        pub collection_ids: RefCell<Vec<i64>>,
+        #[template_child]
         pub nav_view: TemplateChild<adw::NavigationView>,
         #[template_child]
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
@@ -165,6 +173,10 @@ mod imp {
                 grid_scroller: Default::default(),
                 open_button: Default::default(),
                 places_list: Default::default(),
+                new_collection_button: Default::default(),
+                collections_heading: Default::default(),
+                collections_list: Default::default(),
+                collection_ids: RefCell::new(Vec::new()),
                 nav_view: Default::default(),
                 toast_overlay: Default::default(),
                 icon_smaller: Default::default(),
@@ -217,6 +229,7 @@ mod imp {
             self.obj().setup_actions();
             self.obj().setup_indexer();
             self.obj().setup_tagging();
+            self.obj().setup_collections();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -719,6 +732,161 @@ impl VitrineWindow {
         self.imp().tag_button.popdown();
     }
 
+    // --- collections ---------------------------------------------------------
+
+    /// Wire the sidebar collections list + "new catalog" button, and do an
+    /// initial populate from the index.
+    fn setup_collections(&self) {
+        let imp = self.imp();
+
+        imp.new_collection_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.new_catalog_dialog()
+        ));
+
+        imp.collections_list.connect_row_activated(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, row| {
+                let idx = row.index();
+                if let Some(&id) = window.imp().collection_ids.borrow().get(idx as usize) {
+                    window.open_collection(id);
+                }
+            }
+        ));
+
+        self.refresh_collections();
+    }
+
+    /// Rebuild the sidebar collections list from the index.
+    fn refresh_collections(&self) {
+        let imp = self.imp();
+        let list = &imp.collections_list;
+        while let Some(row) = list.row_at_index(0) {
+            list.remove(&row);
+        }
+        imp.collection_ids.borrow_mut().clear();
+
+        self.ensure_read_db();
+        let collections = {
+            let db = imp.read_db.borrow();
+            match db.as_ref() {
+                Some(db) => db.list_collections().unwrap_or_default(),
+                None => return,
+            }
+        };
+
+        imp.collections_heading.set_visible(!collections.is_empty());
+        for collection in collections {
+            let icon = match collection.kind {
+                vitrine_engine::CollectionKind::Smart => "folder-saved-search-symbolic",
+                vitrine_engine::CollectionKind::Catalog => "view-list-symbolic",
+            };
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+            row.set_margin_start(6);
+            row.set_margin_end(6);
+            row.set_margin_top(8);
+            row.set_margin_bottom(8);
+            row.append(&gtk::Image::from_icon_name(icon));
+            let name = gtk::Label::builder()
+                .label(&collection.name)
+                .halign(gtk::Align::Start)
+                .hexpand(true)
+                .ellipsize(gtk::pango::EllipsizeMode::End)
+                .build();
+            row.append(&name);
+            row.append(
+                &gtk::Label::builder()
+                    .label(collection.count.to_string())
+                    .css_classes(["dim-label", "caption"])
+                    .build(),
+            );
+            list.append(&row);
+            imp.collection_ids.borrow_mut().push(collection.id);
+        }
+    }
+
+    /// Load a collection's files into the grid (spanning folders; not a folder
+    /// browse, so the folder-scoped rating stamp is skipped — items are stamped
+    /// inline from the index instead).
+    fn open_collection(&self, id: i64) {
+        self.ensure_read_db();
+        let items: Vec<ImageObject> = {
+            let db = self.imp().read_db.borrow();
+            let Some(db) = db.as_ref() else { return };
+            db.collection_files(id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|record| {
+                    let file = gio::File::for_path(&record.path);
+                    let name = std::path::Path::new(&record.path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| record.path.clone());
+                    let content_type = record.format.clone().unwrap_or_default();
+                    let item =
+                        ImageObject::new(file, &name, record.mtime, record.size, &content_type);
+                    item.set_content_hash(&record.content_hash);
+                    let rating = db.rating(&record.content_hash).ok().flatten().unwrap_or(0);
+                    item.set_rating(rating as i32);
+                    item
+                })
+                .collect()
+        };
+
+        let imp = self.imp();
+        *imp.current_folder.borrow_mut() = None; // multi-folder; no folder stamp
+        imp.store.remove_all();
+        imp.store.extend_from_slice(&items);
+        imp.content_stack
+            .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
+    }
+
+    /// Prompt for a name and create a catalog seeded with the current selection.
+    fn new_catalog_dialog(&self) {
+        let hashes = self.selected_hashes();
+        let entry = gtk::Entry::builder()
+            .placeholder_text(gettextrs::gettext("Catalog name"))
+            .activates_default(true)
+            .build();
+        let dialog = adw::AlertDialog::new(Some(&gettextrs::gettext("New Catalog")), None);
+        dialog.set_body(&match hashes.len() {
+            0 => gettextrs::gettext("Create an empty catalog."),
+            1 => gettextrs::gettext("Create a catalog with the selected image."),
+            n => format!("Create a catalog with the {n} selected images."),
+        });
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", &gettextrs::gettext("Cancel"));
+        dialog.add_response("create", &gettextrs::gettext("Create"));
+        dialog.set_response_appearance("create", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("create"));
+        dialog.set_close_response("cancel");
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[weak]
+                entry,
+                move |_, response| {
+                    if response != "create" {
+                        return;
+                    }
+                    let name = entry.text().trim().to_string();
+                    if name.is_empty() {
+                        return;
+                    }
+                    if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                        indexer.annotator().create_catalog(&name, &hashes);
+                    }
+                    window.toast(&gettextrs::gettext("Catalog created"));
+                }
+            ),
+        );
+        dialog.present(Some(self));
+    }
+
     /// Content hashes of the selected items that are indexed (have a hash).
     fn selected_hashes(&self) -> Vec<String> {
         let Some(model) = self.model() else {
@@ -1002,6 +1170,7 @@ impl VitrineWindow {
                     indexer.start_enrichment(|| {});
                 }
             }
+            IndexProgress::CollectionsChanged => self.refresh_collections(),
         }
     }
 

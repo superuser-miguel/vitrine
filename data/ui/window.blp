@@ -77,34 +77,58 @@ template $VitrineWindow: Adw.ApplicationWindow {
 
       child: Adw.ToolbarView {
         [top]
-        Adw.HeaderBar {}
+        Adw.HeaderBar {
+          [end]
+          Gtk.Button new_collection_button {
+            icon-name: "list-add-symbolic";
+            tooltip-text: _("New Catalog from Selection");
+          }
+        }
 
-        // Places sidebar is a placeholder until library roots (Phase 2) and
-        // collections (Phase 3) land.
         content: Gtk.ScrolledWindow {
           hscrollbar-policy: never;
 
-          child: Gtk.ListBox places_list {
-            selection-mode: none;
-            styles ["navigation-sidebar"]
+          child: Gtk.Box {
+            orientation: vertical;
 
-            Gtk.ListBoxRow open_row {
-              child: Gtk.Box {
-                spacing: 12;
-                margin-start: 6;
-                margin-end: 6;
-                margin-top: 8;
-                margin-bottom: 8;
+            Gtk.ListBox places_list {
+              selection-mode: none;
+              styles ["navigation-sidebar"]
 
-                Gtk.Image {
-                  icon-name: "folder-open-symbolic";
-                }
+              Gtk.ListBoxRow open_row {
+                child: Gtk.Box {
+                  spacing: 12;
+                  margin-start: 6;
+                  margin-end: 6;
+                  margin-top: 8;
+                  margin-bottom: 8;
 
-                Gtk.Label {
-                  label: _("Open Folder…");
-                  halign: start;
-                }
-              };
+                  Gtk.Image {
+                    icon-name: "folder-open-symbolic";
+                  }
+
+                  Gtk.Label {
+                    label: _("Open Folder…");
+                    halign: start;
+                  }
+                };
+              }
+            }
+
+            Gtk.Label collections_heading {
+              label: _("Collections");
+              halign: start;
+              margin-start: 12;
+              margin-top: 10;
+              margin-bottom: 2;
+              visible: false;
+              styles ["caption", "dim-label"]
+            }
+
+            // Populated in window.rs from the index (catalogs + smart collections).
+            Gtk.ListBox collections_list {
+              selection-mode: none;
+              styles ["navigation-sidebar"]
             }
           };
         };
