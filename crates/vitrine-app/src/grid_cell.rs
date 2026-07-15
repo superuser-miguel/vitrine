@@ -35,8 +35,13 @@ mod imp {
         pub label: TemplateChild<gtk::Label>,
         #[template_child]
         pub broken_icon: TemplateChild<gtk::Image>,
+        #[template_child]
+        pub rating_overlay: TemplateChild<gtk::Label>,
         /// The item this cell currently displays; the recycling-guard token.
         pub item: RefCell<Option<ImageObject>>,
+        /// `notify::rating` subscription on the bound item (disconnected on rebind
+        /// so a recycled cell doesn't react to its previous item).
+        pub rating_handler: RefCell<Option<glib::SignalHandlerId>>,
         /// Display size of the thumbnail (px), from the grid's icon-size level.
         pub icon_size: Cell<u32>,
     }
@@ -100,8 +105,21 @@ impl VitrineGridCell {
     /// only when scrolling settles.
     pub fn bind(&self, item: &ImageObject, cache: &ThumbCache) -> bool {
         let imp = self.imp();
+        self.disconnect_rating(); // drop the recycled item's subscription first
         imp.label.set_text(&item.display_name());
         *imp.item.borrow_mut() = Some(item.clone());
+
+        // Rating overlay: reflect it now and repaint reactively on notify::rating.
+        self.update_rating_overlay(item.rating());
+        let handler = item.connect_notify_local(
+            Some("rating"),
+            glib::clone!(
+                #[weak(rename_to = cell)]
+                self,
+                move |item, _| cell.update_rating_overlay(item.rating())
+            ),
+        );
+        *imp.rating_handler.borrow_mut() = Some(handler);
 
         let key = crate::thumbnails::ram_key(&item.file().uri(), self.load_size());
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
@@ -125,10 +143,33 @@ impl VitrineGridCell {
 
     /// Unbind on recycle: forget the item so late loads don't paint here.
     pub fn unbind(&self) {
+        self.disconnect_rating();
         let imp = self.imp();
         *imp.item.borrow_mut() = None;
         imp.picture.set_paintable(gtk::gdk::Paintable::NONE);
         imp.broken_icon.set_visible(false);
+        imp.rating_overlay.set_visible(false);
+    }
+
+    /// Show `rating` stars (or hide the overlay when unrated).
+    fn update_rating_overlay(&self, rating: i32) {
+        let overlay = &self.imp().rating_overlay;
+        if rating > 0 {
+            overlay.set_text(&"★".repeat(rating.clamp(0, 5) as usize));
+            overlay.set_visible(true);
+        } else {
+            overlay.set_visible(false);
+        }
+    }
+
+    /// Drop the `notify::rating` subscription on the currently-bound item.
+    fn disconnect_rating(&self) {
+        let imp = self.imp();
+        if let Some(id) = imp.rating_handler.borrow_mut().take() {
+            if let Some(old) = imp.item.borrow().as_ref() {
+                old.disconnect(id);
+            }
+        }
     }
 
     /// Start the async thumbnail load for `item` (called by the window when

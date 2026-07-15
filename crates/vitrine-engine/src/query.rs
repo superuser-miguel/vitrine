@@ -216,7 +216,7 @@ fn dedup_ci(names: &[String]) -> Vec<String> {
 }
 
 /// Escape `\`, `%`, `_` for use inside a `LIKE ... ESCAPE '\'` pattern.
-fn escape_like(s: &str) -> String {
+pub(crate) fn escape_like(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")

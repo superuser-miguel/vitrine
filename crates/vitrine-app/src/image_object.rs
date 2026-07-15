@@ -6,11 +6,17 @@
 //! libraries). Thumbnails live in a size-bounded RAM cache
 //! ([`crate::thumbnails::ThumbCache`]) keyed by URI instead; items only remember
 //! whether a decode failed, so a broken file isn't retried forever.
+//!
+//! `rating` is a GObject **property** (not a plain field) so a grid cell can
+//! observe `notify::rating` and repaint its star overlay the instant a rating
+//! changes, without the window hunting down the cell by position.
 
 use std::cell::{Cell, RefCell};
+use std::sync::OnceLock;
 
 use gtk::gio;
 use gtk::glib;
+use gtk::prelude::*;
 use gtk::subclass::prelude::*;
 
 mod imp {
@@ -27,6 +33,10 @@ mod imp {
         pub size: Cell<i64>,
         /// Content type (MIME), for the "Type" sort.
         pub content_type: RefCell<String>,
+        /// The file's content hash (annotation key), stamped from the index.
+        pub content_hash: RefCell<String>,
+        /// Star rating 0–5 (the `rating` property; notifies on change).
+        pub rating: Cell<i32>,
         /// True if decoding failed — the cell shows a broken-image placeholder.
         pub failed: Cell<bool>,
     }
@@ -37,7 +47,31 @@ mod imp {
         type Type = super::ImageObject;
     }
 
-    impl ObjectImpl for ImageObject {}
+    impl ObjectImpl for ImageObject {
+        fn properties() -> &'static [glib::ParamSpec] {
+            static PROPS: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
+            PROPS.get_or_init(|| {
+                vec![glib::ParamSpecInt::builder("rating")
+                    .minimum(0)
+                    .maximum(5)
+                    .build()]
+            })
+        }
+
+        fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
+            match pspec.name() {
+                "rating" => self.rating.set(value.get().unwrap_or(0)),
+                other => unimplemented!("set unknown property {other}"),
+            }
+        }
+
+        fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
+            match pspec.name() {
+                "rating" => self.rating.get().to_value(),
+                other => unimplemented!("get unknown property {other}"),
+            }
+        }
+    }
 }
 
 glib::wrapper! {
@@ -84,6 +118,25 @@ impl ImageObject {
 
     pub fn content_type(&self) -> String {
         self.imp().content_type.borrow().clone()
+    }
+
+    /// The content hash (annotation key), or empty if the file isn't indexed yet.
+    pub fn content_hash(&self) -> String {
+        self.imp().content_hash.borrow().clone()
+    }
+
+    pub fn set_content_hash(&self, hash: &str) {
+        *self.imp().content_hash.borrow_mut() = hash.to_string();
+    }
+
+    /// Current star rating (0–5).
+    pub fn rating(&self) -> i32 {
+        self.property("rating")
+    }
+
+    /// Set the rating (clamped 0–5). Emits `notify::rating`, so bound cells repaint.
+    pub fn set_rating(&self, rating: i32) {
+        self.set_property("rating", rating.clamp(0, 5));
     }
 
     pub fn mark_failed(&self) {

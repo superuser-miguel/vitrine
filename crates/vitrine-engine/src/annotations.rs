@@ -77,6 +77,23 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// `(path, content_hash, rating)` for present files under `folder` — one
+    /// query to stamp the grid's in-memory items, so cell rating overlays and
+    /// rating writes need no per-cell database hit. `rating` is 0 when unrated.
+    pub fn ratings_under(&self, folder: &str) -> rusqlite::Result<Vec<(String, String, i64)>> {
+        let prefix = format!(
+            "{}/%",
+            crate::query::escape_like(folder.trim_end_matches('/'))
+        );
+        let mut stmt = self.conn().prepare(
+            "SELECT f.path, f.content_hash, COALESCE(r.rating, 0)
+             FROM files f LEFT JOIN ratings r ON r.content_hash = f.content_hash
+             WHERE f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
+        )?;
+        let rows = stmt.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect()
+    }
 }
 
 #[cfg(test)]
@@ -95,6 +112,28 @@ mod tests {
         assert_eq!(db.rating("h1").unwrap(), Some(5));
         db.clear_rating("h1").unwrap();
         assert_eq!(db.rating("h1").unwrap(), None);
+    }
+
+    #[test]
+    fn ratings_under_scopes_and_joins() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO files(path,content_hash,size,mtime,indexed_at,missing) VALUES
+                 ('/p/a.jpg','ha',1,1,1,0),('/p/b.jpg','hb',1,1,1,0),
+                 ('/other/c.jpg','hc',1,1,1,0);",
+            )
+            .unwrap();
+        db.set_rating("ha", 4).unwrap();
+        let mut rows = db.ratings_under("/p").unwrap();
+        rows.sort();
+        assert_eq!(
+            rows,
+            vec![
+                ("/p/a.jpg".to_string(), "ha".to_string(), 4),
+                ("/p/b.jpg".to_string(), "hb".to_string(), 0), // unrated → 0
+            ]
+        );
     }
 
     #[test]

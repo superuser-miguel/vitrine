@@ -14,6 +14,8 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib, CompositeTemplate};
 
+use vitrine_engine::Db;
+
 use crate::grid_cell::VitrineGridCell;
 use crate::image_object::ImageObject;
 use crate::index::{IndexProgress, Indexer};
@@ -116,6 +118,11 @@ mod imp {
         /// Background library indexer (created in `constructed`). Owns the one
         /// writer `Db`; the UI only enqueues folders and reads progress.
         pub indexer: RefCell<Option<Indexer>>,
+        /// Read-only index connection, opened lazily to stamp the grid's items
+        /// with their content hash + rating.
+        pub read_db: RefCell<Option<Db>>,
+        /// Local path of the folder currently shown (to scope the rating stamp).
+        pub current_folder: RefCell<Option<PathBuf>>,
 
         /// Backing model for the grid (one row per image file); the mutation
         /// source (populate/trash act here).
@@ -158,6 +165,8 @@ mod imp {
                 icon_larger: Default::default(),
                 index_banner: Default::default(),
                 indexer: RefCell::new(None),
+                read_db: RefCell::new(None),
+                current_folder: RefCell::new(None),
                 store: gio::ListStore::new::<ImageObject>(),
                 sort_model: RefCell::new(None),
                 sorter: RefCell::new(None),
@@ -274,19 +283,22 @@ impl VitrineWindow {
             #[upgrade_or]
             glib::Propagation::Proceed,
             move |_, key, _, mods| {
+                use gtk::gdk::Key;
                 let ctrl = mods.contains(gtk::gdk::ModifierType::CONTROL_MASK);
                 match (ctrl, key) {
-                    (true, gtk::gdk::Key::plus | gtk::gdk::Key::equal | gtk::gdk::Key::KP_Add) => {
-                        window.change_icon(1)
-                    }
-                    (true, gtk::gdk::Key::minus | gtk::gdk::Key::KP_Subtract) => {
-                        window.change_icon(-1)
-                    }
-                    (true, gtk::gdk::Key::_0 | gtk::gdk::Key::KP_0) => window.reset_icon(),
-                    (_, gtk::gdk::Key::Delete) => window.trash_selected(),
-                    (_, gtk::gdk::Key::space | gtk::gdk::Key::KP_Space) => {
-                        window.preview_selected()
-                    }
+                    (true, Key::plus | Key::equal | Key::KP_Add) => window.change_icon(1),
+                    (true, Key::minus | Key::KP_Subtract) => window.change_icon(-1),
+                    (true, Key::_0 | Key::KP_0) => window.reset_icon(),
+                    (_, Key::Delete) => window.trash_selected(),
+                    (_, Key::space | Key::KP_Space) => window.preview_selected(),
+                    // Number keys rate the selection (no zoom in the grid, so 0–5
+                    // are free); 0 clears.
+                    (false, Key::_0 | Key::KP_0) => window.rate_selection(0),
+                    (false, Key::_1 | Key::KP_1) => window.rate_selection(1),
+                    (false, Key::_2 | Key::KP_2) => window.rate_selection(2),
+                    (false, Key::_3 | Key::KP_3) => window.rate_selection(3),
+                    (false, Key::_4 | Key::KP_4) => window.rate_selection(4),
+                    (false, Key::_5 | Key::KP_5) => window.rate_selection(5),
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
@@ -528,6 +540,88 @@ impl VitrineWindow {
         }
     }
 
+    /// Number keys 0–5: rate every selected image (0 clears). Updates the items'
+    /// `rating` property (so the star overlays repaint at once) and persists via
+    /// the annotator, keyed on the content hash stamped from the index.
+    fn rate_selection(&self, rating: i32) {
+        let Some(model) = self.model() else { return };
+        let annotator = self
+            .imp()
+            .indexer
+            .borrow()
+            .as_ref()
+            .map(|indexer| indexer.annotator());
+        let mut rated = 0;
+        for pos in self.selected_positions() {
+            let Some(item) = model.item(pos).and_downcast::<ImageObject>() else {
+                continue;
+            };
+            item.set_rating(rating);
+            let hash = item.content_hash();
+            if !hash.is_empty() {
+                if let Some(annotator) = &annotator {
+                    annotator.set_rating(
+                        &hash,
+                        if rating == 0 {
+                            None
+                        } else {
+                            Some(rating as i64)
+                        },
+                    );
+                }
+                rated += 1;
+            }
+        }
+        if rated == 0 {
+            self.toast("Rating needs the image indexed — try again in a moment");
+        }
+    }
+
+    /// Stamp each item with its content hash + rating from the index, so cell
+    /// overlays and rating writes need no per-cell database hit. Best-effort:
+    /// items the index hasn't caught up on stay unstamped until the re-stamp on
+    /// scan completion.
+    fn stamp_annotations(&self, items: &[ImageObject]) {
+        let Some(folder) = self.imp().current_folder.borrow().clone() else {
+            return;
+        };
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
+        let Some(db) = db.as_ref() else { return };
+        let map: std::collections::HashMap<String, (String, i64)> = db
+            .ratings_under(&folder.to_string_lossy())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(path, hash, rating)| (path, (hash, rating)))
+            .collect();
+        for item in items {
+            if let Some(path) = item.file().path() {
+                if let Some((hash, rating)) = map.get(&path.to_string_lossy().into_owned()) {
+                    item.set_content_hash(hash);
+                    item.set_rating(*rating as i32);
+                }
+            }
+        }
+    }
+
+    /// Re-stamp the items currently in the store (after indexing catches up).
+    fn restamp_store(&self) {
+        let items: Vec<ImageObject> = (0..self.imp().store.n_items())
+            .filter_map(|i| self.imp().store.item(i).and_downcast::<ImageObject>())
+            .collect();
+        self.stamp_annotations(&items);
+    }
+
+    fn ensure_read_db(&self) {
+        let imp = self.imp();
+        if imp.read_db.borrow().is_none() {
+            match Db::open(crate::index::index_db_path()) {
+                Ok(db) => *imp.read_db.borrow_mut() = Some(db),
+                Err(e) => glib::g_warning!("vitrine", "window read db: {e}"),
+            }
+        }
+    }
+
     /// Delete: move the selected images to the trash (reversible — never unlink),
     /// dropping each from the grid as it is trashed.
     fn trash_selected(&self) {
@@ -745,8 +839,10 @@ impl VitrineWindow {
             }
             IndexProgress::Finished { .. } => {
                 banner.set_revealed(false);
-                // Identity indexing done — backfill dimensions/EXIF/pHash (used
-                // by the properties sidebar and future search, not grid sorting).
+                // Identity rows exist now → stamp the grid's items with their
+                // content hash + rating (star overlays appear; keyboard rating
+                // can key writes). Then backfill dimensions/EXIF/pHash.
+                self.restamp_store();
                 if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
                     indexer.start_enrichment(|| {});
                 }
@@ -805,6 +901,8 @@ impl VitrineWindow {
 
     /// Enumerate `folder`'s image children asynchronously and populate the grid.
     fn load_folder(&self, folder: gio::File) {
+        // Remember the folder so the rating stamp can scope to it.
+        *self.imp().current_folder.borrow_mut() = folder.path();
         // Kick off background indexing in parallel — the grid never waits on it.
         self.index_folder(&folder);
         glib::spawn_future_local(glib::clone!(
@@ -821,6 +919,9 @@ impl VitrineWindow {
 
     fn populate(&self, items: Vec<ImageObject>) {
         let imp = self.imp();
+        // Stamp hash + rating before the items are shown, so cells paint their
+        // star overlay on first bind (a re-stamp follows once indexing catches up).
+        self.stamp_annotations(&items);
         imp.store.remove_all();
         imp.store.extend_from_slice(&items);
         imp.content_stack

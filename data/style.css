@@ -1,3 +1,15 @@
 /* Vitrine app-wide styling. Empty in Phase 0; the grid cell overlays (rating
    stars, selection checks) and the viewer chrome get their styles here in
    Phases 1 and 3. Kept as a real (loaded) resource so the pipeline is wired. */
+
+/* Grid cell rating overlay: a small gold-star pill at the bottom of the
+   thumbnail (Phase 3). Non-interactive; click still activates the cell. */
+.rating-overlay {
+  color: #f5c211;
+  font-size: 0.8rem;
+  letter-spacing: 1px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background-color: rgba(0, 0, 0, 0.6);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+}

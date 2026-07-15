@@ -28,6 +28,16 @@ template $VitrineGridCell: Gtk.Box {
       visible: false;
       styles ["dim-label"]
     }
+
+    [overlay]
+    Gtk.Label rating_overlay {
+      halign: center;
+      valign: end;
+      margin-bottom: 6;
+      visible: false;
+      can-target: false;
+      styles ["rating-overlay"]
+    }
   }
 
   Gtk.Label label {
