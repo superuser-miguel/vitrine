@@ -25,6 +25,20 @@ const GROUP_BOOKMARKS: &str = "Bookmarks";
 /// Default thumbnail-cache budget (MB) — matches the historical prune default.
 pub const DEFAULT_CACHE_MB: u64 = 2048;
 
+/// A sidebar bookmark: a user-editable display name and its target folder.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Bookmark {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// The default bookmark name (the folder's own name, or its path as a fallback).
+fn default_bookmark_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+}
+
 fn config_path() -> PathBuf {
     glib::user_config_dir().join("vitrine").join("settings.ini")
 }
@@ -124,22 +138,42 @@ impl Settings {
         self.save();
     }
 
-    /// The user's bookmarked folders (Nautilus-style quick-nav shortcuts).
-    pub fn bookmarks(&self) -> Vec<PathBuf> {
+    /// The user's bookmarks (Nautilus-style: a custom display name + a target
+    /// path), in the order the user arranged them.
+    pub fn bookmarks(&self) -> Vec<Bookmark> {
         let count = self
             .key_file
             .uint64(GROUP_BOOKMARKS, KEY_COUNT)
             .unwrap_or(0);
         (0..count)
-            .filter_map(|i| self.key_file.string(GROUP_BOOKMARKS, &i.to_string()).ok())
-            .map(|s| PathBuf::from(s.as_str()))
+            .filter_map(|i| {
+                let path = self
+                    .key_file
+                    .string(GROUP_BOOKMARKS, &format!("path-{i}"))
+                    .ok()?;
+                let path = PathBuf::from(path.as_str());
+                let name = self
+                    .key_file
+                    .string(GROUP_BOOKMARKS, &format!("name-{i}"))
+                    .ok()
+                    .map(|s| s.as_str().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| default_bookmark_name(&path));
+                Some(Bookmark { name, path })
+            })
             .collect()
     }
 
-    fn set_bookmarks(&self, bookmarks: &[PathBuf]) {
+    /// Replace the whole bookmark list (persists name + path + order).
+    pub fn set_bookmarks(&self, bookmarks: &[Bookmark]) {
+        // Clear the group so stale higher-numbered keys don't linger.
+        let _ = self.key_file.remove_group(GROUP_BOOKMARKS);
         for (i, bookmark) in bookmarks.iter().enumerate() {
-            if let Some(s) = bookmark.to_str() {
-                self.key_file.set_string(GROUP_BOOKMARKS, &i.to_string(), s);
+            if let Some(path) = bookmark.path.to_str() {
+                self.key_file
+                    .set_string(GROUP_BOOKMARKS, &format!("path-{i}"), path);
+                self.key_file
+                    .set_string(GROUP_BOOKMARKS, &format!("name-{i}"), &bookmark.name);
             }
         }
         self.key_file
@@ -147,20 +181,28 @@ impl Settings {
         self.save();
     }
 
-    /// Add a bookmark if not already present. Returns whether it was added.
+    /// Add a bookmark (named after the folder) if the path isn't already there.
+    /// Returns whether it was added.
     pub fn add_bookmark(&self, path: &Path) -> bool {
         let mut bookmarks = self.bookmarks();
-        if bookmarks.iter().any(|b| b == path) {
+        if bookmarks.iter().any(|b| b.path == path) {
             return false;
         }
-        bookmarks.push(path.to_path_buf());
+        bookmarks.push(Bookmark {
+            name: default_bookmark_name(path),
+            path: path.to_path_buf(),
+        });
         self.set_bookmarks(&bookmarks);
         true
     }
 
-    /// Remove a bookmark.
+    /// Remove the bookmark for `path`.
     pub fn remove_bookmark(&self, path: &Path) {
-        let bookmarks: Vec<PathBuf> = self.bookmarks().into_iter().filter(|b| b != path).collect();
+        let bookmarks: Vec<Bookmark> = self
+            .bookmarks()
+            .into_iter()
+            .filter(|b| b.path != path)
+            .collect();
         self.set_bookmarks(&bookmarks);
     }
 

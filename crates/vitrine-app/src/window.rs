@@ -130,8 +130,9 @@ mod imp {
         pub back_button: TemplateChild<gtk::Button>,
         /// Collection ids parallel to `collections_list` rows (by index).
         pub collection_ids: RefCell<Vec<i64>>,
-        /// Bookmarked folders parallel to `bookmarks_list` rows (by index).
-        pub bookmark_paths: RefCell<Vec<PathBuf>>,
+        /// Bookmarks parallel to `bookmarks_list` rows (by index) — the UI's
+        /// source of truth, synced to settings on every change.
+        pub bookmarks: RefCell<Vec<crate::settings::Bookmark>>,
         /// Back-navigation history of visited folders (the current one excluded).
         pub history: RefCell<Vec<PathBuf>>,
         /// True while navigating back, so `load_folder` doesn't re-record history.
@@ -228,7 +229,7 @@ mod imp {
                 folder_tree: Default::default(),
                 back_button: Default::default(),
                 collection_ids: RefCell::new(Vec::new()),
-                bookmark_paths: RefCell::new(Vec::new()),
+                bookmarks: RefCell::new(Vec::new()),
                 history: RefCell::new(Vec::new()),
                 navigating_back: Cell::new(false),
                 duplicates_page: RefCell::new(None),
@@ -1006,14 +1007,8 @@ impl VitrineWindow {
             self,
             move |_, row| {
                 let idx = row.index();
-                if let Some(path) = window
-                    .imp()
-                    .bookmark_paths
-                    .borrow()
-                    .get(idx as usize)
-                    .cloned()
-                {
-                    window.open_location(gio::File::for_path(&path));
+                if let Some(bookmark) = window.imp().bookmarks.borrow().get(idx as usize).cloned() {
+                    window.open_location(gio::File::for_path(&bookmark.path));
                 }
             }
         ));
@@ -1101,48 +1096,201 @@ impl VitrineWindow {
         while let Some(row) = imp.bookmarks_list.row_at_index(0) {
             imp.bookmarks_list.remove(&row);
         }
-        imp.bookmark_paths.borrow_mut().clear();
 
         let bookmarks = crate::settings::Settings::load().bookmarks();
         imp.bookmarks_heading.set_visible(!bookmarks.is_empty());
-        for path in bookmarks {
+        for (index, bookmark) in bookmarks.iter().enumerate() {
             let row = gtk::Box::new(gtk::Orientation::Horizontal, 12);
             row.set_margin_start(6);
             row.set_margin_end(6);
             row.set_margin_top(6);
             row.set_margin_bottom(6);
             row.append(&gtk::Image::from_icon_name("folder-symbolic"));
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| path.to_string_lossy().into_owned());
             row.append(
                 &gtk::Label::builder()
-                    .label(name)
+                    .label(&bookmark.name)
                     .halign(gtk::Align::Start)
                     .hexpand(true)
                     .ellipsize(gtk::pango::EllipsizeMode::End)
                     .build(),
             );
-            let remove = gtk::Button::builder()
-                .icon_name("window-close-symbolic")
-                .css_classes(["flat", "circular"])
-                .valign(gtk::Align::Center)
-                .tooltip_text(gettextrs::gettext("Remove bookmark"))
-                .build();
-            let path_for_remove = path.clone();
-            remove.connect_clicked(glib::clone!(
+
+            // Right-click → context menu (rename / remove / move), Nautilus-style.
+            let menu = gtk::GestureClick::new();
+            menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+            menu.connect_pressed(glib::clone!(
                 #[weak(rename_to = window)]
                 self,
-                move |_| {
-                    crate::settings::Settings::load().remove_bookmark(&path_for_remove);
-                    window.refresh_bookmarks();
+                #[weak]
+                row,
+                move |gesture, _, x, y| {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    window.show_bookmark_menu(index, row.upcast_ref(), x, y);
                 }
             ));
-            row.append(&remove);
+            row.add_controller(menu);
+
+            // Drag to reorder: the source carries its index; dropping on another
+            // row moves it there.
+            let source = gtk::DragSource::new();
+            source.set_actions(gtk::gdk::DragAction::MOVE);
+            source.connect_prepare(move |_, _, _| {
+                Some(gtk::gdk::ContentProvider::for_value(
+                    &(index as i32).to_value(),
+                ))
+            });
+            row.add_controller(source);
+
+            let target = gtk::DropTarget::new(i32::static_type(), gtk::gdk::DragAction::MOVE);
+            target.connect_drop(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[upgrade_or]
+                false,
+                move |_, value, _, _| {
+                    if let Ok(from) = value.get::<i32>() {
+                        window.reorder_bookmark(from as usize, index);
+                    }
+                    true
+                }
+            ));
+            row.add_controller(target);
+
             imp.bookmarks_list.append(&row);
-            imp.bookmark_paths.borrow_mut().push(path);
         }
+        *imp.bookmarks.borrow_mut() = bookmarks;
+    }
+
+    /// Right-click menu for a bookmark: open, rename, remove, move up/down.
+    fn show_bookmark_menu(&self, index: usize, anchor: &gtk::Widget, x: f64, y: f64) {
+        let popover = gtk::Popover::new();
+        popover.set_parent(anchor);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.connect_closed(|popover| popover.unparent());
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        let count = self.imp().bookmarks.borrow().len();
+        let entries: &[(&str, i64)] = &[
+            ("Open", 0),
+            ("Rename…", 1),
+            ("Remove", 2),
+            ("Move Up", 3),
+            ("Move Down", 4),
+        ];
+        for (label, action) in entries {
+            // Move Up/Down only when there's somewhere to move.
+            if (*action == 3 && index == 0) || (*action == 4 && index + 1 >= count) {
+                continue;
+            }
+            let button = gtk::Button::builder()
+                .label(gettextrs::gettext(*label))
+                .css_classes(["flat"])
+                .build();
+            if let Some(child) = button.child().and_downcast::<gtk::Label>() {
+                child.set_xalign(0.0);
+            }
+            let action = *action;
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[weak]
+                popover,
+                move |_| {
+                    window.bookmark_action(index, action);
+                    popover.popdown();
+                }
+            ));
+            content.append(&button);
+        }
+        popover.set_child(Some(&content));
+        popover.popup();
+    }
+
+    fn bookmark_action(&self, index: usize, action: i64) {
+        let bookmark = match self.imp().bookmarks.borrow().get(index).cloned() {
+            Some(b) => b,
+            None => return,
+        };
+        match action {
+            0 => self.open_location(gio::File::for_path(&bookmark.path)),
+            1 => self.rename_bookmark_dialog(index),
+            2 => {
+                crate::settings::Settings::load().remove_bookmark(&bookmark.path);
+                self.refresh_bookmarks();
+            }
+            3 => self.move_bookmark(index, -1),
+            4 => self.move_bookmark(index, 1),
+            _ => {}
+        }
+    }
+
+    /// Move a bookmark up (`-1`) or down (`+1`) one position.
+    fn move_bookmark(&self, index: usize, delta: i32) {
+        let mut list = self.imp().bookmarks.borrow().clone();
+        let target = index as i32 + delta;
+        if target < 0 || target as usize >= list.len() {
+            return;
+        }
+        list.swap(index, target as usize);
+        crate::settings::Settings::load().set_bookmarks(&list);
+        self.refresh_bookmarks();
+    }
+
+    /// Move the bookmark at `from` to sit at position `to` (drag reorder).
+    fn reorder_bookmark(&self, from: usize, to: usize) {
+        let mut list = self.imp().bookmarks.borrow().clone();
+        if from >= list.len() || from == to {
+            return;
+        }
+        let bookmark = list.remove(from);
+        let dest = if from < to { to.saturating_sub(1) } else { to };
+        list.insert(dest.min(list.len()), bookmark);
+        crate::settings::Settings::load().set_bookmarks(&list);
+        self.refresh_bookmarks();
+    }
+
+    /// Rename a bookmark's display name (its target folder is unchanged).
+    fn rename_bookmark_dialog(&self, index: usize) {
+        let Some(bookmark) = self.imp().bookmarks.borrow().get(index).cloned() else {
+            return;
+        };
+        let entry = gtk::Entry::builder()
+            .text(&bookmark.name)
+            .activates_default(true)
+            .build();
+        let dialog = adw::AlertDialog::new(Some(&gettextrs::gettext("Rename Bookmark")), None);
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", &gettextrs::gettext("Cancel"));
+        dialog.add_response("rename", &gettextrs::gettext("Rename"));
+        dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("rename"));
+        dialog.set_close_response("cancel");
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[weak]
+                entry,
+                move |_, response| {
+                    if response != "rename" {
+                        return;
+                    }
+                    let name = entry.text().trim().to_string();
+                    if name.is_empty() {
+                        return;
+                    }
+                    let mut list = window.imp().bookmarks.borrow().clone();
+                    if let Some(bookmark) = list.get_mut(index) {
+                        bookmark.name = name;
+                        crate::settings::Settings::load().set_bookmarks(&list);
+                        window.refresh_bookmarks();
+                    }
+                }
+            ),
+        );
+        dialog.present(Some(self));
     }
 
     /// The folders the sandbox can browse (Pictures + library roots), deduped.
