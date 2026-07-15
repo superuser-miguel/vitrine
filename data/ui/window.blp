@@ -242,6 +242,12 @@ template $VitrineWindow: Adw.ApplicationWindow {
                   halign: start;
                 }
 
+                Gtk.Button filter_save {
+                  label: _("Save as Collection");
+                  tooltip-text: _("Save this filter as a smart collection");
+                  styles ["flat"]
+                }
+
                 Gtk.Button filter_clear {
                   label: _("Clear");
                   styles ["flat"]

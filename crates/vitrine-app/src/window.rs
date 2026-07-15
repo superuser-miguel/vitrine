@@ -77,6 +77,8 @@ pub struct FilterState {
     min_rating: i32,
     /// If set, only items whose content hash is in this set pass (one tag).
     tag_hashes: Option<HashSet<String>>,
+    /// The selected tag's name (for building a smart-collection predicate).
+    tag_name: Option<String>,
 }
 
 /// Gio attributes fetched per child when enumerating a folder.
@@ -144,6 +146,8 @@ mod imp {
         pub tag_filter: TemplateChild<gtk::DropDown>,
         #[template_child]
         pub filter_clear: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub filter_save: TemplateChild<gtk::Button>,
 
         /// The grid filter (min-rating + tag); `changed()` re-runs it.
         pub filter: RefCell<Option<gtk::CustomFilter>>,
@@ -215,6 +219,7 @@ mod imp {
                 rating_filter: Default::default(),
                 tag_filter: Default::default(),
                 filter_clear: Default::default(),
+                filter_save: Default::default(),
                 filter: RefCell::new(None),
                 filter_state: Rc::new(RefCell::new(FilterState::default())),
                 tag_names: RefCell::new(Vec::new()),
@@ -819,6 +824,11 @@ impl VitrineWindow {
                 imp.tag_filter.set_selected(0);
             }
         ));
+        imp.filter_save.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.save_filter_as_collection()
+        ));
         // Refresh the tag list from the index whenever the bar is opened.
         imp.filter_revealer
             .connect_reveal_child_notify(glib::clone!(
@@ -859,21 +869,25 @@ impl VitrineWindow {
     /// Apply the tag dropdown selection (0 = All tags → no tag filter).
     fn apply_tag_filter(&self, selected: u32) {
         let imp = self.imp();
-        let hashes = if selected == 0 {
+        let name = if selected == 0 {
             None
         } else {
-            let name = imp.tag_names.borrow().get((selected - 1) as usize).cloned();
-            name.map(|name| {
-                self.ensure_read_db();
-                let db = imp.read_db.borrow();
-                db.as_ref()
-                    .and_then(|db| db.hashes_with_tag(&name).ok())
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect::<HashSet<String>>()
-            })
+            imp.tag_names.borrow().get((selected - 1) as usize).cloned()
         };
-        imp.filter_state.borrow_mut().tag_hashes = hashes;
+        let hashes = name.as_ref().map(|name| {
+            self.ensure_read_db();
+            let db = imp.read_db.borrow();
+            db.as_ref()
+                .and_then(|db| db.hashes_with_tag(name).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<HashSet<String>>()
+        });
+        {
+            let mut state = imp.filter_state.borrow_mut();
+            state.tag_hashes = hashes;
+            state.tag_name = name;
+        }
         self.refilter();
     }
 
@@ -882,6 +896,70 @@ impl VitrineWindow {
         if let Some(filter) = self.imp().filter.borrow().as_ref() {
             filter.changed(gtk::FilterChange::Different);
         }
+    }
+
+    /// The current filter bar state as a smart-collection predicate (library-wide;
+    /// the filter's per-view tag hash-set becomes a `tags_any` name).
+    fn current_filter_query(&self) -> Option<vitrine_engine::Query> {
+        let state = self.imp().filter_state.borrow();
+        if state.min_rating <= 0 && state.tag_name.is_none() {
+            return None; // nothing to save
+        }
+        let mut query = vitrine_engine::Query::default();
+        if state.min_rating > 0 {
+            query.rating_min = Some(state.min_rating as i64);
+        }
+        if let Some(name) = &state.tag_name {
+            query.tags_any = vec![name.clone()];
+        }
+        Some(query)
+    }
+
+    /// Save the current filter as a named smart collection.
+    fn save_filter_as_collection(&self) {
+        let Some(query) = self.current_filter_query() else {
+            self.toast("Set a rating or tag filter first");
+            return;
+        };
+        let entry = gtk::Entry::builder()
+            .placeholder_text(gettextrs::gettext("Collection name"))
+            .activates_default(true)
+            .build();
+        let dialog = adw::AlertDialog::new(Some(&gettextrs::gettext("Save as Collection")), None);
+        dialog.set_body(&gettextrs::gettext(
+            "A smart collection updates automatically as images match this filter.",
+        ));
+        dialog.set_extra_child(Some(&entry));
+        dialog.add_response("cancel", &gettextrs::gettext("Cancel"));
+        dialog.add_response("save", &gettextrs::gettext("Save"));
+        dialog.set_response_appearance("save", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("save"));
+        dialog.set_close_response("cancel");
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[weak]
+                entry,
+                move |_, response| {
+                    if response != "save" {
+                        return;
+                    }
+                    let name = entry.text().trim().to_string();
+                    if name.is_empty() {
+                        return;
+                    }
+                    if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                        indexer
+                            .annotator()
+                            .create_smart_collection(&name, query.clone());
+                    }
+                    window.toast(&gettextrs::gettext("Smart collection saved"));
+                }
+            ),
+        );
+        dialog.present(Some(self));
     }
 
     // --- collections ---------------------------------------------------------
@@ -954,6 +1032,24 @@ impl VitrineWindow {
                     .css_classes(["dim-label", "caption"])
                     .build(),
             );
+
+            // Right-click → delete (+ add-selection for catalogs).
+            let is_catalog = collection.kind == vitrine_engine::CollectionKind::Catalog;
+            let id = collection.id;
+            let menu = gtk::GestureClick::new();
+            menu.set_button(gtk::gdk::BUTTON_SECONDARY);
+            menu.connect_pressed(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[weak]
+                row,
+                move |gesture, _, x, y| {
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    window.show_collection_menu(id, is_catalog, row.upcast_ref(), x, y);
+                }
+            ));
+            row.add_controller(menu);
+
             list.append(&row);
             imp.collection_ids.borrow_mut().push(collection.id);
         }
@@ -993,6 +1089,67 @@ impl VitrineWindow {
         imp.store.extend_from_slice(&items);
         imp.content_stack
             .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
+    }
+
+    /// Show the right-click menu for a collection row: delete, and for catalogs
+    /// "Add Selection".
+    fn show_collection_menu(
+        &self,
+        id: i64,
+        is_catalog: bool,
+        anchor: &gtk::Widget,
+        x: f64,
+        y: f64,
+    ) {
+        let popover = gtk::Popover::new();
+        popover.set_parent(anchor);
+        popover.set_has_arrow(false);
+        popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        popover.connect_closed(|popover| popover.unparent());
+
+        let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        if is_catalog {
+            let add = gtk::Button::builder()
+                .label(gettextrs::gettext("Add Selection"))
+                .css_classes(["flat"])
+                .build();
+            add.connect_clicked(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[weak]
+                popover,
+                move |_| {
+                    let hashes = window.selected_hashes();
+                    if hashes.is_empty() {
+                        window.toast("Select images to add");
+                    } else if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                        indexer.annotator().add_to_catalog(id, &hashes);
+                        window.toast(&format!("Added {} to catalog", hashes.len()));
+                    }
+                    popover.popdown();
+                }
+            ));
+            content.append(&add);
+        }
+        let delete = gtk::Button::builder()
+            .label(gettextrs::gettext("Delete"))
+            .css_classes(["flat"])
+            .build();
+        delete.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[weak]
+            popover,
+            move |_| {
+                if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                    indexer.annotator().delete_collection(id);
+                }
+                popover.popdown();
+            }
+        ));
+        content.append(&delete);
+        popover.set_child(Some(&content));
+        popover.popup();
     }
 
     /// Prompt for a name and create a catalog seeded with the current selection.

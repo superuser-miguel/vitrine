@@ -23,7 +23,7 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use vitrine_engine::scanner::Change;
-use vitrine_engine::{classify, walk_images, Db, Enrichment, FileRecord};
+use vitrine_engine::{classify, walk_images, Db, Enrichment, FileRecord, Query};
 
 /// The library index database path (app-private under Flatpak). Shared by the
 /// writer thread and the window's read-only query connection.
@@ -85,6 +85,11 @@ enum Request {
         name: String,
         hashes: Vec<String>,
     },
+    /// Create a smart collection from a query predicate.
+    CreateSmartCollection {
+        name: String,
+        query: Box<Query>,
+    },
     /// Append `hashes` to an existing catalog.
     AddToCatalog {
         id: i64,
@@ -143,6 +148,14 @@ impl Annotator {
         let _ = self.requests.try_send(Request::AddToCatalog {
             id,
             hashes: hashes.to_vec(),
+        });
+    }
+
+    /// Create a smart collection from a query predicate.
+    pub fn create_smart_collection(&self, name: &str, query: Query) {
+        let _ = self.requests.try_send(Request::CreateSmartCollection {
+            name: name.to_string(),
+            query: Box::new(query),
         });
     }
 
@@ -284,6 +297,14 @@ fn worker(
                         let _ = progress.try_send(IndexProgress::CollectionsChanged);
                     }
                     Err(e) => glib::g_warning!("vitrine", "create catalog {name}: {e}"),
+                }
+            }
+            Request::CreateSmartCollection { name, query } => {
+                match db.create_smart_collection(&name, &query) {
+                    Ok(_) => {
+                        let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                    }
+                    Err(e) => glib::g_warning!("vitrine", "create smart collection {name}: {e}"),
                 }
             }
             Request::AddToCatalog { id, hashes } => match db.add_to_catalog(id, &hashes) {
