@@ -1058,6 +1058,29 @@ impl VitrineWindow {
         ));
         imp.places_scroller.add_controller(drop);
 
+        // Reorder bookmarks: a list-level drop target lands the dragged bookmark
+        // wherever you drop it (the row under the cursor, or the end).
+        let reorder = gtk::DropTarget::new(i32::static_type(), gtk::gdk::DragAction::MOVE);
+        reorder.connect_drop(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            false,
+            move |_, value, _, y| {
+                let Ok(from) = value.get::<i32>() else {
+                    return false;
+                };
+                // The row under the cursor (or the end if dropped past the last).
+                let to = match window.imp().bookmarks_list.row_at_y(y as i32) {
+                    Some(row) => row.index() as usize,
+                    None => window.imp().bookmarks.borrow().len(),
+                };
+                window.reorder_bookmark(from as usize, to);
+                true
+            }
+        ));
+        imp.bookmarks_list.add_controller(reorder);
+
         // Ctrl+D bookmarks the current folder.
         let bookmark = gio::SimpleAction::new("bookmark-current", None);
         bookmark.connect_activate(glib::clone!(
@@ -1162,8 +1185,9 @@ impl VitrineWindow {
             ));
             row.add_controller(menu);
 
-            // Drag to reorder: the source carries its index; dropping on another
-            // row moves it there.
+            // Drag to reorder: the source carries this row's index; the drop is
+            // handled at the list level (see setup_navigation) so you can drop
+            // anywhere to land the bookmark there.
             let source = gtk::DragSource::new();
             source.set_actions(gtk::gdk::DragAction::MOVE);
             source.connect_prepare(move |_, _, _| {
@@ -1171,22 +1195,16 @@ impl VitrineWindow {
                     &(index as i32).to_value(),
                 ))
             });
-            row.add_controller(source);
-
-            let target = gtk::DropTarget::new(i32::static_type(), gtk::gdk::DragAction::MOVE);
-            target.connect_drop(glib::clone!(
-                #[weak(rename_to = window)]
-                self,
-                #[upgrade_or]
-                false,
-                move |_, value, _, _| {
-                    if let Ok(from) = value.get::<i32>() {
-                        window.reorder_bookmark(from as usize, index);
-                    }
-                    true
+            // Drag the row's own image as the cursor icon.
+            source.connect_drag_begin(glib::clone!(
+                #[weak]
+                row,
+                move |source, _| {
+                    let paintable = gtk::WidgetPaintable::new(Some(&row)).current_image();
+                    source.set_icon(Some(&paintable), 0, 0);
                 }
             ));
-            row.add_controller(target);
+            row.add_controller(source);
 
             imp.bookmarks_list.append(&row);
         }
@@ -1748,14 +1766,26 @@ impl VitrineWindow {
                     #[upgrade_or]
                     false,
                     move |_, value, _, _| {
-                        if let Ok(hash) = value.get::<String>() {
-                            if !hash.is_empty() {
-                                if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
-                                    indexer.annotator().add_to_catalog(id, &[hash]);
-                                    window.toast("Added to catalog");
-                                }
-                            }
+                        let Ok(hash) = value.get::<String>() else {
+                            return false;
+                        };
+                        // Dragging one of a multi-selection adds the whole
+                        // selection (file-manager behaviour); otherwise just it.
+                        let selected = window.selected_hashes();
+                        let hashes = if selected.contains(&hash) && selected.len() > 1 {
+                            selected
+                        } else if !hash.is_empty() {
+                            vec![hash]
+                        } else {
+                            return true;
+                        };
+                        if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                            indexer.annotator().add_to_catalog(id, &hashes);
                         }
+                        window.toast(&match hashes.len() {
+                            1 => "Added 1 image to catalog".to_string(),
+                            n => format!("Added {n} images to catalog"),
+                        });
                         true
                     }
                 ));
