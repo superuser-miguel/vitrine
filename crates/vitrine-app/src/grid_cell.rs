@@ -141,6 +141,27 @@ impl VitrineGridCell {
         self.imp().item.borrow().clone()
     }
 
+    /// Add a drag source so this image can be dragged onto a catalog (the drag
+    /// carries the current item's content hash). Called once per cell at setup.
+    pub fn add_drag_source(&self) {
+        let source = gtk::DragSource::new();
+        source.set_actions(gtk::gdk::DragAction::COPY);
+        source.connect_prepare(glib::clone!(
+            #[weak(rename_to = cell)]
+            self,
+            #[upgrade_or]
+            None,
+            move |_, _, _| {
+                let hash = cell.item()?.content_hash();
+                if hash.is_empty() {
+                    return None;
+                }
+                Some(gtk::gdk::ContentProvider::for_value(&hash.to_value()))
+            }
+        ));
+        self.add_controller(source);
+    }
+
     /// Unbind on recycle: forget the item so late loads don't paint here.
     pub fn unbind(&self) {
         self.disconnect_rating();

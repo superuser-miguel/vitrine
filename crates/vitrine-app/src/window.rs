@@ -70,6 +70,13 @@ impl Default for SortState {
     }
 }
 
+/// A browsable location — for back-navigation history (a folder or a collection).
+#[derive(Clone, PartialEq, Eq)]
+pub enum Location {
+    Folder(PathBuf),
+    Collection(i64),
+}
+
 /// The browser filter bar's live state, read by the grid's `CustomFilter`.
 #[derive(Default)]
 pub struct FilterState {
@@ -133,9 +140,11 @@ mod imp {
         /// Bookmarks parallel to `bookmarks_list` rows (by index) — the UI's
         /// source of truth, synced to settings on every change.
         pub bookmarks: RefCell<Vec<crate::settings::Bookmark>>,
-        /// Back-navigation history of visited folders (the current one excluded).
-        pub history: RefCell<Vec<PathBuf>>,
-        /// True while navigating back, so `load_folder` doesn't re-record history.
+        /// Back-navigation history of visited locations (the current one excluded).
+        pub history: RefCell<Vec<Location>>,
+        /// Where we are now (folder or collection), for history recording.
+        pub current_location: RefCell<Option<Location>>,
+        /// True while navigating back, so navigation doesn't re-record history.
         pub navigating_back: Cell<bool>,
         /// The lazily-built "Duplicates" page + its content box (rebuilt per scan).
         pub duplicates_page: RefCell<Option<adw::NavigationPage>>,
@@ -231,6 +240,7 @@ mod imp {
                 collection_ids: RefCell::new(Vec::new()),
                 bookmarks: RefCell::new(Vec::new()),
                 history: RefCell::new(Vec::new()),
+                current_location: RefCell::new(None),
                 navigating_back: Cell::new(false),
                 duplicates_page: RefCell::new(None),
                 duplicates_content: RefCell::new(None),
@@ -575,6 +585,7 @@ impl VitrineWindow {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             let cell = VitrineGridCell::default();
             cell.set_icon_size(icon_px);
+            cell.add_drag_source();
             list_item.set_child(Some(&cell));
         });
         factory.connect_bind(glib::clone!(
@@ -1060,13 +1071,34 @@ impl VitrineWindow {
         self.setup_folder_tree();
     }
 
-    /// Go to the previously-visited folder.
+    /// Move to `new`, pushing the current location onto the Back history (unless
+    /// we're navigating back). No-op if it's where we already are.
+    fn set_location(&self, new: Location) {
+        let imp = self.imp();
+        let previous = imp.current_location.borrow().clone();
+        if previous.as_ref() == Some(&new) {
+            return;
+        }
+        if !imp.navigating_back.get() {
+            if let Some(previous) = previous {
+                imp.history.borrow_mut().push(previous);
+            }
+        }
+        *imp.current_location.borrow_mut() = Some(new);
+        self.update_back_sensitivity();
+    }
+
+    /// Go to the previously-visited location (folder or collection).
     fn go_back(&self) {
         let Some(previous) = self.imp().history.borrow_mut().pop() else {
             return;
         };
         self.imp().navigating_back.set(true);
-        self.open_location(gio::File::for_path(&previous));
+        match &previous {
+            Location::Folder(path) => self.load_folder(gio::File::for_path(path)),
+            Location::Collection(id) => self.open_collection(*id),
+        }
+        *self.imp().current_location.borrow_mut() = Some(previous);
         self.imp().navigating_back.set(false);
         self.update_back_sensitivity();
     }
@@ -1707,6 +1739,29 @@ impl VitrineWindow {
             ));
             row.add_controller(menu);
 
+            // Drag an image from the grid onto a catalog to add it.
+            if is_catalog {
+                let drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::COPY);
+                drop.connect_drop(glib::clone!(
+                    #[weak(rename_to = window)]
+                    self,
+                    #[upgrade_or]
+                    false,
+                    move |_, value, _, _| {
+                        if let Ok(hash) = value.get::<String>() {
+                            if !hash.is_empty() {
+                                if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                                    indexer.annotator().add_to_catalog(id, &[hash]);
+                                    window.toast("Added to catalog");
+                                }
+                            }
+                        }
+                        true
+                    }
+                ));
+                row.add_controller(drop);
+            }
+
             list.append(&row);
             imp.collection_ids.borrow_mut().push(collection.id);
         }
@@ -1740,6 +1795,9 @@ impl VitrineWindow {
                 .collect()
         };
 
+        // Record the collection as a location so Back returns to the folder you
+        // were in (and to it, if you navigate on).
+        self.set_location(Location::Collection(id));
         let imp = self.imp();
         *imp.current_folder.borrow_mut() = None; // multi-folder; no folder stamp
         imp.store.remove_all();
@@ -2194,19 +2252,13 @@ impl VitrineWindow {
 
     /// Enumerate `folder`'s image children asynchronously and populate the grid.
     fn load_folder(&self, folder: gio::File) {
-        let imp = self.imp();
         let new_path = folder.path();
-        // Record where we're leaving, so Back can return there.
-        if !imp.navigating_back.get() {
-            if let Some(previous) = imp.current_folder.borrow().clone() {
-                if new_path.as_ref() != Some(&previous) {
-                    imp.history.borrow_mut().push(previous);
-                }
-            }
+        // Record the move (for Back) and remember the folder (for the rating
+        // stamp scope).
+        if let Some(path) = &new_path {
+            self.set_location(Location::Folder(path.clone()));
         }
-        // Remember the folder so the rating stamp can scope to it.
-        *imp.current_folder.borrow_mut() = new_path;
-        self.update_back_sensitivity();
+        *self.imp().current_folder.borrow_mut() = new_path;
         // Kick off background indexing in parallel — the grid never waits on it.
         self.index_folder(&folder);
         glib::spawn_future_local(glib::clone!(
