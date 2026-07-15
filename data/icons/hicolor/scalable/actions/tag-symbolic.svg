@@ -1,4 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- Vitrine tag icon: an original tilted price-tag (rounded label + string hole),
+     recolored by GTK as a symbolic icon. -->
 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <path fill="#2e3436" fill-rule="evenodd" d="M2 8 L6.3 3.4 Q6.7 3 7.3 3 L12 3 Q13 3 13 4 L13 12 Q13 13 12 13 L7.3 13 Q6.7 13 6.3 12.6 Z M8.6 6.4 A1.15 1.15 0 1 0 8.6 8.7 A1.15 1.15 0 1 0 8.6 6.4 Z"/>
+  <g transform="rotate(-45 8 8)">
+    <path fill="#2e3436" fill-rule="evenodd" d="M2.4 8 L6.2 4.4 Q6.6 4.1 7.2 4.1 L12.2 4.1 Q13.4 4.1 13.4 5.3 L13.4 10.7 Q13.4 11.9 12.2 11.9 L7.2 11.9 Q6.6 11.9 6.2 11.6 Z M7.15 8 A1.2 1.2 0 1 0 4.75 8 A1.2 1.2 0 1 0 7.15 8 Z"/>
+  </g>
 </svg>

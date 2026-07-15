@@ -664,6 +664,21 @@ drag-add + a `Ctrl+D` action. Self-contained navigation; doesn't disturb grid/in
 > Note: the **filmstrip** (viewer bottom bar, Phase 1) is unrelated — it moves *within*
 > the current folder image-to-image; the sidebar moves *between* folders.
 
+#### 10.6.1 Follow-up notes (user, 2026-07-15) — for when feasible
+
+- **Bookmarks = Nautilus model, not gThumb's.** Drag folders you use often into the
+  sidebar; clicking the Bookmarks switcher **changes the left pane to present the
+  bookmarked dirs** (à la Nautilus 50.x), one of the switcher's pages (§10.6). Give
+  the bookmark entry a **tag/label-style icon like gThumb's** (bundle our own — see
+  the tag-icon precedent: `data/icons/.../*-symbolic.svg` in the gresource,
+  registered via `IconTheme.add_resource_path`).
+- **Back-button navigation like Nautilus** — a header back button with folder-history
+  (visited folders / collections), so you can step back through where you've been.
+  Pairs with the sidebar navigation. (The viewer→browser back already exists via
+  `AdwNavigationView`; this is *browser-level* folder history.)
+- **Tag icon: DONE** — replaced the flat placeholder with an original tilted
+  price-tag symbolic (the "looks like a real tag" shape), bundled + recolored.
+
 ---
 
 ## 11. Test suite & debug tooling (QA plan — internal memo, 2026-07-15)
