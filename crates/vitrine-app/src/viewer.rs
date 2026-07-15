@@ -597,9 +597,24 @@ impl VitrineViewer {
     }
 
     fn zoom_by(&self, factor: f64) {
-        // Starting from fit means "fit scale" ≈ 1.0 baseline for the first step.
-        let current = self.imp().zoom.get().unwrap_or(1.0);
+        // Step from the current zoom, or — when fitting — from the *actual* fit
+        // scale (which is rarely 100%), so the first +/- press is continuous
+        // rather than jumping to an absolute fraction of the natural pixels.
+        let current = self.imp().zoom.get().unwrap_or_else(|| self.fit_scale());
         self.apply_zoom(current * factor);
+    }
+
+    /// The scale at which the current image fits the viewport (the smaller of the
+    /// two axis ratios) — the baseline a zoom step grows or shrinks from.
+    fn fit_scale(&self) -> f64 {
+        let imp = self.imp();
+        let (nw, nh) = imp.natural.get();
+        let vw = imp.picture_scroller.width();
+        let vh = imp.picture_scroller.height();
+        if nw <= 0 || nh <= 0 || vw <= 0 || vh <= 0 {
+            return 1.0;
+        }
+        (vw as f64 / nw as f64).min(vh as f64 / nh as f64)
     }
 
     /// 100% — one image pixel per screen pixel (of the decoded texture).
@@ -626,7 +641,11 @@ impl VitrineViewer {
         }
         let zoom = factor.clamp(ZOOM_MIN, ZOOM_MAX);
         imp.zoom.set(Some(zoom));
-        imp.picture.set_content_fit(gtk::ContentFit::Fill);
+        // Contain (not Fill): the size-request box is already aspect-correct, so
+        // Contain fills it with no letterbox — but unlike Fill it never distorts
+        // the image if the scroller's viewport over-allocates the widget (which
+        // is exactly what squashed the image vertically on zoom-out).
+        imp.picture.set_content_fit(gtk::ContentFit::Contain);
         imp.picture.set_halign(gtk::Align::Center);
         imp.picture.set_valign(gtk::Align::Center);
         imp.picture.set_size_request(
