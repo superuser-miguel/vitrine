@@ -1,10 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <!-- Placeholder Vitrine icon: a framed image (mountains + sun). Replace with a
-       proper icon before release (PLAN Phase 4 polish). -->
-  <rect x="16" y="24" width="96" height="80" rx="12" fill="#3584e4"/>
-  <rect x="26" y="34" width="76" height="60" rx="6" fill="#ffffff"/>
-  <circle cx="46" cy="52" r="8" fill="#f5c211"/>
-  <path d="M26 88 L52 62 L68 78 L84 58 L102 82 L102 88 Z" fill="#2ec27e"/>
-  <rect x="26" y="34" width="76" height="60" rx="6" fill="none" stroke="#1a5fb4" stroke-width="3"/>
+  <!-- Vitrine app icon: an image on display in a white "showcase" frame with a
+       glass gleam (the vitrine), on the app tile. Family style shared with
+       Septima/Foresight: rounded gradient tile + one bold subject. No clipPath
+       or mask (appstreamcli's icon compose rejects those) — shapes are kept in
+       bounds instead. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#a066e6"/>
+      <stop offset="1" stop-color="#6a2bbf"/>
+    </linearGradient>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffd98a"/>
+      <stop offset="1" stop-color="#ff9d6c"/>
+    </linearGradient>
+  </defs>
+
+  <!-- app tile -->
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#tile)"/>
+
+  <!-- white showcase frame -->
+  <rect x="22" y="26" width="84" height="76" rx="14" fill="#ffffff"/>
+
+  <!-- the image on display (plain rect, so no clip is needed) -->
+  <rect x="31" y="35" width="66" height="58" fill="url(#sky)"/>
+  <circle cx="52" cy="54" r="11" fill="#fff4d6"/>
+  <path d="M31 93 V74 C48 62 55 74 64 70 C76 65 84 78 97 72 V93 Z" fill="#db5a8f"/>
+  <!-- glass gleam (kept within the image bounds; no clip) -->
+  <polygon points="48,35 64,35 48,93 32,93" fill="#ffffff" opacity="0.20"/>
 </svg>
