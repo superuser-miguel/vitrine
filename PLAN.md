@@ -433,9 +433,10 @@ Acceptance:
 ## 9. Deferred (v2+, do not build now, do not preclude)
 
 Embedded metadata write via rexiv2 (activates `sync_state`); sidecar-only mode; dynamic
-path-based tag rules (activates `source='rule'`); Lua/Rhai scripting tier; batch
-rename/convert/rotate; "find similar" UI over the already-indexed pHash; WASM plugin tier
-with Flatpak `add-extension`; editing tools; device import; slideshow.
+path-based tag rules (activates `source='rule'`); Lua/Rhai scripting tier — incl.
+**user-defined custom sort orders** (§10.3.1, the likely first use case) and rename/predicate
+rules; batch rename/convert/rotate; "find similar" UI over the already-indexed pHash; WASM
+plugin tier with Flatpak `add-extension`; editing tools; device import; slideshow.
 
 ---
 
@@ -502,6 +503,38 @@ run via `magick -script script.lua` or embedded; hot-reload friendly.
 - *Pros:* powerful for batch/editing rules; mature; callable via subprocess (safe).
 - *Cons:* heavy if embedded (C API); Vitrine prefers pure Lua/Rhai in-process for rules + WASM for heavy compute.
 - **Recommendation:** `rhai` or `mlua` for lightweight rules / renames / predicates; offload heavy ImageMagick-style ops to a WASM plugin (or an optional Lua + ImageMagick subprocess extension). Strong case for Lua in v2 — familiar to users from ImageMagick workflows.
+
+#### 10.3.1 Custom sort orders — first concrete use case (user request, 2026-07-15)
+
+The v1 grid sort is a live `gtk::SortListModel` + `CustomSorter` over per-item
+facts (Name / Size / Modified / Type; see `window.rs`). That comparator is a
+clean, low-risk **first extension point** for the scripting tier: let users
+register their own sort orders in Lua, which then appear as extra entries under
+the header "Sort By" menu alongside the built-ins.
+
+- **Model — key function, not comparator.** A script exposes
+  `key(item) -> comparable` (number, string, or tuple/array), *not* a pairwise
+  `compare(a, b)`. Rationale: the key is computed **once per item** and memoized,
+  so an O(n) pass feeds GTK's O(n log n) sort — a pairwise Lua call in the hot
+  comparison path would be too slow on 10k+ folders and risks non-transitive
+  (unstable) orderings. Direction (asc/desc) and the case-folded name tiebreak
+  stay native, reused from the built-in path.
+- **Item context (read-only).** Expose the fields Vitrine already has in memory
+  or in the index: `name`, `path`, `size`, `mtime`, and the enriched columns
+  `width`, `height`, `date_taken`, `camera`, `orientation`, plus v1 Phase 3
+  `rating` and `tags`. No I/O, no mutation — pure functions only, so the sort is
+  stable and re-runnable.
+- **Examples this unlocks:** natural/numeric filename order (`img_2` < `img_10`);
+  aspect ratio (`width/height`); camera then date; rating then name; EXIF focal
+  length or ISO (once indexed); folder depth; "unrated first". Natural-sort is the
+  most-requested and could alternatively be promoted to a v1 built-in.
+- **Delivery.** Pure in-process `mlua`/`rhai`, sandboxed (no filesystem/network),
+  hot-reloaded from an extensions dir; each script declares a display name + the
+  `key` function. Registered scripts add radio items to the sort menu; selecting
+  one swaps the `CustomSorter`'s key source and calls `sorter.changed()` — the
+  same live path the built-ins use. Recompute/memoize keys on metadata change.
+- **Ties into:** the scripting tier above (shared Lua host + sandbox), §5 stored
+  metadata (the key's input columns), and Phase 3 tags/ratings (richer keys).
 
 ### 10.4 BLAKE3 hashing — implementation notes
 

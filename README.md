@@ -10,10 +10,39 @@ Rust · GTK4 · gtk-rs · libadwaita · Blueprint · glycin · SQLite · Flatpak
 
 ## Status
 
-Phase 0 (scaffold): empty-but-real application — builds via cargo, Meson, and
-flatpak-builder; opens an `AdwApplicationWindow` with a headerbar and About
-dialog. The browser grid, viewer, filmstrip, index and dedup layers land in
-later phases.
+**Phases 0–2 complete.** Vitrine is a working image browser + reviewer with a
+content-hash-keyed catalog index. Builds via cargo, Meson, and flatpak-builder.
+
+**What works today:**
+
+- **Browser grid** — virtualized `GtkGridView` with rubber-band/Ctrl/Shift
+  selection, adjustable thumbnail size (Ctrl +/−, Ctrl+scroll), and
+  trash-to-recycle (`Delete`). Bounded RAM + disk thumbnail caches keep memory
+  flat on 27k-image folders; thumbnails reuse GNOME's shared cache when possible.
+- **Viewer** — fit / zoom / pan / 100%, arrow-key navigation, a synced
+  filmstrip, and an **image properties sidebar** (dimensions, size, format, date
+  taken, camera, orientation).
+- **Nautilus-style sorting** — sort by Name / Size / Modified / Type with an
+  independent Ascending/Descending toggle; instant and live (no rebuild), your
+  choice remembered across sessions.
+- **First-class AVIF / JXL / HEIF** (plus JPEG/PNG/WebP/…) via glycin.
+- **Background index** — an app-private SQLite catalog, BLAKE3 content-hash keyed
+  so tags/ratings survive gallery-dl renames, with move/delete reconciliation and
+  background enrichment (dimensions, EXIF, perceptual hash). Browsing never waits
+  on it.
+- **Preferences** — manage **library folders** (indexed in the background) and
+  the thumbnail-cache budget.
+
+**Next:** Phase 3 (tags, stars, Collections) and Phase 4 (find-duplicates UI —
+the engine primitives, content-hash grouping + perceptual-hash distance, already
+exist). See [`PLAN.md`](PLAN.md).
+
+### Planned: scripting
+
+A v2 Lua/Rhai scripting tier is planned (see PLAN.md §10.3). Its likely first
+use case is **user-defined custom sort orders** (§10.3.1) — write a small `key`
+function in Lua (natural filename order, aspect ratio, camera-then-date, rating,
+…) and it shows up alongside the built-in sorts.
 
 ## Layout
 
