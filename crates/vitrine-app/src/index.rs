@@ -25,6 +25,12 @@ use gtk::prelude::*;
 use vitrine_engine::scanner::Change;
 use vitrine_engine::{classify, walk_images, Db, Enrichment, FileRecord};
 
+/// The library index database path (app-private under Flatpak). Shared by the
+/// writer thread and the window's read-only query connection.
+pub fn index_db_path() -> PathBuf {
+    glib::user_data_dir().join("vitrine").join("index.sqlite")
+}
+
 /// How many un-enriched files the driver pulls per round-trip to the writer.
 const ENRICH_BATCH: i64 = 64;
 /// Frame size (px) requested for perceptual hashing — dHash reduces to 8×8, so a
@@ -93,9 +99,10 @@ impl Indexer {
 
     /// Start (or, if already running, leave running) the enrichment driver: it
     /// decodes un-enriched files in the background — dimensions, EXIF, pHash —
-    /// until the queue is empty, then stops. Safe to call after every scan and
-    /// on startup to mop up leftovers from a previous session.
-    pub fn start_enrichment(&self) {
+    /// until the queue is empty, then runs `on_done` (used to refresh a
+    /// metadata sort once the columns it reads are populated). Safe to call after
+    /// every scan and on startup to mop up leftovers from a previous session.
+    pub fn start_enrichment(&self, on_done: impl FnOnce() + 'static) {
         if self.enriching.replace(true) {
             return;
         }
@@ -104,6 +111,7 @@ impl Indexer {
         glib::spawn_future_local(async move {
             run_enrichment(requests).await;
             flag.set(false);
+            on_done();
         });
     }
 }

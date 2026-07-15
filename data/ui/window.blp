@@ -11,6 +11,40 @@ menu primary_menu {
   }
 }
 
+menu sort_menu {
+  section {
+    item {
+      label: _("_Name");
+      action: "win.sort";
+      target: "name";
+    }
+
+    item {
+      label: _("_Newest First");
+      action: "win.sort";
+      target: "newest";
+    }
+
+    item {
+      label: _("_Oldest First");
+      action: "win.sort";
+      target: "oldest";
+    }
+
+    item {
+      label: _("_Largest First");
+      action: "win.sort";
+      target: "largest";
+    }
+
+    item {
+      label: _("Biggest _File Size");
+      action: "win.sort";
+      target: "size";
+    }
+  }
+}
+
 template $VitrineWindow: Adw.ApplicationWindow {
   title: _("Vitrine");
   default-width: 1100;
@@ -86,6 +120,13 @@ template $VitrineWindow: Adw.ApplicationWindow {
                 tooltip-text: _("Main Menu");
                 menu-model: primary_menu;
                 primary: true;
+              }
+
+              [end]
+              MenuButton sort_button {
+                icon-name: "view-sort-descending-symbolic";
+                tooltip-text: _("Sort");
+                menu-model: sort_menu;
               }
 
               [end]

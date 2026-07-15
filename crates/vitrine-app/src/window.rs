@@ -6,9 +6,13 @@
 //! lazily per visible cell (see [`crate::grid_cell`]). Activating a cell pushes
 //! the [`crate::viewer`] page onto the `AdwNavigationView`, sharing the store.
 
+use std::path::PathBuf;
+
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gio, glib, CompositeTemplate};
+
+use vitrine_engine::{Db, Direction, Query, SortKey};
 
 use crate::grid_cell::VitrineGridCell;
 use crate::image_object::ImageObject;
@@ -64,6 +68,13 @@ mod imp {
         /// Background library indexer (created in `constructed`). Owns the one
         /// writer `Db`; the UI only enqueues folders and reads progress.
         pub indexer: RefCell<Option<Indexer>>,
+        /// A read-only connection to the index, opened lazily for grid sorting
+        /// (the writer stays on the indexer thread; this only ever queries).
+        pub read_db: RefCell<Option<Db>>,
+        /// Local path of the folder currently shown (for scoping sort queries).
+        pub current_folder: RefCell<Option<PathBuf>>,
+        /// Active grid sort (key + direction). Default: by name, ascending.
+        pub sort: std::cell::Cell<(SortKey, Direction)>,
 
         /// Backing model for the grid (one row per image file).
         pub store: gio::ListStore,
@@ -98,6 +109,9 @@ mod imp {
                 icon_larger: Default::default(),
                 index_banner: Default::default(),
                 indexer: RefCell::new(None),
+                read_db: RefCell::new(None),
+                current_folder: RefCell::new(None),
+                sort: std::cell::Cell::new((SortKey::Name, Direction::Asc)),
                 store: gio::ListStore::new::<ImageObject>(),
                 selection: RefCell::new(None),
                 grid_view: RefCell::new(None),
@@ -520,17 +534,142 @@ impl VitrineWindow {
             self,
             move |_, _| window.open_folder_dialog()
         ));
+
+        // Stateful sort action driving the header sort menu (radio items).
+        let sort = gio::SimpleAction::new_stateful(
+            "sort",
+            Some(glib::VariantTy::STRING),
+            &"name".to_variant(),
+        );
+        sort.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |action, param| {
+                if let Some(preset) = param.and_then(|v| v.str()) {
+                    action.set_state(&preset.to_variant());
+                    window.set_sort(preset);
+                }
+            }
+        ));
+        self.add_action(&sort);
+    }
+
+    /// Map a menu preset to a (key, direction) and re-sort the grid.
+    fn set_sort(&self, preset: &str) {
+        let sort = match preset {
+            "newest" => (SortKey::DateTaken, Direction::Desc),
+            "oldest" => (SortKey::DateTaken, Direction::Asc),
+            "largest" => (SortKey::Area, Direction::Desc),
+            "size" => (SortKey::Size, Direction::Desc),
+            _ => (SortKey::Name, Direction::Asc),
+        };
+        self.imp().sort.set(sort);
+        self.apply_sort();
+    }
+
+    /// Reorder the grid to the active sort. `Name` sorts by display name with no
+    /// database round-trip; metadata sorts query the index for the current
+    /// folder's rows in order and reorder the store to match, with any rows the
+    /// index hasn't caught up on trailing in name order.
+    fn apply_sort(&self) {
+        let imp = self.imp();
+        let (key, dir) = imp.sort.get();
+
+        let mut items: Vec<ImageObject> = (0..imp.store.n_items())
+            .filter_map(|i| imp.store.item(i).and_downcast::<ImageObject>())
+            .collect();
+        if items.is_empty() {
+            return;
+        }
+
+        if key == SortKey::Name {
+            items.sort_by(|a, b| {
+                a.display_name()
+                    .to_lowercase()
+                    .cmp(&b.display_name().to_lowercase())
+            });
+        } else {
+            let Some(folder) = imp.current_folder.borrow().clone() else {
+                return;
+            };
+            let rank = self.query_ranks(&folder, key, dir);
+            if rank.is_empty() {
+                return; // index not ready for this folder yet — leave as-is
+            }
+            // Rows the index knows sort by its rank; unknown rows trail by name.
+            items.sort_by(|a, b| {
+                let ra = item_path(a).and_then(|p| rank.get(&p)).copied();
+                let rb = item_path(b).and_then(|p| rank.get(&p)).copied();
+                match (ra, rb) {
+                    (Some(x), Some(y)) => x.cmp(&y),
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (None, None) => a
+                        .display_name()
+                        .to_lowercase()
+                        .cmp(&b.display_name().to_lowercase()),
+                }
+            });
+        }
+
+        imp.store.remove_all();
+        imp.store.extend_from_slice(&items);
+    }
+
+    /// Query the index for `folder`'s files in `(key, dir)` order, returning a
+    /// path→rank map. Opens the read-only connection on first use.
+    fn query_ranks(
+        &self,
+        folder: &std::path::Path,
+        key: SortKey,
+        dir: Direction,
+    ) -> std::collections::HashMap<String, usize> {
+        let imp = self.imp();
+        if imp.read_db.borrow().is_none() {
+            match Db::open(crate::index::index_db_path()) {
+                Ok(db) => *imp.read_db.borrow_mut() = Some(db),
+                Err(e) => {
+                    glib::g_warning!("vitrine", "open read db: {e}");
+                    return std::collections::HashMap::new();
+                }
+            }
+        }
+        let db = imp.read_db.borrow();
+        let Some(db) = db.as_ref() else {
+            return std::collections::HashMap::new();
+        };
+        let query = Query {
+            under: Some(folder.to_string_lossy().into_owned()),
+            sort: key,
+            direction: dir,
+            ..Default::default()
+        };
+        match db.query(&query) {
+            Ok(rows) => rows
+                .into_iter()
+                .enumerate()
+                .map(|(i, r)| (r.path, i))
+                .collect(),
+            Err(e) => {
+                glib::g_warning!("vitrine", "sort query: {e}");
+                std::collections::HashMap::new()
+            }
+        }
     }
 
     /// Spawn the background indexer and start draining its progress into the
     /// banner on the main context. The index lives in the app's private data
     /// dir (per-app under Flatpak), so it never touches the browsed folders.
     fn setup_indexer(&self) {
-        let db_path = glib::user_data_dir().join("vitrine").join("index.sqlite");
-        let indexer = Indexer::spawn(db_path);
+        let indexer = Indexer::spawn(crate::index::index_db_path());
         let progress = indexer.progress.clone();
-        // Drain any files left un-enriched by a previous session.
-        indexer.start_enrichment();
+        // Drain any files left un-enriched by a previous session, refreshing the
+        // sort once their metadata lands.
+        indexer.start_enrichment(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move || window.apply_sort()
+        ));
         *self.imp().indexer.borrow_mut() = Some(indexer);
 
         glib::spawn_future_local(glib::clone!(
@@ -563,9 +702,15 @@ impl VitrineWindow {
             }
             IndexProgress::Finished { .. } => {
                 banner.set_revealed(false);
-                // Identity indexing done — now backfill dimensions/EXIF/pHash.
+                // Identity rows exist now → name/size/mtime sorts can apply
+                // immediately; date/area sorts refine as enrichment fills in.
+                self.apply_sort();
                 if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
-                    indexer.start_enrichment();
+                    indexer.start_enrichment(glib::clone!(
+                        #[weak(rename_to = window)]
+                        self,
+                        move || window.apply_sort()
+                    ));
                 }
             }
         }
@@ -622,6 +767,8 @@ impl VitrineWindow {
 
     /// Enumerate `folder`'s image children asynchronously and populate the grid.
     fn load_folder(&self, folder: gio::File) {
+        // Remember the folder so metadata sorts can scope to it.
+        *self.imp().current_folder.borrow_mut() = folder.path();
         // Kick off background indexing in parallel — the grid never waits on it.
         self.index_folder(&folder);
         glib::spawn_future_local(glib::clone!(
@@ -642,6 +789,10 @@ impl VitrineWindow {
         imp.store.extend_from_slice(&items);
         imp.content_stack
             .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
+        // Apply the active sort (a no-op reshuffle for Name; metadata sorts
+        // reorder once the index has this folder — and refresh via apply_sort
+        // on scan/enrichment completion).
+        self.apply_sort();
         // Dev aid: VITRINE_OPEN=<index> auto-opens the viewer (for screenshots).
         if let Some(idx) = std::env::var("VITRINE_OPEN")
             .ok()
@@ -654,6 +805,36 @@ impl VitrineWindow {
         self.maybe_screenshot();
         self.maybe_scrolltest();
         self.maybe_loadtest();
+        self.maybe_sorttest();
+    }
+
+    /// Dev aid: if `VITRINE_SORT=<preset>` is set, apply that sort after a beat
+    /// (letting the background index settle), print the resulting top order, and
+    /// quit — for verifying metadata sorting end-to-end.
+    fn maybe_sorttest(&self) {
+        let Some(preset) = std::env::var_os("VITRINE_SORT") else {
+            return;
+        };
+        let preset = preset.to_string_lossy().into_owned();
+        glib::timeout_add_seconds_local_once(
+            2,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move || {
+                    window.set_sort(&preset);
+                    let imp = window.imp();
+                    let top: Vec<String> = (0..imp.store.n_items().min(6))
+                        .filter_map(|i| imp.store.item(i).and_downcast::<ImageObject>())
+                        .map(|o| o.display_name().to_string())
+                        .collect();
+                    eprintln!("VITRINE_SORT[{preset}] top: {}", top.join(", "));
+                    if let Some(app) = window.application() {
+                        app.quit();
+                    }
+                }
+            ),
+        );
     }
 
     /// Dev aid: if `VITRINE_CYCLE=/a:/b:/c` is set, open each folder in turn every
@@ -799,6 +980,11 @@ impl VitrineWindow {
         let node = snapshot.to_node()?;
         Some(renderer.render_texture(node, None))
     }
+}
+
+/// The local filesystem path of an image item, as stored in the index.
+fn item_path(item: &ImageObject) -> Option<String> {
+    item.file().path().map(|p| p.to_string_lossy().into_owned())
 }
 
 /// Async-enumerate `folder`, returning its browsable images sorted by name.
