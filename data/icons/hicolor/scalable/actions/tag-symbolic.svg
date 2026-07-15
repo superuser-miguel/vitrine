@@ -1,8 +1,17 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- Vitrine tag icon: an original tilted price-tag (rounded label + string hole),
-     recolored by GTK as a symbolic icon. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <g transform="rotate(-45 8 8)">
-    <path fill="#2e3436" fill-rule="evenodd" d="M2.4 8 L6.2 4.4 Q6.6 4.1 7.2 4.1 L12.2 4.1 Q13.4 4.1 13.4 5.3 L13.4 10.7 Q13.4 11.9 12.2 11.9 L7.2 11.9 Q6.6 11.9 6.2 11.6 Z M7.15 8 A1.2 1.2 0 1 0 4.75 8 A1.2 1.2 0 1 0 7.15 8 Z"/>
-  </g>
+<!-- Vitrine tag icon (user-designed in Inkscape). Kept as the author's exact
+     geometry, adapted to a symbolic icon: the tag body is a single recolorable
+     fill and the string hole is a real transparent cutout (via a mask), so GTK
+     recolors it to the theme foreground. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 4.3401337 3.7507725">
+  <defs>
+    <mask id="tag-hole" maskUnits="userSpaceOnUse">
+      <g transform="translate(-111.91811,-146.41434)">
+        <rect fill="#ffffff" width="2.6214786" height="3.4495029" x="-65.788002" y="174.02133" ry="0.40673974" transform="rotate(-57.760331)"/>
+        <path fill="#ffffff" d="m 113.59609,146.41433 -1.67798,0.32667 0.34981,1.73003 z"/>
+        <path fill="#000000" d="m 113.3103,147.47981 a 0.31939813,0.30723062 0 0 1 -0.31753,0.30723 0.31939813,0.30723062 0 0 1 -0.32125,-0.30362 0.31939813,0.30723062 0 0 1 0.31376,-0.31079 0.31939813,0.30723062 0 0 1 0.32493,0.29997 z"/>
+      </g>
+    </mask>
+  </defs>
+  <rect x="0" y="0" width="4.3401337" height="3.7507725" fill="#2e3436" mask="url(#tag-hole)"/>
 </svg>
