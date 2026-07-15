@@ -10,7 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use adw::prelude::ActionRowExt;
+use adw::prelude::{ActionRowExt, EntryRowExt};
 use adw::subclass::prelude::*;
 use gtk::gdk;
 use gtk::prelude::*;
@@ -20,6 +20,10 @@ use vitrine_engine::{Db, FileRecord, SizedLru};
 
 use crate::grid_cell::THUMB_SIZE;
 use crate::image_object::ImageObject;
+use crate::index::Annotator;
+
+/// Star-rating range.
+const MAX_STARS: i64 = 5;
 
 /// Cap the longest edge of a decoded viewer texture. Bounds per-image memory
 /// (≤ ~4096²·4 ≈ 64 MB) so the LRU holds a useful working set.
@@ -56,6 +60,10 @@ mod imp {
         #[template_child]
         pub info_split: TemplateChild<adw::OverlaySplitView>,
         #[template_child]
+        pub rating_box: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub comment_row: TemplateChild<adw::EntryRow>,
+        #[template_child]
         pub meta_name_row: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub meta_folder_row: TemplateChild<adw::ActionRow>,
@@ -75,6 +83,16 @@ mod imp {
         /// Read-only index connection, opened lazily to look up metadata for the
         /// shown image (the writer lives on the indexer thread).
         pub read_db: RefCell<Option<Db>>,
+        /// Routes annotation writes (rating/comment) to the writer thread.
+        pub annotator: RefCell<Option<Annotator>>,
+        /// The shown image's content hash (annotation key), if it's indexed.
+        pub current_hash: RefCell<Option<String>>,
+        /// The five rating star buttons, built in `setup_review`.
+        pub stars: RefCell<Vec<gtk::Button>>,
+        /// The rating currently shown (0–5).
+        pub rating: Cell<i64>,
+        /// Guards programmatic comment-row updates from re-triggering a write.
+        pub setting_comment: Cell<bool>,
 
         /// Shared, ordered image model (the same sorted model the grid shows).
         pub store: RefCell<Option<gio::ListModel>>,
@@ -104,6 +122,8 @@ mod imp {
                 zoom_out_button: Default::default(),
                 zoom_fit_button: Default::default(),
                 info_split: Default::default(),
+                rating_box: Default::default(),
+                comment_row: Default::default(),
                 meta_name_row: Default::default(),
                 meta_folder_row: Default::default(),
                 meta_dimensions_row: Default::default(),
@@ -113,6 +133,11 @@ mod imp {
                 meta_camera_row: Default::default(),
                 meta_orientation_row: Default::default(),
                 read_db: RefCell::new(None),
+                annotator: RefCell::new(None),
+                current_hash: RefCell::new(None),
+                stars: RefCell::new(Vec::new()),
+                rating: Cell::new(0),
+                setting_comment: Cell::new(false),
                 store: RefCell::new(None),
                 filmstrip: RefCell::new(None),
                 filmstrip_view: RefCell::new(None),
@@ -146,6 +171,7 @@ mod imp {
             let obj = self.obj();
             obj.setup_filmstrip();
             obj.setup_controls();
+            obj.setup_review();
         }
     }
 
@@ -189,6 +215,11 @@ impl VitrineViewer {
         if std::env::var_os("VITRINE_INFO").is_some() {
             imp.info_split.set_show_sidebar(true);
         }
+    }
+
+    /// Provide the annotation-write handle (rating/comment go through it).
+    pub fn set_annotator(&self, annotator: Annotator) {
+        *self.imp().annotator.borrow_mut() = Some(annotator);
     }
 
     // --- setup ---------------------------------------------------------------
@@ -426,7 +457,9 @@ impl VitrineViewer {
         let imp = self.imp();
 
         imp.title.set_title(&item.display_name());
-        self.update_metadata(&item);
+        let record = self.lookup_record(&item);
+        self.update_metadata(&item, record.as_ref());
+        self.update_review(record.as_ref());
 
         // Keep the filmstrip selection + scroll in step without re-entering.
         imp.syncing.set(true);
@@ -517,7 +550,7 @@ impl VitrineViewer {
     /// Fill the properties sidebar for `item` from the index. Fields the index
     /// hasn't backfilled yet (enrichment still pending, or an un-indexed folder)
     /// show an em dash and fill in once the image is revisited.
-    fn update_metadata(&self, item: &ImageObject) {
+    fn update_metadata(&self, item: &ImageObject, record: Option<&FileRecord>) {
         let imp = self.imp();
         const DASH: &str = "—";
 
@@ -530,7 +563,6 @@ impl VitrineViewer {
             .unwrap_or_else(|| DASH.to_string());
         imp.meta_folder_row.set_subtitle(&folder);
 
-        let record = self.lookup_record(item);
         let text = |value: Option<String>| value.unwrap_or_else(|| DASH.to_string());
 
         let dimensions = record
@@ -561,21 +593,139 @@ impl VitrineViewer {
     /// Look up the index row for `item`, opening the read connection on first use.
     fn lookup_record(&self, item: &ImageObject) -> Option<FileRecord> {
         let path = item.file().path()?;
-        let imp = self.imp();
-        if imp.read_db.borrow().is_none() {
-            match Db::open(crate::index::index_db_path()) {
-                Ok(db) => *imp.read_db.borrow_mut() = Some(db),
-                Err(e) => {
-                    glib::g_warning!("vitrine", "viewer read db: {e}");
-                    return None;
-                }
-            }
-        }
-        let db = imp.read_db.borrow();
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
         db.as_ref()?
             .file_by_path(&path.to_string_lossy())
             .ok()
             .flatten()
+    }
+
+    /// Open the read-only index connection if not already open.
+    fn ensure_read_db(&self) {
+        let imp = self.imp();
+        if imp.read_db.borrow().is_none() {
+            match Db::open(crate::index::index_db_path()) {
+                Ok(db) => *imp.read_db.borrow_mut() = Some(db),
+                Err(e) => glib::g_warning!("vitrine", "viewer read db: {e}"),
+            }
+        }
+    }
+
+    // --- review (rating + comment) -------------------------------------------
+
+    /// Build the five star buttons and wire the comment row (once, at construct).
+    fn setup_review(&self) {
+        let imp = self.imp();
+        let mut stars = Vec::with_capacity(MAX_STARS as usize);
+        for star in 1..=MAX_STARS {
+            let button = gtk::Button::builder()
+                .icon_name("non-starred-symbolic")
+                .css_classes(["flat"])
+                .valign(gtk::Align::Center)
+                .build();
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = viewer)]
+                self,
+                move |_| viewer.on_star_clicked(star)
+            ));
+            imp.rating_box.append(&button);
+            stars.push(button);
+        }
+        *imp.stars.borrow_mut() = stars;
+
+        // Save the comment on Enter / apply-button (not per keystroke).
+        imp.comment_row.connect_apply(glib::clone!(
+            #[weak(rename_to = viewer)]
+            self,
+            move |row| {
+                let imp = viewer.imp();
+                if imp.setting_comment.get() {
+                    return;
+                }
+                if let (Some(hash), Some(ann)) = (
+                    imp.current_hash.borrow().clone(),
+                    imp.annotator.borrow().clone(),
+                ) {
+                    ann.set_comment(&hash, row.text().as_str());
+                }
+            }
+        ));
+    }
+
+    /// Load the review controls for the shown image from the index.
+    fn update_review(&self, record: Option<&FileRecord>) {
+        let imp = self.imp();
+        let hash = record
+            .map(|r| r.content_hash.clone())
+            .filter(|h| !h.is_empty());
+
+        let (rating, comment) = match &hash {
+            Some(h) => (
+                self.read_rating(h).unwrap_or(0),
+                self.read_comment(h).unwrap_or_default(),
+            ),
+            None => (0, String::new()),
+        };
+        *imp.current_hash.borrow_mut() = hash.clone();
+
+        self.render_stars(rating);
+        imp.setting_comment.set(true);
+        imp.comment_row.set_text(&comment);
+        imp.setting_comment.set(false);
+
+        // No content hash (file not indexed yet) → nothing to key annotations to.
+        let enabled = hash.is_some();
+        imp.rating_box.set_sensitive(enabled);
+        imp.comment_row.set_sensitive(enabled);
+    }
+
+    fn on_star_clicked(&self, star: i64) {
+        // Clicking the current top star toggles the rating off.
+        let new = if self.imp().rating.get() == star {
+            0
+        } else {
+            star
+        };
+        self.apply_rating(new);
+    }
+
+    /// Set the rating (0 clears), update the stars, and persist via the annotator.
+    fn apply_rating(&self, rating: i64) {
+        let imp = self.imp();
+        let Some(hash) = imp.current_hash.borrow().clone() else {
+            return;
+        };
+        self.render_stars(rating);
+        if let Some(ann) = imp.annotator.borrow().as_ref() {
+            ann.set_rating(&hash, if rating == 0 { None } else { Some(rating) });
+        }
+    }
+
+    /// Fill the first `rating` stars, outline the rest; record the value.
+    fn render_stars(&self, rating: i64) {
+        let rating = rating.clamp(0, MAX_STARS);
+        self.imp().rating.set(rating);
+        for (i, button) in self.imp().stars.borrow().iter().enumerate() {
+            let name = if (i as i64) < rating {
+                "starred-symbolic"
+            } else {
+                "non-starred-symbolic"
+            };
+            button.set_icon_name(name);
+        }
+    }
+
+    fn read_rating(&self, hash: &str) -> Option<i64> {
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
+        db.as_ref()?.rating(hash).ok().flatten()
+    }
+
+    fn read_comment(&self, hash: &str) -> Option<String> {
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
+        db.as_ref()?.comment(hash).ok().flatten()
     }
 
     // --- zoom ----------------------------------------------------------------

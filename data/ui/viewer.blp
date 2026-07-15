@@ -60,6 +60,25 @@ template $VitrineViewer: Adw.NavigationPage {
         width-request: 280;
 
         Adw.PreferencesGroup {
+          title: _("Review");
+
+          Adw.ActionRow {
+            title: _("Rating");
+
+            [suffix]
+            Gtk.Box rating_box {
+              valign: center;
+              spacing: 2;
+            }
+          }
+
+          Adw.EntryRow comment_row {
+            title: _("Comment");
+            show-apply-button: true;
+          }
+        }
+
+        Adw.PreferencesGroup {
           title: _("Properties");
 
           Adw.ActionRow meta_name_row {

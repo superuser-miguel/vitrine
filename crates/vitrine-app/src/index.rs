@@ -62,6 +62,57 @@ enum Request {
     TakeBatch {
         reply: async_channel::Sender<Vec<String>>,
     },
+    /// Set (or, with `None`, clear) a rating — a user annotation write.
+    SetRating {
+        hash: String,
+        rating: Option<i64>,
+    },
+    /// Set (or, with empty body, clear) a comment.
+    SetComment {
+        hash: String,
+        body: String,
+    },
+    /// Apply/remove a tag across a selection of hashes.
+    Tag {
+        name: String,
+        hashes: Vec<String>,
+        add: bool,
+    },
+}
+
+/// A cheap, cloneable handle for routing **annotation writes** to the single
+/// writer thread. The UI holds one and fires writes non-blocking; reads happen
+/// on the UI's own read connection (WAL sees the write once committed).
+#[derive(Clone)]
+pub struct Annotator {
+    requests: async_channel::Sender<Request>,
+}
+
+impl Annotator {
+    /// Set a 0–5 rating, or clear it with `None`.
+    pub fn set_rating(&self, hash: &str, rating: Option<i64>) {
+        let _ = self.requests.try_send(Request::SetRating {
+            hash: hash.to_string(),
+            rating,
+        });
+    }
+
+    /// Set a comment (empty string clears it).
+    pub fn set_comment(&self, hash: &str, body: &str) {
+        let _ = self.requests.try_send(Request::SetComment {
+            hash: hash.to_string(),
+            body: body.to_string(),
+        });
+    }
+
+    /// Apply (`add = true`) or remove a tag across `hashes`.
+    pub fn tag(&self, name: &str, hashes: &[String], add: bool) {
+        let _ = self.requests.try_send(Request::Tag {
+            name: name.to_string(),
+            hashes: hashes.to_vec(),
+            add,
+        });
+    }
 }
 
 /// Handle to the background indexer: enqueue folders, receive progress, drive
@@ -95,6 +146,13 @@ impl Indexer {
     /// Enqueue a folder to index (non-blocking; ignored if the worker is gone).
     pub fn request(&self, folder: PathBuf) {
         let _ = self.requests.try_send(Request::Scan(folder));
+    }
+
+    /// A handle for routing annotation writes to the writer thread.
+    pub fn annotator(&self) -> Annotator {
+        Annotator {
+            requests: self.requests.clone(),
+        }
     }
 
     /// Start (or, if already running, leave running) the enrichment driver: it
@@ -151,6 +209,30 @@ fn worker(
                     .paths_needing_enrichment(ENRICH_BATCH)
                     .unwrap_or_default();
                 let _ = reply.try_send(batch);
+            }
+            Request::SetRating { hash, rating } => {
+                let r = match rating {
+                    Some(r) => db.set_rating(&hash, r),
+                    None => db.clear_rating(&hash),
+                };
+                if let Err(e) = r {
+                    glib::g_warning!("vitrine", "set rating {hash}: {e}");
+                }
+            }
+            Request::SetComment { hash, body } => {
+                if let Err(e) = db.set_comment(&hash, &body) {
+                    glib::g_warning!("vitrine", "set comment {hash}: {e}");
+                }
+            }
+            Request::Tag { name, hashes, add } => {
+                let r = if add {
+                    db.apply_tag(&name, &hashes)
+                } else {
+                    db.remove_tag(&name, &hashes)
+                };
+                if let Err(e) = r {
+                    glib::g_warning!("vitrine", "tag {name}: {e}");
+                }
             }
         }
     }

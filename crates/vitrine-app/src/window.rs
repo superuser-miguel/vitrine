@@ -587,6 +587,9 @@ impl VitrineWindow {
             .borrow_mut()
             .get_or_insert_with(VitrineViewer::new)
             .clone();
+        if let Some(indexer) = imp.indexer.borrow().as_ref() {
+            viewer.set_annotator(indexer.annotator());
+        }
         let Some(model) = self.model() else { return };
         viewer.open(model.upcast(), position, imp.thumb_cache.clone());
         if imp.nav_view.find_page("viewer").is_none() {
