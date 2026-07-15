@@ -3,6 +3,13 @@ using Adw 1;
 
 menu primary_menu {
   section {
+    item {
+      label: _("_Preferences");
+      action: "win.preferences";
+    }
+  }
+
+  section {
     // Keyboard-shortcuts overlay is added with the real shortcut model (Phase 4).
     item {
       label: _("_About Vitrine");

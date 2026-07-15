@@ -150,6 +150,7 @@ mod imp {
             self.obj().setup_actions();
             self.obj().setup_indexer();
             self.obj().maybe_cycle();
+            self.obj().maybe_prefs();
         }
     }
 
@@ -552,6 +553,21 @@ impl VitrineWindow {
             }
         ));
         self.add_action(&sort);
+
+        let preferences = gio::SimpleAction::new("preferences", None);
+        preferences.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| crate::preferences::present(&window)
+        ));
+        self.add_action(&preferences);
+    }
+
+    /// Enqueue a library root for background indexing (used by Preferences).
+    pub fn index_root(&self, path: PathBuf) {
+        if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
+            indexer.request(path);
+        }
     }
 
     /// Map a menu preset to a (key, direction) and re-sort the grid.
@@ -670,6 +686,11 @@ impl VitrineWindow {
             self,
             move || window.apply_sort()
         ));
+        // Index the persistent library roots in the background at launch, so the
+        // index covers them even before (or without) browsing.
+        for root in crate::settings::Settings::load().roots() {
+            indexer.request(root);
+        }
         *self.imp().indexer.borrow_mut() = Some(indexer);
 
         glib::spawn_future_local(glib::clone!(
@@ -806,6 +827,22 @@ impl VitrineWindow {
         self.maybe_scrolltest();
         self.maybe_loadtest();
         self.maybe_sorttest();
+    }
+
+    /// Dev aid: if `VITRINE_PREFS` is set, open Preferences after a beat (for
+    /// screenshots of the settings dialog).
+    fn maybe_prefs(&self) {
+        if std::env::var_os("VITRINE_PREFS").is_none() {
+            return;
+        }
+        glib::timeout_add_seconds_local_once(
+            1,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move || crate::preferences::present(&window)
+            ),
+        );
     }
 
     /// Dev aid: if `VITRINE_SORT=<preset>` is set, apply that sort after a beat

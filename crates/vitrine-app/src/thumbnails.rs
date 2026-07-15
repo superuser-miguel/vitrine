@@ -36,10 +36,6 @@ use vitrine_engine::SizedLru;
 /// their textures, so browsing a 27k-image folder can't accumulate GBs (→ OOM).
 const RAM_CACHE_BYTES: u64 = 384 * 1024 * 1024;
 
-/// Byte budget for the app-private disk cache (the higher-res buckets GNOME
-/// doesn't generate). Pruned to this on startup, evicting least-recently-used.
-const PRIVATE_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-
 /// On a cache hit, only bump the file's mtime (to record access) if it is older
 /// than this many seconds — so scrolling doesn't cause a write per read.
 const ACCESS_TOUCH_AFTER: i64 = 6 * 3600;
@@ -214,15 +210,17 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Prune the app-private disk cache to [`PRIVATE_CACHE_BYTES`], evicting the
-/// least-recently-used files. Runs off the main thread; best-effort.
+/// Prune the app-private disk cache to the configured budget (see
+/// [`crate::settings`]), evicting the least-recently-used files. Runs off the
+/// main thread; best-effort.
 pub fn prune_private_cache() {
-    // Cap override (MB) — a hook for future user-facing cache controls.
+    // Budget in MB: VITRINE_CACHE_CAP_MB (dev override) wins, else the user's
+    // configured cache size from Preferences.
     let cap = std::env::var("VITRINE_CACHE_CAP_MB")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
-        .map(|mb| mb * 1024 * 1024)
-        .unwrap_or(PRIVATE_CACHE_BYTES);
+        .unwrap_or_else(|| crate::settings::Settings::load().cache_mb())
+        .saturating_mul(1024 * 1024);
     std::thread::spawn(move || {
         let root = private_dir();
         let mut files: Vec<PathBuf> = Vec::new();
