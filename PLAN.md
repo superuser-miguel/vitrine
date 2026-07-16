@@ -1044,6 +1044,59 @@ perf runs build it fresh.
 Run all of §13.1's cases against **each arrangement**, not just a uniform folder —
 uniform fixtures would hide the very bug the user is hitting.
 
+**Real reference corpus (user's gallery-dl folders, measured 2026-07-16).** Six
+Instagram folders, ~44k images / ~20 GB. Per folder: **7k–14k images**, byte size
+**p50 ≈ 200–340 KB, p90 ≈ 0.8–1.3 MB, p99 ≈ 1.4–3.4 MB, max ≈ 3–8.7 MB** — a
+~40× spread *within a single folder*. They also hold many **non-image files**
+(JSON sidecars, videos: one folder is 7,699 files but 1,807 images), i.e. the
+enumerate/scan walks far more entries than it displays. The synthetic corpus
+should match this shape: thousands of files, ~40× size spread, JPEG-dominant with
+some AVIF/JXL, and a chunk of non-image siblings.
+
+### 13.5 CONFIRMED root cause — background enrichment starves the foreground (2026-07-16)
+
+Diagnosed from code + the corpus above when the user reported "UI slow again,
+images not loading" after adding the folders. **This is the primary "why Nautilus
+beats us."**
+
+- **Two decode gates, one real resource.** Interactive thumbnail loads use
+  `thumbnails::load_gate` (~24); background enrichment uses `decode::decode_gate`
+  (`min(cores, 8)`, floor 4). They're separate semaphores but both spawn glycin
+  subprocess decodes that contend for the **same CPU cores / glycin pool**, which
+  the decode-gate note itself says **plateaus at ~8 concurrent**.
+- **Enrichment runs flat-out and never yields.** `run_enrichment` decodes whole
+  `TakeBatch` batches (64) concurrently, gated only by `decode_gate`, in a tight
+  loop until `paths_needing_enrichment` is empty. So a fresh backlog (here **~11k
+  un-enriched** of 105k) keeps ~8 full-image decodes running continuously,
+  **saturating decode throughput regardless of whether the user is actively
+  browsing**. The visible thumbnails then queue behind / lose CPU to enrichment →
+  slow, out-of-order fill. **Nautilus has no such decode-everything pass** — that
+  is precisely the gap.
+- **Mixed size compounds it** (§13.2 ⭐): the ~40× spread means big decodes hold
+  their slot far longer, so both the enrichment lane and the interactive lane
+  suffer head-of-line blocking.
+- The scanner is NOT at fault: `classify` skips unchanged files by `(size,mtime)`
+  (scanner.rs), so back-nav re-walks (stat only) but never re-hashes; its slowness
+  is the same decode contention hitting thumbnail reloads.
+
+**Fix (recommended, do next).** Make enrichment a true *background* task that
+**yields to the interactive foreground**: pause/throttle enrichment while thumbnail
+loads are pending or a scroll is in flight (a shared "UI busy" signal checked
+between batches/items), resuming after a short quiet period; and/or fold both into
+one **priority-aware decode admission** where visible loads preempt enrichment
+(§13.1). Keep enrichment correctness (single-writer monotonic queue) intact —
+throttle *admission*, not the write ordering. Opportunistic win: when a full image
+is decoded for the viewer, capture its pHash then to avoid a separate enrichment
+decode. *Test:* on the real corpus, time-to-visible-complete while a large
+enrichment backlog is pending must approach the backlog-idle case.
+
+**DB scale (user asked "how large can the DB be?").** Not a concern. Current:
+105,207 files → 51 MB (~500 B/row incl. indexes on path/hash/phash/date). SQLite's
+practical ceiling is terabytes; millions of rows stay fast on the B-tree indexes
+(~500 MB at 1M images). The real cost of a big library is the **one-time
+enrichment decode pass** (above) and the bounded RAM/disk caches — never the DB
+size. Index freely.
+
 References (for whoever builds this): Chrome fetchpriority / LCP request
 discovery (web.dev/articles/fetch-priority, developer.chrome.com/docs/performance/insights/lcp-discovery),
 react-window overscan (web.dev/articles/virtualize-long-lists-react-window),
