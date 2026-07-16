@@ -61,7 +61,7 @@ impl Drop for InteractiveGuard {
 /// gate in the gaps between scroll settles). This is what makes background
 /// enrichment a good citizen — it runs full-tilt when you're not browsing and
 /// steps aside the moment you are.
-async fn yield_to_foreground() {
+pub async fn yield_to_foreground() {
     /// Quiet window required before enrichment resumes grabbing the gate.
     const GRACE_MS: u64 = 150;
     loop {
@@ -146,13 +146,10 @@ pub struct Probe {
 }
 
 /// Decode `file` once for indexing: read its metadata and a `phash_px`-scaled
-/// frame (perceptual hashing only needs a small image). Yields the decode gate
-/// to interactive thumbnail/viewer decodes ([`yield_to_foreground`]) so the
-/// background enrichment pass never queues the UI behind it.
+/// frame (perceptual hashing only needs a small image). The enrichment driver
+/// calls [`yield_to_foreground`] once per batch so the background pass never
+/// queues the UI behind it.
 pub async fn probe(file: &gio::File, phash_px: u32) -> Option<Probe> {
-    // Background enrichment yields to any interactive decode: wait until the
-    // foreground is idle before competing for a decode-gate permit.
-    yield_to_foreground().await;
     let _permit = decode_gate().acquire().await;
     let image = Loader::new(file.clone()).load().await.ok()?;
     let details = image.details();
