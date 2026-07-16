@@ -5,6 +5,7 @@
 //! `AdwApplicationWindow` with a headerbar and About dialog. The browser grid,
 //! viewer, filmstrip, index and dedup layers land in later phases (see PLAN.md).
 
+mod debug;
 mod decode;
 mod grid_cell;
 mod image_object;

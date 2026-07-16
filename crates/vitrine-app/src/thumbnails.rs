@@ -110,14 +110,20 @@ pub async fn load(
 
     // Shared cache is GNOME's — read but never re-touch it.
     if let Some(texture) = read_cache(shared_dir(), &uri, bucket, source_mtime, false).await {
+        crate::debug::cache_hit();
         return Some(texture);
     }
     // Private cache is ours — mark access so eviction is LRU, not FIFO.
     if let Some(texture) = read_cache(private_dir(), &uri, bucket, source_mtime, true).await {
+        crate::debug::cache_hit();
         return Some(texture);
     }
 
-    let texture = match crate::decode::thumbnail(&file, bucket.pixels()).await {
+    crate::debug::cache_miss();
+    crate::debug::decode_begin();
+    let decoded = crate::decode::thumbnail(&file, bucket.pixels()).await;
+    crate::debug::decode_end();
+    let texture = match decoded {
         Ok(texture) => texture,
         Err(err) => {
             glib::g_warning!("vitrine", "thumbnail {uri}: {err}");

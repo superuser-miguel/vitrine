@@ -319,6 +319,7 @@ mod imp {
             self.obj().setup_collections();
             self.obj().setup_filtering();
             self.obj().setup_navigation();
+            self.obj().setup_debug_hud();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -525,6 +526,117 @@ impl VitrineWindow {
     /// activate, selection) index *this*, not the raw store.
     fn model(&self) -> Option<gtk::SortListModel> {
         self.imp().sort_model.borrow().clone()
+    }
+
+    /// VITRINE_DEBUG: a MangoHUD-style readout of the thumbnail pipeline. Samples
+    /// render frame time, worst main-loop stall, decode throughput, cache hit
+    /// rate, pending-queue depth, and RSS, and logs a `VDBG` line to stderr each
+    /// second (forward with `2>> file`). Pure observation — no behaviour change.
+    fn setup_debug_hud(&self) {
+        if !crate::debug::enabled() {
+            return;
+        }
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::{Duration, Instant};
+
+        // Rolling render frame-time (from the widget's frame clock).
+        let last_frame = Rc::new(Cell::new(0i64)); // frame_clock time, microseconds
+        let frame_max = Rc::new(Cell::new(0i64));
+        let frame_count = Rc::new(Cell::new(0u32));
+        self.add_tick_callback(glib::clone!(
+            #[strong]
+            last_frame,
+            #[strong]
+            frame_max,
+            #[strong]
+            frame_count,
+            move |_, clock| {
+                let now = clock.frame_time();
+                let prev = last_frame.replace(now);
+                if prev != 0 {
+                    let dt = now - prev;
+                    if dt > frame_max.get() {
+                        frame_max.set(dt);
+                    }
+                    frame_count.set(frame_count.get() + 1);
+                }
+                glib::ControlFlow::Continue
+            }
+        ));
+
+        // Worst main-loop stall: a 16ms heartbeat measuring its own lateness.
+        let stall_max = Rc::new(Cell::new(0u128));
+        let last_beat = Rc::new(Cell::new(Instant::now()));
+        glib::timeout_add_local(
+            Duration::from_millis(16),
+            glib::clone!(
+                #[strong]
+                stall_max,
+                #[strong]
+                last_beat,
+                move || {
+                    let interval = last_beat.replace(Instant::now()).elapsed().as_millis();
+                    let late = interval.saturating_sub(16);
+                    if late > stall_max.get() {
+                        stall_max.set(late);
+                    }
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
+
+        // Per-second stats line to stderr (+ reset the rolling maxes).
+        let last_done = Rc::new(Cell::new(0u64));
+        let last_log = Rc::new(Cell::new(Instant::now()));
+        glib::timeout_add_seconds_local(
+            1,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[strong]
+                frame_max,
+                #[strong]
+                frame_count,
+                #[strong]
+                stall_max,
+                #[strong]
+                last_done,
+                #[strong]
+                last_log,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    let c = crate::debug::snapshot();
+                    let secs = last_log
+                        .replace(Instant::now())
+                        .elapsed()
+                        .as_secs_f64()
+                        .max(0.001);
+                    let fps = (frame_count.replace(0) as f64 / secs).round() as u32;
+                    let fmax_ms = (frame_max.replace(0) as f64 / 1000.0).round() as i64;
+                    let stall = stall_max.replace(0);
+                    let done_delta = c.done.saturating_sub(last_done.replace(c.done));
+                    let rate = (done_delta as f64 / secs).round() as u64;
+                    let cache_total = c.hits + c.misses;
+                    let hit = if cache_total > 0 {
+                        c.hits * 100 / cache_total
+                    } else {
+                        0
+                    };
+                    let queued = window.imp().pending.borrow().len();
+                    eprintln!(
+                        "VDBG fps={fps} frame_max={fmax_ms}ms stall={stall}ms \
+                         decode[live={} done={} +{rate}/s] queued={queued} \
+                         cache_hit={hit}% rss={}MB",
+                        c.inflight,
+                        c.done,
+                        crate::debug::rss_mb()
+                    );
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
     }
 
     /// Prefetch the items just outside `[lo, hi]` into the RAM cache.
