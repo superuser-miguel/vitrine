@@ -378,6 +378,9 @@ impl VitrineWindow {
             true
         });
         let filter_model = gtk::FilterListModel::new(Some(imp.store.clone()), Some(filter.clone()));
+        // Incremental: spread filtering/sorting of a big folder across frames
+        // instead of blocking one main-loop iteration (the folder-open freeze).
+        filter_model.set_incremental(true);
 
         let state = imp.sort_state.clone();
         let sorter = gtk::CustomSorter::new(move |a, b| {
@@ -386,6 +389,7 @@ impl VitrineWindow {
             compare_images(a, b, state.get())
         });
         let sort_model = gtk::SortListModel::new(Some(filter_model), Some(sorter.clone()));
+        sort_model.set_incremental(true);
         *imp.filter.borrow_mut() = Some(filter);
 
         let selection = gtk::MultiSelection::new(Some(sort_model.clone()));
@@ -2124,20 +2128,60 @@ impl VitrineWindow {
     /// overlays and rating writes need no per-cell database hit. Best-effort:
     /// items the index hasn't caught up on stay unstamped until the re-stamp on
     /// scan completion.
-    fn stamp_annotations(&self, items: &[ImageObject]) {
+    /// Stamp content-hash + rating onto the store's items, off the main thread:
+    /// the `ratings_under` query runs on a worker; the results apply on main. This
+    /// keeps a folder-open (or re-stamp) from blocking the UI on the DB — stars
+    /// appear a beat later, reactively via `notify::rating`.
+    fn stamp_annotations_async(&self) {
         let Some(folder) = self.imp().current_folder.borrow().clone() else {
             return;
         };
-        self.ensure_read_db();
-        let db = self.imp().read_db.borrow();
-        let Some(db) = db.as_ref() else { return };
-        let map: std::collections::HashMap<String, (String, i64)> = db
-            .ratings_under(&folder.to_string_lossy())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(path, hash, rating)| (path, (hash, rating)))
-            .collect();
-        for item in items {
+        let folder_key = folder.to_string_lossy().into_owned();
+        let db_path = crate::index::index_db_path();
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let query_key = folder_key.clone();
+                let map = gio::spawn_blocking(move || {
+                    let db = Db::open(db_path).ok()?;
+                    let rows = db.ratings_under(&query_key).ok()?;
+                    Some(
+                        rows.into_iter()
+                            .map(|(path, hash, rating)| (path, (hash, rating)))
+                            .collect::<std::collections::HashMap<String, (String, i64)>>(),
+                    )
+                })
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+
+                // The user may have navigated away while the query ran.
+                let still_here = window
+                    .imp()
+                    .current_folder
+                    .borrow()
+                    .as_ref()
+                    .map(|f| f.to_string_lossy().into_owned())
+                    == Some(folder_key);
+                if still_here {
+                    window.apply_stamp_map(&map);
+                }
+            }
+        ));
+    }
+
+    /// Apply a `path → (hash, rating)` map to the items currently in the store.
+    fn apply_stamp_map(&self, map: &std::collections::HashMap<String, (String, i64)>) {
+        if map.is_empty() {
+            return;
+        }
+        let store = &self.imp().store;
+        for i in 0..store.n_items() {
+            let Some(item) = store.item(i).and_downcast::<ImageObject>() else {
+                continue;
+            };
             if let Some(path) = item.file().path() {
                 if let Some((hash, rating)) = map.get(&path.to_string_lossy().into_owned()) {
                     item.set_content_hash(hash);
@@ -2145,15 +2189,12 @@ impl VitrineWindow {
                 }
             }
         }
+        self.refilter(); // freshly-stamped ratings may change a rating filter
     }
 
-    /// Re-stamp the items currently in the store (after indexing catches up).
+    /// Re-stamp after indexing catches up (off the main thread).
     fn restamp_store(&self) {
-        let items: Vec<ImageObject> = (0..self.imp().store.n_items())
-            .filter_map(|i| self.imp().store.item(i).and_downcast::<ImageObject>())
-            .collect();
-        self.stamp_annotations(&items);
-        self.refilter(); // freshly-stamped ratings may change a rating filter
+        self.stamp_annotations_async();
     }
 
     fn ensure_read_db(&self) {
@@ -2543,11 +2584,12 @@ impl VitrineWindow {
 
     fn populate(&self, items: Vec<ImageObject>) {
         let imp = self.imp();
-        // Stamp hash + rating before the items are shown, so cells paint their
-        // star overlay on first bind (a re-stamp follows once indexing catches up).
-        self.stamp_annotations(&items);
         imp.store.remove_all();
         imp.store.extend_from_slice(&items);
+        // Stamp ratings off the main thread (stamp_annotations_async) so opening a
+        // large folder never blocks on the DB query; stars appear a beat later,
+        // reactively via notify::rating.
+        self.stamp_annotations_async();
         imp.content_stack
             .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
         // The grid's SortListModel orders items live per the active sort — no
