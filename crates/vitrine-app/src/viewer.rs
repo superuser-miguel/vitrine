@@ -410,6 +410,82 @@ impl VitrineViewer {
             }
         ));
         imp.picture_scroller.add_controller(scroll);
+
+        // Grab-hand pan: click-drag anywhere in the viewport to move a zoomed-in
+        // image. The gesture is on the SCROLLER, not the picture — the scroller's
+        // viewport stays fixed while the image scrolls inside it, so the drag
+        // offset has a stable reference frame. (Attaching it to the picture, which
+        // itself moves as you scroll, fed the motion back into the gesture and made
+        // the image jitter against the edges.) Offsets are captured at drag-begin.
+        let pan_start = std::rc::Rc::new(std::cell::Cell::new((0.0_f64, 0.0_f64)));
+        let drag = gtk::GestureDrag::new();
+        drag.set_button(gtk::gdk::BUTTON_PRIMARY);
+        drag.connect_drag_begin(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            #[strong]
+            pan_start,
+            move |_, _, _| {
+                if !v.is_pannable() {
+                    return;
+                }
+                let imp = v.imp();
+                pan_start.set((
+                    imp.picture_scroller.hadjustment().value(),
+                    imp.picture_scroller.vadjustment().value(),
+                ));
+                imp.picture.set_cursor_from_name(Some("grabbing"));
+            }
+        ));
+        drag.connect_drag_update(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            #[strong]
+            pan_start,
+            move |_, offset_x, offset_y| {
+                if !v.is_pannable() {
+                    return;
+                }
+                let imp = v.imp();
+                let (start_h, start_v) = pan_start.get();
+                // set_value clamps to [lower, upper - page_size].
+                imp.picture_scroller
+                    .hadjustment()
+                    .set_value(start_h - offset_x);
+                imp.picture_scroller
+                    .vadjustment()
+                    .set_value(start_v - offset_y);
+            }
+        ));
+        drag.connect_drag_end(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_, _, _| v.update_pan_cursor()
+        ));
+        imp.picture_scroller.add_controller(drag);
+    }
+
+    /// True when the zoomed image is larger than the viewport on either axis, so
+    /// there is something to pan.
+    fn is_pannable(&self) -> bool {
+        let imp = self.imp();
+        let Some(zoom) = imp.zoom.get() else {
+            return false; // fitting — nothing to pan
+        };
+        let (nw, nh) = imp.natural.get();
+        let vw = imp.picture_scroller.width();
+        let vh = imp.picture_scroller.height();
+        (nw as f64 * zoom).round() as i32 > vw || (nh as f64 * zoom).round() as i32 > vh
+    }
+
+    /// Grab cursor over the image when it can be panned; default arrow otherwise.
+    fn update_pan_cursor(&self) {
+        let name = if self.is_pannable() {
+            Some("grab")
+        } else {
+            None
+        };
+        self.imp().picture.set_cursor_from_name(name);
     }
 
     // --- navigation ----------------------------------------------------------
@@ -749,6 +825,7 @@ impl VitrineViewer {
         imp.picture.set_halign(gtk::Align::Fill);
         imp.picture.set_valign(gtk::Align::Fill);
         imp.picture.set_size_request(-1, -1);
+        self.update_pan_cursor();
     }
 
     fn zoom_by(&self, factor: f64) {
@@ -807,6 +884,7 @@ impl VitrineViewer {
             (nw as f64 * zoom).round() as i32,
             (nh as f64 * zoom).round() as i32,
         );
+        self.update_pan_cursor();
     }
 }
 
