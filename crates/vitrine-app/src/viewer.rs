@@ -217,6 +217,8 @@ impl VitrineViewer {
         thumb_cache: crate::thumbnails::ThumbCache,
     ) {
         let imp = self.imp();
+        // Drop any filmstrip loads still queued from a previously-shown folder.
+        imp.film_queue.borrow_mut().clear();
         *imp.store.borrow_mut() = Some(store.clone());
         *imp.thumb_cache.borrow_mut() = Some(thumb_cache);
         if let Some(filmstrip) = imp.filmstrip.borrow().as_ref() {

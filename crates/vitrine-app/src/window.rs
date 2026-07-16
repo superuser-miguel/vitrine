@@ -356,6 +356,7 @@ mod imp {
             self.obj().setup_navigation();
             self.obj().setup_debug_hud();
             self.obj().maybe_soak();
+            self.obj().maybe_openfolder_test();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -2766,6 +2767,20 @@ impl VitrineWindow {
 
     /// Enumerate `folder`'s image children asynchronously and populate the grid.
     fn load_folder(&self, folder: gio::File) {
+        // Opening a new folder while the single-image viewer is up returns to the
+        // grid — otherwise the viewer would keep showing the *old* folder's image
+        // and Properties (show_position never re-runs) with a half-swapped
+        // filmstrip. Re-entering the viewer then reopens it fresh on the new folder.
+        let nav = &self.imp().nav_view;
+        if nav
+            .visible_page()
+            .and_then(|p| p.tag())
+            .map(|t| t == "viewer")
+            .unwrap_or(false)
+        {
+            nav.pop_to_tag("browser");
+        }
+
         let new_path = folder.path();
         // Record the move (for Back) and remember the folder (for the rating
         // stamp scope).
@@ -3071,6 +3086,70 @@ impl VitrineWindow {
                     glib::timeout_future(Duration::from_millis(700)).await;
                 }
                 eprintln!("SOAK done");
+                if let Some(app) = win.application() {
+                    app.quit();
+                }
+            }
+        ));
+    }
+
+    /// VITRINE_OPENFOLDER=<dirA>:<dirB>: reproduce "open a folder while in the
+    /// viewer". Open A → viewer → Properties → open B *while the viewer is up* →
+    /// check we returned to the grid on B (not stranded stale) → re-enter the
+    /// viewer on B and scroll the filmstrip (loads should register). Logs OFTEST
+    /// markers (pair with VITRINE_DEBUG to watch decode activity).
+    fn maybe_openfolder_test(&self) {
+        let Some(spec) = std::env::var_os("VITRINE_OPENFOLDER") else {
+            return;
+        };
+        let dirs: Vec<PathBuf> = spec
+            .to_string_lossy()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if dirs.len() < 2 {
+            return;
+        }
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            async move {
+                use std::time::Duration;
+                glib::timeout_future(Duration::from_millis(1500)).await;
+                eprintln!("OFTEST open dir A: {}", dirs[0].display());
+                win.open_location(gio::File::for_path(&dirs[0]));
+                glib::timeout_future(Duration::from_secs(2)).await;
+                let na = win.model().map_or(0, |m| m.n_items());
+                eprintln!("OFTEST dir A items={na}");
+                eprintln!("OFTEST open viewer + properties");
+                win.open_viewer(0);
+                glib::timeout_future(Duration::from_millis(1000)).await;
+                if let Some(v) = win.imp().viewer.borrow().as_ref().cloned() {
+                    v.set_properties_shown(true);
+                }
+                glib::timeout_future(Duration::from_millis(1500)).await;
+                eprintln!(
+                    "OFTEST *** open dir B WHILE IN VIEWER: {}",
+                    dirs[1].display()
+                );
+                win.open_location(gio::File::for_path(&dirs[1]));
+                glib::timeout_future(Duration::from_secs(2)).await;
+                let page = win
+                    .imp()
+                    .nav_view
+                    .visible_page()
+                    .and_then(|p| p.tag())
+                    .map(|t| t.to_string())
+                    .unwrap_or_default();
+                let nb = win.model().map_or(0, |m| m.n_items());
+                eprintln!("OFTEST after open-B: visible_page={page:?} grid_items={nb} (want browser + B's count)");
+                eprintln!("OFTEST re-enter viewer on B + scroll filmstrip (loads should register)");
+                win.open_viewer(nb / 2);
+                glib::timeout_future(Duration::from_millis(800)).await;
+                win.soak_scroll_filmstrip().await;
+                glib::timeout_future(Duration::from_millis(1500)).await;
+                eprintln!("OFTEST done");
                 if let Some(app) = win.application() {
                     app.quit();
                 }
