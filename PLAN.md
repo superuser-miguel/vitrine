@@ -1079,6 +1079,18 @@ beats us."**
   (scanner.rs), so back-nav re-walks (stat only) but never re-hashes; its slowness
   is the same decode contention hitting thumbnail reloads.
 
+**Measured evidence (2026-07-16, installed Flatpak, real `elizarosewatson`
+folder, 13,235 images, VITRINE_LOADTEST = worst main-loop stall over 10s):**
+- Baseline (enrichment competing): **723 ms**.
+- Enrichment throttled to 1 (`VITRINE_DECODE_LIMIT=1`): **392 ms** (−46%).
+- Interpretation: ~330 ms of the stall is enrichment contention; the remaining
+  ~392 ms is the interactive mixed-size path (big-image decode head-of-line +
+  the GPU downscale/readback done on the main thread for large images). For
+  reference, the post-Phase-1 floor on cold uniform folders was ~52 ms. Both
+  causes share the fix below; the interactive residual also wants the §13.1
+  viewport-ordered, cost-aware scheduler and moving large-image downscale
+  off-main. **723 ms is the "before" number to beat.**
+
 **Fix (recommended, do next).** Make enrichment a true *background* task that
 **yields to the interactive foreground**: pause/throttle enrichment while thumbnail
 loads are pending or a scroll is in flight (a shared "UI busy" signal checked
