@@ -1110,13 +1110,25 @@ folder, 13,235 images, VITRINE_LOADTEST = worst main-loop stall over 10s):**
 folder settled what worst-stall couldn't: `collect_images` name-sort 20 ms
 (redundant — removed), **`populate` synchronous 533 ms → 2 ms** (incremental
 sort/filter + off-main stamping worked), and the real worst-stall spikes were
-(a) a **one-time ~1.7 s GSK/mesa shader compile** on the first `render_texture`
-(disk-cached, once per machine — pre-warm off the first-thumbnail path if we want
-to hide it) and (b) genuine **per-large-image GPU downscale on the main thread**
+(a) a **~1.7 s GSK/Vulkan pipeline compile** on the first `render_texture` and
+(b) genuine **per-large-image GPU downscale on the main thread**
 (~75 ms for a 3024×4032 / 12 MP photo) — that's item #6 (off-main downscale), and
 these folders really do carry 12 MP images. Net: the recurring folder-open freeze
 is fixed; the remaining felt cost during browsing is per-large-image downscale +
 cold-folder decode throughput.
+
+**Shader pre-warm — tried and REJECTED (measured 2026-07-16).** Kicked a throwaway
+`render_texture` at startup to move the compile off the first-thumbnail path.
+Measurement killed it: the compile is **~1.7 s on *every* launch that downscales,
+NOT cached across launches** (`radv`/GSK-Vulkan recompiles the pipeline per
+process; the earlier "warm" run was fast only because it browsed *cached*
+thumbnails and never downscaled). So an unconditional pre-warm *forces* 1.7 s onto
+every launch — including cached-only browsing that would never have paid it — a
+regression on the fast path. Reverted. **The right fix is #6, and it subsumes
+this:** move the downscale to a **CPU worker thread** (the `image` crate) instead
+of GSK `render_texture`. That eliminates the Vulkan pipeline compile entirely (no
+1.7 s, ever) *and* takes the per-large-image downscale off the main thread — one
+change kills both, and drops the dmabuf-FD/readback dance too.
 
 **Fix (recommended, do next).** Make enrichment a true *background* task that
 **yields to the interactive foreground**: pause/throttle enrichment while thumbnail
