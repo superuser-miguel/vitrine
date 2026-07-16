@@ -66,11 +66,22 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
 
 ## Roadmap
 
-v1 is done. Planned next (see [`PLAN.md`](PLAN.md) for full specs):
+v1 is feature-complete. See [`PLAN.md`](PLAN.md) for full specs.
+
+**Next up**
+
+- **Viewer: click-drag pan** — grab-hand panning for zoomed-in / large images
+  (PLAN §14.1).
+- **Removable-media bookmarks** — offline / greyed state for USB drives that come
+  and go, via `GVolumeMonitor` (PLAN §14.2).
+- **Decode-scheduling performance** — viewport-ordered, cost-aware thumbnail
+  loading so folders that mix large and small images fill fast (PLAN §13).
+
+**Later**
 
 - **Navigation** — a Nautilus-style address bar and tabs (Back/Forward shipped).
 - **Lua scripting** — custom sort orders, batch ImageMagick ops, rename rules.
-- **A non-destructive edit tier** — crop / rotate / resize (Loupe/gThumb-style).
+- **A non-destructive edit tier** — crop / rotate / resize (GPU-accelerated).
 - **WASM compute plugins** — local auto-tagging and embedding-based "find
   similar", plus faces / OCR / quality scoring.
 - **In-file XMP embed** — write the packet directly into JPEG/PNG containers, on

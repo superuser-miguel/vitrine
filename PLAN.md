@@ -1054,9 +1054,11 @@ scroll US patent 9501415).
 
 ## 14. UX backlog: viewer pan + removable-media bookmarks (user, 2026-07-16)
 
-Two nice-to-haves flagged during the GPU/UI "lunch-and-learn" discussions.
+Flagged during the GPU/UI "lunch-and-learn" discussions. **§14.1 (pan) is
+promoted from nice-to-have to a committed near-term add** (user: "required action
+IMO") — it's the next-up implementation task. §14.2 follows.
 
-### 14.1 Click-drag pan in the viewer
+### 14.1 Click-drag pan in the viewer — ⭐ NEXT UP (committed)
 
 **Current state.** The viewer *already* pans when zoomed past fit — the image
 lives in `picture_scroller` (a `GtkScrolledWindow`), so scroll-wheel and
