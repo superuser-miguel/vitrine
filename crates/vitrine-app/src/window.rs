@@ -320,6 +320,7 @@ mod imp {
             self.obj().setup_filtering();
             self.obj().setup_navigation();
             self.obj().setup_debug_hud();
+            self.obj().maybe_soak();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -2865,6 +2866,104 @@ impl VitrineWindow {
                 }
             ),
         );
+    }
+
+    /// VITRINE_SOAK=<dir1:dir2:...>: a scripted UI journey for soak-testing (pair
+    /// with VITRINE_DEBUG / VITRINE_NOCACHE). Per dir: open, scroll the grid, open
+    /// the viewer, toggle Properties (2s each way), scroll the filmstrip, back out.
+    /// Two laps, then a back-button pass, then quit. `SOAK` phase markers interleave
+    /// with the `VDBG` stats so they can be correlated.
+    fn maybe_soak(&self) {
+        let Some(spec) = std::env::var_os("VITRINE_SOAK") else {
+            return;
+        };
+        let dirs: Vec<PathBuf> = spec
+            .to_string_lossy()
+            .split(':')
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .collect();
+        if dirs.is_empty() {
+            return;
+        }
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = win)]
+            self,
+            async move {
+                use std::time::Duration;
+                // Let the window map before we start driving it.
+                glib::timeout_future(Duration::from_millis(1500)).await;
+                for lap in 0..2 {
+                    eprintln!("SOAK ===== lap {lap} =====");
+                    for dir in &dirs {
+                        eprintln!("SOAK open-dir {}", dir.display());
+                        win.open_location(gio::File::for_path(dir));
+                        glib::timeout_future(Duration::from_millis(1000)).await;
+
+                        eprintln!("SOAK scroll-grid");
+                        win.soak_scroll_grid().await;
+
+                        let n = win.model().map_or(0, |m| m.n_items());
+                        if n == 0 {
+                            continue;
+                        }
+                        eprintln!("SOAK open-viewer");
+                        win.open_viewer(n / 2);
+                        glib::timeout_future(Duration::from_millis(700)).await;
+
+                        let viewer = win.imp().viewer.borrow().as_ref().cloned();
+                        if let Some(v) = viewer {
+                            eprintln!("SOAK properties-on");
+                            v.set_properties_shown(true);
+                            glib::timeout_future(Duration::from_secs(2)).await;
+                            eprintln!("SOAK properties-off");
+                            v.set_properties_shown(false);
+                            glib::timeout_future(Duration::from_millis(500)).await;
+                        }
+
+                        eprintln!("SOAK scroll-filmstrip");
+                        win.soak_scroll_filmstrip().await;
+
+                        eprintln!("SOAK back-to-grid");
+                        win.imp().nav_view.pop();
+                        glib::timeout_future(Duration::from_millis(600)).await;
+                    }
+                }
+                eprintln!("SOAK ===== back-button pass =====");
+                for _ in 0..dirs.len().saturating_sub(1) {
+                    win.go_back();
+                    glib::timeout_future(Duration::from_millis(700)).await;
+                }
+                eprintln!("SOAK done");
+                if let Some(app) = win.application() {
+                    app.quit();
+                }
+            }
+        ));
+    }
+
+    /// Fling the grid top→bottom in steps (VITRINE_SOAK).
+    async fn soak_scroll_grid(&self) {
+        use std::time::Duration;
+        let adj = self.imp().grid_scroller.vadjustment();
+        let span = (adj.upper() - adj.page_size() - adj.lower()).max(0.0);
+        for i in 0..=24 {
+            adj.set_value(adj.lower() + span * (i as f64 / 24.0));
+            glib::timeout_future(Duration::from_millis(60)).await;
+        }
+    }
+
+    /// Scroll the current viewer's filmstrip end-to-end (VITRINE_SOAK).
+    async fn soak_scroll_filmstrip(&self) {
+        use std::time::Duration;
+        let viewer = self.imp().viewer.borrow().as_ref().cloned();
+        let Some(viewer) = viewer else {
+            return;
+        };
+        for i in 0..=15 {
+            viewer.soak_scroll_filmstrip_to(i as f64 / 15.0);
+            glib::timeout_future(Duration::from_millis(70)).await;
+        }
     }
 
     /// Dev aid: if `VITRINE_SCROLLTEST` is set, fast-scroll the grid top→bottom

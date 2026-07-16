@@ -108,15 +108,18 @@ pub async fn load(
     let bucket = ThumbBucket::for_target(target_px);
     let uri = file.uri().to_string();
 
-    // Shared cache is GNOME's — read but never re-touch it.
-    if let Some(texture) = read_cache(shared_dir(), &uri, bucket, source_mtime, false).await {
-        crate::debug::cache_hit();
-        return Some(texture);
-    }
-    // Private cache is ours — mark access so eviction is LRU, not FIFO.
-    if let Some(texture) = read_cache(private_dir(), &uri, bucket, source_mtime, true).await {
-        crate::debug::cache_hit();
-        return Some(texture);
+    // VITRINE_NOCACHE forces the cold path (skip cache reads → always decode).
+    if !crate::debug::force_decode() {
+        // Shared cache is GNOME's — read but never re-touch it.
+        if let Some(texture) = read_cache(shared_dir(), &uri, bucket, source_mtime, false).await {
+            crate::debug::cache_hit();
+            return Some(texture);
+        }
+        // Private cache is ours — mark access so eviction is LRU, not FIFO.
+        if let Some(texture) = read_cache(private_dir(), &uri, bucket, source_mtime, true).await {
+            crate::debug::cache_hit();
+            return Some(texture);
+        }
     }
 
     crate::debug::cache_miss();

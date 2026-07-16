@@ -354,6 +354,18 @@ impl VitrineViewer {
         });
     }
 
+    /// Show/hide the Properties sidebar (used by the VITRINE_SOAK journey).
+    pub fn set_properties_shown(&self, shown: bool) {
+        self.imp().info_split.set_show_sidebar(shown);
+    }
+
+    /// Scroll the filmstrip to `fraction` of its range (VITRINE_SOAK).
+    pub fn soak_scroll_filmstrip_to(&self, fraction: f64) {
+        let adj = self.imp().filmstrip_scroller.hadjustment();
+        let span = (adj.upper() - adj.page_size() - adj.lower()).max(0.0);
+        adj.set_value(adj.lower() + span * fraction.clamp(0.0, 1.0));
+    }
+
     fn setup_controls(&self) {
         let imp = self.imp();
 

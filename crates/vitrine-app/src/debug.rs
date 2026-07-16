@@ -22,6 +22,14 @@ pub fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var_os("VITRINE_DEBUG").is_some())
 }
 
+/// `VITRINE_NOCACHE`: skip the thumbnail cache reads so every load decodes —
+/// a non-destructive way to exercise the *cold* path without wiping the on-disk
+/// caches (which are shared with GNOME).
+pub fn force_decode() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VITRINE_NOCACHE").is_some())
+}
+
 /// A cached thumbnail was served without decoding.
 pub fn cache_hit() {
     CACHE_HITS.fetch_add(1, Ordering::Relaxed);
