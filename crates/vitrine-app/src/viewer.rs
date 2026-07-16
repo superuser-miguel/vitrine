@@ -35,6 +35,11 @@ const ZOOM_STEP: f64 = 1.25;
 const ZOOM_MIN: f64 = 0.05;
 const ZOOM_MAX: f64 = 20.0;
 
+/// Max in-flight filmstrip thumbnail loads (bounds a fast filmstrip fling).
+const FILM_INFLIGHT: usize = 8;
+/// Cap on queued filmstrip loads; oldest (scrolled-past) dropped.
+const FILM_QUEUE_CAP: usize = 96;
+
 type TextureCache = Rc<RefCell<SizedLru<String, gdk::Texture>>>;
 
 mod imp {
@@ -109,6 +114,11 @@ mod imp {
         pub thumb_cache: RefCell<Option<crate::thumbnails::ThumbCache>>,
         /// Guards the filmstrip-selection ↔ show-position feedback loop.
         pub syncing: Cell<bool>,
+        /// Bounded filmstrip loader: queued cells to thumbnail + in-flight count,
+        /// so fast filmstrip scrolling can't spawn thousands of decode futures
+        /// (the same bug the grid's scheduler fixes).
+        pub film_queue: RefCell<Vec<(glib::WeakRef<gtk::ListItem>, ImageObject)>>,
+        pub film_inflight: Cell<usize>,
     }
 
     impl Default for VitrineViewer {
@@ -146,6 +156,8 @@ mod imp {
                 cache: Rc::new(RefCell::new(SizedLru::new(CACHE_BYTES))),
                 thumb_cache: RefCell::new(None),
                 syncing: Cell::new(false),
+                film_queue: RefCell::new(Vec::new()),
+                film_inflight: Cell::new(0),
             }
         }
     }
@@ -326,32 +338,78 @@ impl VitrineViewer {
             return;
         }
 
-        let renderer_widget = crate::thumbnails::renderer_source(pic);
-        let file = item.file();
-        let mtime = item.mtime();
-        let item = item.clone();
-        let list_item = list_item.downgrade();
-        glib::spawn_future_local(async move {
-            let Some(texture) =
-                crate::thumbnails::load(file, mtime, THUMB_SIZE, renderer_widget).await
-            else {
-                item.mark_failed();
-                return;
+        // Enqueue for the bounded loader instead of spawning a decode future per
+        // bind (a fast filmstrip fling would otherwise pile up thousands).
+        {
+            let mut q = self.imp().film_queue.borrow_mut();
+            q.push((list_item.downgrade(), item.clone()));
+            if q.len() > FILM_QUEUE_CAP {
+                let drop = q.len() - FILM_QUEUE_CAP;
+                q.drain(0..drop);
+            }
+        }
+        self.pump_filmstrip();
+    }
+
+    /// Spawn filmstrip loads up to the in-flight bound, newest-bound first (the
+    /// currently-visible cells after a scroll).
+    fn pump_filmstrip(&self) {
+        let imp = self.imp();
+        while imp.film_inflight.get() < FILM_INFLIGHT {
+            let Some((weak_li, item)) = imp.film_queue.borrow_mut().pop() else {
+                break;
             };
-            cache.borrow_mut().put(
-                key,
-                texture.clone(),
-                crate::thumbnails::texture_cost(&texture),
-            );
-            if let Some(list_item) = list_item.upgrade() {
-                let still = list_item.item().and_downcast::<ImageObject>();
-                if still.as_ref() == Some(&item) {
-                    if let Some(pic) = list_item.child().and_downcast::<gtk::Picture>() {
-                        pic.set_paintable(Some(&texture));
-                    }
+            // Skip cells that recycled to another item before their turn.
+            let Some(li) = weak_li.upgrade() else {
+                continue;
+            };
+            if li.item().and_downcast::<ImageObject>().as_ref() != Some(&item) {
+                continue;
+            }
+            imp.film_inflight.set(imp.film_inflight.get() + 1);
+            glib::spawn_future_local(glib::clone!(
+                #[weak(rename_to = viewer)]
+                self,
+                async move {
+                    viewer.run_filmstrip_load(weak_li, item).await;
+                    let imp = viewer.imp();
+                    imp.film_inflight
+                        .set(imp.film_inflight.get().saturating_sub(1));
+                    viewer.pump_filmstrip();
+                }
+            ));
+        }
+    }
+
+    async fn run_filmstrip_load(&self, weak_li: glib::WeakRef<gtk::ListItem>, item: ImageObject) {
+        let Some(cache) = self.imp().thumb_cache.borrow().clone() else {
+            return;
+        };
+        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE);
+        let cached = cache.borrow_mut().get(&key).cloned();
+        let texture = if cached.is_some() {
+            cached
+        } else {
+            let renderer = crate::thumbnails::renderer_source(self);
+            let loaded =
+                crate::thumbnails::load(item.file(), item.mtime(), THUMB_SIZE, renderer).await;
+            match &loaded {
+                Some(t) => {
+                    cache
+                        .borrow_mut()
+                        .put(key, t.clone(), crate::thumbnails::texture_cost(t))
+                }
+                None => item.mark_failed(),
+            }
+            loaded
+        };
+        if let (Some(t), Some(li)) = (texture, weak_li.upgrade()) {
+            if li.item().and_downcast::<ImageObject>().as_ref() == Some(&item) {
+                if let Some(pic) = li.child().and_downcast::<gtk::Picture>() {
+                    pic.set_paintable(Some(&t));
                 }
             }
-        });
+        }
     }
 
     /// Show/hide the Properties sidebar (used by the VITRINE_SOAK journey).
