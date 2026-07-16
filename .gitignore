@@ -27,3 +27,6 @@
 .idea/
 .vscode/
 .DS_Store
+
+# LibreOffice lock files
+.~lock.*#

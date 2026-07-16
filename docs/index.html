@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vitrine — a catalog-aware image browser & reviewer for GNOME</title>
+<meta name="description" content="Browse images that happen to be files: Loupe's viewer, Nautilus's grid, and a tag/catalog layer keyed to survive gallery-dl renames. Rate, comment, tag, collect, and de-duplicate — all rename-proof.">
+<style>
+  :root {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf;
+    --ok: #2e9e5b; --no: #c7c1d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+      --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6;
+      --ok: #57d98a; --no: #443c56;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf; --ok: #2e9e5b; --no: #c7c1d6;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+    --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6; --ok: #57d98a; --no: #443c56;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 54px 0; }
+
+  .hero { text-align: center; padding: 76px 0 44px; }
+  .icon { width: 92px; height: 92px; display: block; margin: 0 auto 20px;
+          border-radius: 22px; box-shadow: 0 12px 34px rgba(106,43,191,.34); }
+  h1 { font-size: 2.7rem; margin: 0 0 8px; letter-spacing: -.02em; }
+  .tagline { font-size: 1.28rem; font-weight: 600; margin: 0 auto 14px; max-width: 32ch; }
+  .lede { color: var(--muted); max-width: 60ch; margin: 0 auto 26px; }
+  .btns { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .btn { display: inline-block; padding: 11px 21px; border-radius: 11px; text-decoration: none;
+         font-weight: 600; border: 1px solid var(--border); color: var(--text); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
+  .badge { display: inline-block; margin-bottom: 18px; padding: 4px 12px; border-radius: 999px;
+           background: color-mix(in srgb, var(--accent) 15%, transparent);
+           color: var(--accent); font-size: .82rem; font-weight: 600; }
+
+  h2 { font-size: 1.62rem; letter-spacing: -.01em; margin: 0 0 8px; }
+  .sub { color: var(--muted); margin: 0 0 26px; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 14px; }
+  table { width: 100%; border-collapse: collapse; min-width: 620px; background: var(--surface); }
+  th, td { padding: 13px 14px; text-align: center; border-bottom: 1px solid var(--border); }
+  th:first-child, td:first-child { text-align: left; font-weight: 600; }
+  thead th { font-size: .8rem; color: var(--muted); font-weight: 600; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr.me { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  tr.me td:first-child { color: var(--accent); }
+  .y { color: var(--ok); font-weight: 700; } .n { color: var(--no); }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 20px; }
+  .card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+  .card p { margin: 0; color: var(--muted); font-size: .95rem; }
+
+  .road { list-style: none; padding: 0; margin: 0; color: var(--muted); }
+  .road li { padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .road li:last-child { border: 0; }
+  .road b { color: var(--text); }
+  .road .done b::before { content: "\2713  "; color: var(--ok); }
+
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+        padding: 14px 16px; overflow-x: auto; font-size: .9rem; }
+  code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px; border-radius: 6px; }
+  pre code { background: none; padding: 0; }
+
+  footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <svg class="icon" viewBox="0 0 128 128" xmlns="http://www.w3.org/2000/svg" aria-label="Vitrine icon">
+    <defs>
+      <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#a066e6"/><stop offset="1" stop-color="#6a2bbf"/>
+      </linearGradient>
+      <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#ffd98a"/><stop offset="1" stop-color="#ff9d6c"/>
+      </linearGradient>
+    </defs>
+    <rect x="8" y="8" width="112" height="112" rx="24" fill="url(#tile)"/>
+    <rect x="22" y="26" width="84" height="76" rx="14" fill="#fff"/>
+    <rect x="31" y="35" width="66" height="58" fill="url(#sky)"/>
+    <circle cx="52" cy="54" r="11" fill="#fff4d6"/>
+    <path d="M31 93 V74 C48 62 55 74 64 70 C76 65 84 78 97 72 V93 Z" fill="#db5a8f"/>
+    <polygon points="42,35 64,35 34,93 12,93" fill="#fff" opacity="0.26"/>
+  </svg>
+  <div class="badge">GNOME · Rust · GTK4 · v1 feature-complete</div>
+  <h1>Vitrine</h1>
+  <p class="tagline">A fast, focused, catalog-aware image browser &amp; reviewer for GNOME.</p>
+  <p class="lede">Browse <em>images that happen to be files</em> — Loupe's viewer, Nautilus's
+    grid and selection model, and a tag/catalog layer keyed to survive gallery-dl renames.
+    Rate, comment, tag, collect, and de-duplicate; nothing gets lost when files move.</p>
+  <div class="btns">
+    <a class="btn primary" href="https://github.com/superuser-miguel/vitrine">View on GitHub</a>
+    <a class="btn" href="https://github.com/superuser-miguel/vitrine#build--run">Build it</a>
+  </div>
+</header>
+
+<section class="wrap">
+  <h2>Where it fits</h2>
+  <p class="sub">The viewer done right, the grid done right, and the catalog layer nobody else has.</p>
+  <div class="tablewrap">
+    <table>
+      <thead><tr><th></th><th>Vitrine</th><th>Loupe</th><th>Nautilus</th><th>gThumb</th></tr></thead>
+      <tbody>
+        <tr class="me"><td>Virtualized image grid</td><td class="y">Yes</td><td class="n">No</td><td class="y">Yes</td><td class="y">Yes</td></tr>
+        <tr class="me"><td>Real viewer + filmstrip</td><td class="y">Yes</td><td class="y">Yes</td><td class="n">No</td><td class="y">Yes</td></tr>
+        <tr class="me"><td>Tags · ratings · collections</td><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td class="y">Yes</td></tr>
+        <tr class="me"><td>Survives renames &amp; moves</td><td class="y">Yes</td><td class="n">—</td><td class="n">—</td><td class="n">No</td></tr>
+        <tr class="me"><td>Find duplicates (exact + near)</td><td class="y">Yes</td><td class="n">No</td><td class="n">No</td><td class="n">Partial</td></tr>
+        <tr class="me"><td>First-class AVIF / JXL / HEIF</td><td class="y">Yes</td><td class="y">Yes</td><td class="y">Yes</td><td class="n">Partial</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>What it does</h2>
+  <p class="sub">v1 is feature-complete.</p>
+  <div class="grid">
+    <div class="card"><h3>Fast browsing</h3><p>Virtualized grid with rubber-band selection, adjustable thumbnails, and bounded caches that stay flat on 27k-image folders. Reuses GNOME's shared thumbnail cache.</p></div>
+    <div class="card"><h3>Beautiful decoding</h3><p>AVIF, JXL, HEIF, and the classics via glycin — color-managed, EXIF-oriented, decoded in sandboxed subprocesses. Sharper than gdk-pixbuf thumbnails.</p></div>
+    <div class="card"><h3>Viewer &amp; filmstrip</h3><p>Fit / zoom / pan / 100%, arrow-key navigation, a synced filmstrip, and a live properties panel (dimensions, camera, date, format).</p></div>
+    <div class="card"><h3>Review layer</h3><p>0–5 star ratings (with keyboard shortcuts and thumbnail overlays), free-text comments, and tags you apply to a whole selection at once.</p></div>
+    <div class="card"><h3>Collections</h3><p>Hand-curated catalogs (drag images in, reorder) and smart collections — a saved filter that keeps itself up to date.</p></div>
+    <div class="card"><h3>Rename-proof index</h3><p>A background SQLite catalog keyed by BLAKE3 content hash. Move or rename a file and its tags, rating, comment, and collection memberships follow the bytes.</p></div>
+    <div class="card"><h3>Find duplicates</h3><p>Exact (byte-identical) and near (perceptual-hash) clustering, with a reclaimable-space readout and one-click "keep the largest, trash the rest".</p></div>
+    <div class="card"><h3>Nautilus-style navigation</h3><p>A switchable sidebar — bookmarks, a folder tree, and collections — plus back-button history and a filter bar.</p></div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>Roadmap</h2>
+  <p class="sub">v1 shipped. Next up:</p>
+  <ul class="road">
+    <li class="done"><b>Browse · view · index</b> — grid, viewer, filmstrip, content-hash catalog.</li>
+    <li class="done"><b>Review &amp; organize</b> — ratings, comments, tags, collections, filter bar.</li>
+    <li class="done"><b>Find duplicates</b> — exact and perceptual-hash clustering.</li>
+    <li class="done"><b>Navigation</b> — switchable sidebar, bookmarks, folder tree, back button.</li>
+    <li><b>More navigation</b> — forward button, address bar, tabs.</li>
+    <li><b>Lua scripting</b> — custom sort orders, batch ImageMagick, rename rules.</li>
+    <li><b>Edit tier</b> — non-destructive crop / rotate / resize.</li>
+    <li><b>WASM plugins</b> — local auto-tagging and embedding-based "find similar".</li>
+    <li><b>Embedded-metadata write</b> — sync ratings/tags/comments into files' XMP.</li>
+  </ul>
+</section>
+
+<section class="wrap">
+  <h2>Build &amp; run</h2>
+  <p class="sub">GNOME 48+ · a Rust toolchain · <code>blueprint-compiler</code>. Not on Flathub yet.</p>
+  <pre><code># Flatpak (recommended)
+flatpak-builder --user --install --force-clean build-dir \
+  build-aux/io.github.superuser_miguel.Vitrine.yml
+flatpak run io.github.superuser_miguel.Vitrine
+
+# Or a plain cargo dev build
+cargo run -p vitrine-app</code></pre>
+</section>
+
+<footer class="wrap">
+  <section>
+    <p><strong>Vitrine</strong> — GPL-3.0. Built with Rust, GTK4, libadwaita, Blueprint, glycin, and SQLite.</p>
+    <p><a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a></p>
+  </section>
+</footer>
+
+</body>
+</html>

@@ -10,39 +10,66 @@ Rust · GTK4 · gtk-rs · libadwaita · Blueprint · glycin · SQLite · Flatpak
 
 ## Status
 
-**Phases 0–2 complete.** Vitrine is a working image browser + reviewer with a
-content-hash-keyed catalog index. Builds via cargo, Meson, and flatpak-builder.
+**v1 feature-complete.** Vitrine browses, views, indexes, reviews, organizes,
+and de-duplicates — all keyed to survive renames. Builds via cargo, Meson, and
+flatpak-builder; the engine ships 68 tests and stays UI-free.
 
-**What works today:**
+## Features
 
-- **Browser grid** — virtualized `GtkGridView` with rubber-band/Ctrl/Shift
-  selection, adjustable thumbnail size (Ctrl +/−, Ctrl+scroll), and
-  trash-to-recycle (`Delete`). Bounded RAM + disk thumbnail caches keep memory
-  flat on 27k-image folders; thumbnails reuse GNOME's shared cache when possible.
-- **Viewer** — fit / zoom / pan / 100%, arrow-key navigation, a synced
-  filmstrip, and an **image properties sidebar** (dimensions, size, format, date
-  taken, camera, orientation).
-- **Nautilus-style sorting** — sort by Name / Size / Modified / Type with an
-  independent Ascending/Descending toggle; instant and live (no rebuild), your
-  choice remembered across sessions.
-- **First-class AVIF / JXL / HEIF** (plus JPEG/PNG/WebP/…) via glycin.
-- **Background index** — an app-private SQLite catalog, BLAKE3 content-hash keyed
-  so tags/ratings survive gallery-dl renames, with move/delete reconciliation and
-  background enrichment (dimensions, EXIF, perceptual hash). Browsing never waits
-  on it.
-- **Preferences** — manage **library folders** (indexed in the background) and
-  the thumbnail-cache budget.
+**Browse**
+- Virtualized `GtkGridView` — rubber-band / Ctrl / Shift selection, adjustable
+  thumbnail size (Ctrl +/−, Ctrl+scroll), trash-to-recycle. Bounded RAM + disk
+  caches keep memory flat on 27k-image folders; reuses GNOME's shared thumbnail
+  cache when it can.
+- **First-class AVIF / JXL / HEIF** (plus JPEG/PNG/WebP/…) via glycin — color-
+  managed, EXIF-oriented, decoded in sandboxed subprocesses.
+- **Sidebar** — a gThumb-style switcher between **Places** (Nautilus-style
+  bookmarks: rename, reorder by drag, remove), a lazy **Folders** tree, and
+  **Collections**. Back-button folder history.
+- **Nautilus-style sorting** — Name / Size / Modified / Type with an independent
+  ascending/descending toggle; instant, live, remembered across sessions.
 
-**Next:** Phase 3 (tags, stars, Collections) and Phase 4 (find-duplicates UI —
-the engine primitives, content-hash grouping + perceptual-hash distance, already
-exist). See [`PLAN.md`](PLAN.md).
+**View**
+- Single-image viewer — fit / zoom / pan / 100%, arrow-key navigation, a synced
+  filmstrip, and a **properties sidebar** (dimensions, size, format, date taken,
+  camera, orientation).
 
-### Planned: scripting
+**Review & organize**
+- **Ratings** (0–5 stars, keyboard in the grid, star overlays on thumbnails),
+  **comments**, and **tags** (apply to a whole selection, autocomplete).
+- **Collections** — hand-curated **catalogs** (drag images in, reorder) and
+  **smart collections** (a saved filter that updates itself).
+- **Filter bar** — narrow the grid live by minimum rating or tag; save the
+  filter as a smart collection.
 
-A v2 Lua/Rhai scripting tier is planned (see PLAN.md §10.3). Its likely first
-use case is **user-defined custom sort orders** (§10.3.1) — write a small `key`
-function in Lua (natural filename order, aspect ratio, camera-then-date, rating,
-…) and it shows up alongside the built-in sorts.
+**Find duplicates**
+- **Exact** (byte-identical) and **near** (perceptual-hash) clustering, with a
+  reclaimable-space readout and one-click "trash the extras, keep the largest".
+
+**Under the hood**
+- A background, app-private **SQLite index** keyed by **BLAKE3 content hash**, so
+  tags / ratings / comments / collections **survive gallery-dl renames and
+  moves**. Move/delete reconciliation; background EXIF + perceptual-hash
+  enrichment. Browsing never waits on the index.
+- Portable **backup / export** of all annotations (JSON, content-hash keyed).
+- **Preferences** for library roots and the thumbnail-cache budget.
+
+## Roadmap
+
+v1 is done. Planned next (see [`PLAN.md`](PLAN.md) for full specs):
+
+- **Navigation** — Forward button, a Nautilus-style address bar, and tabs.
+- **Lua scripting** — custom sort orders, batch ImageMagick ops, rename rules.
+- **A non-destructive edit tier** — crop / rotate / resize (Loupe/gThumb-style).
+- **WASM compute plugins** — local auto-tagging and embedding-based "find
+  similar", plus faces / OCR / quality scoring.
+- **Embedded-metadata write** — sync ratings/tags/comments into files' XMP
+  (`Xmp.xmp.Rating` / `Xmp.dc.description`); the schema seams are already in place.
+
+## Install
+
+Not on Flathub yet. Build the Flatpak locally (below), or grab a release bundle
+when one is posted.
 
 ## Layout
 
