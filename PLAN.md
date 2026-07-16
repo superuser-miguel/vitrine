@@ -955,6 +955,21 @@ is smooth.
 - **Folder-open populate** was a synchronous ~533 ms spike (sort + filter + DB
   stamp of 13k at once). NOT the scanner — `classify` skips unchanged files by
   `(size, mtime)`, so back-nav is stat-only and never re-hashes.
+- **⭐ ROOT CAUSE of the large-folder freeze — unbounded decode-future spawn
+  (proved 2026-07-16 via VITRINE_SOAK + VITRINE_NOCACHE + VITRINE_DEBUG).** The
+  load path spawns **one decode future per cell-load / prefetch** with no bound on
+  outstanding count; each awaits the 8-wide decode gate. Warm cache → they resolve
+  instantly (hit) and never pile up (why cached browsing is smooth). But **cold /
+  cache-miss-heavy folders → thousands pile up waiting on the gate**, and
+  coordinating them on the single main thread saturates it. The HUD caught it dead
+  to rights: `decode[live=3060]` (3k futures parked on an 8-slot gate), **`fps=0`,
+  `frame_max=2910 ms`** (a 2.9 s frame), RSS 167→491 MB. Decodes finish ~150/s but
+  spawn far faster → the backlog never drains. This is "still lagging on large
+  directories." The `queued` (pending debounce) queue balloons the same way
+  (→16k). **Fix = the bounded scheduler (§13.2 item 4, now #1): a capped,
+  viewport-priority queue drained by a fixed worker pool — cap `live` at dozens,
+  not thousands.** Re-run the same SOAK/NOCACHE capture to verify `live` bounded /
+  `fps` up.
 
 ### 13.2 What's worth doing (priority order)
 

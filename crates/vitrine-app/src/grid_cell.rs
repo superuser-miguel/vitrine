@@ -195,55 +195,22 @@ impl VitrineGridCell {
 
     /// Start the async thumbnail load for `item` (called by the window when
     /// scrolling has settled). No-op if the cell has since moved to another item.
-    pub fn load(&self, item: ImageObject, cache: ThumbCache) {
-        if !self.is_showing(&item) {
+    /// Apply a load result to this cell, but only if it is still bound to `item`
+    /// (the recycling guard). Called by the window's bounded load scheduler once
+    /// a decode completes — the window owns loading now, so a fast fling can't
+    /// spawn an unbounded pile of per-cell decode futures.
+    pub fn apply(&self, item: &ImageObject, texture: Option<&gtk::gdk::Texture>) {
+        if !self.is_showing(item) {
             return;
         }
-        self.spawn_thumbnail(item, cache);
-    }
-
-    fn spawn_thumbnail(&self, item: ImageObject, cache: ThumbCache) {
-        let file = item.file();
-        let mtime = item.mtime();
-        let load_size = self.load_size();
-        let key = crate::thumbnails::ram_key(&file.uri(), load_size);
-        let renderer_widget = crate::thumbnails::renderer_source(self);
-        glib::spawn_future_local(glib::clone!(
-            #[weak(rename_to = cell)]
-            self,
-            async move {
-                // Throttle; and if this cell scrolled to another image while we
-                // waited for a slot, don't waste a load on it.
-                let _permit = crate::thumbnails::load_gate().acquire().await;
-                if !cell.is_showing(&item) {
-                    return;
-                }
-                match crate::thumbnails::load(file, mtime, load_size, renderer_widget).await {
-                    Some(thumb) => {
-                        // Insert into the bounded RAM cache (evicts LRU) so it is
-                        // not held forever per item.
-                        cache.borrow_mut().put(
-                            key,
-                            thumb.clone(),
-                            crate::thumbnails::texture_cost(&thumb),
-                        );
-                        if cell.is_showing(&item) {
-                            cell.show_texture(&thumb);
-                        }
-                    }
-                    None => {
-                        item.mark_failed();
-                        if cell.is_showing(&item) {
-                            cell.show_broken();
-                        }
-                    }
-                }
-            }
-        ));
+        match texture {
+            Some(t) => self.show_texture(t),
+            None => self.show_broken(),
+        }
     }
 
     /// Recycling guard: is this cell still bound to `item`?
-    fn is_showing(&self, item: &ImageObject) -> bool {
+    pub fn is_showing(&self, item: &ImageObject) -> bool {
         self.imp()
             .item
             .borrow()

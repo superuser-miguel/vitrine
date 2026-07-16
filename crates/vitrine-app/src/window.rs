@@ -108,6 +108,32 @@ const MAX_COLUMNS: u32 = 7;
 const PREFETCH_AHEAD: u32 = 64;
 const PREFETCH_BEHIND: u32 = 16;
 
+/// A pending thumbnail load for the bounded scheduler. `cell = None` is a
+/// prefetch (load into cache only); `Some` is a visible cell to paint when done.
+pub struct LoadRequest {
+    pub cell: Option<glib::WeakRef<VitrineGridCell>>,
+    pub item: ImageObject,
+    pub position: u32,
+    pub load_size: u32,
+}
+
+/// Cap on queued (not-yet-started) load requests; farthest-from-viewport dropped.
+const LOAD_QUEUE_CAP: usize = 512;
+
+/// Max in-flight load futures — the bound that stops a fling from spawning
+/// thousands of decode futures (the large-folder freeze). Override via
+/// `VITRINE_LOAD_LIMIT`.
+fn max_load_inflight() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("VITRINE_LOAD_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(24)
+    })
+}
+
 mod imp {
     use super::*;
     use std::cell::RefCell;
@@ -227,6 +253,12 @@ mod imp {
         /// item's position); drained when scrolling settles so fast scroll doesn't
         /// spawn a load per cell.
         pub pending: RefCell<Vec<(glib::WeakRef<VitrineGridCell>, ImageObject, u32)>>,
+        /// Bounded load scheduler: the priority queue of pending decode requests,
+        /// the count of in-flight load futures, and the viewport-centre position
+        /// (from the last flush) that orders the queue visible-first.
+        pub load_queue: RefCell<Vec<LoadRequest>>,
+        pub load_inflight: Cell<usize>,
+        pub visible_center: Cell<u32>,
         /// Debounce timer for flushing `pending` after scrolling stops.
         pub flush_source: RefCell<Option<glib::SourceId>>,
     }
@@ -285,6 +317,9 @@ mod imp {
                 viewer: RefCell::new(None),
                 thumb_cache: crate::thumbnails::new_ram_cache(),
                 pending: RefCell::new(Vec::new()),
+                load_queue: RefCell::new(Vec::new()),
+                load_inflight: Cell::new(0),
+                visible_center: Cell::new(0),
                 flush_source: RefCell::new(None),
             }
         }
@@ -509,17 +544,123 @@ impl VitrineWindow {
         let imp = self.imp();
         let pending: Vec<_> = imp.pending.borrow_mut().drain(..).collect();
         let (mut lo, mut hi) = (u32::MAX, 0u32);
+        let load_size = self.icon_px().max(256);
         for (weak_cell, item, position) in pending {
-            if let Some(cell) = weak_cell.upgrade() {
-                if cell.item().as_ref() == Some(&item) {
-                    lo = lo.min(position);
-                    hi = hi.max(position);
-                }
-                cell.load(item, imp.thumb_cache.clone());
+            // Skip cells that recycled to a different item while we debounced.
+            let live = weak_cell
+                .upgrade()
+                .is_some_and(|c| c.item().as_ref() == Some(&item));
+            if !live {
+                continue;
             }
+            lo = lo.min(position);
+            hi = hi.max(position);
+            self.enqueue_load(LoadRequest {
+                cell: Some(weak_cell),
+                item,
+                position,
+                load_size,
+            });
         }
         if lo <= hi {
+            imp.visible_center.set((lo + hi) / 2);
             self.prefetch_range(lo, hi);
+        }
+        self.pump_loads();
+    }
+
+    /// Add a load request to the bounded scheduler's queue (coalescing re-binds of
+    /// the same slot; a prefetch never clobbers a visible-cell request). Caller
+    /// pumps when the batch is enqueued.
+    fn enqueue_load(&self, req: LoadRequest) {
+        let imp = self.imp();
+        let mut q = imp.load_queue.borrow_mut();
+        if let Some(existing) = q.iter_mut().find(|r| r.position == req.position) {
+            if req.cell.is_some() || existing.cell.is_none() {
+                *existing = req;
+            }
+        } else {
+            q.push(req);
+        }
+        // Cap the queue: drop the farthest-from-viewport requests.
+        if q.len() > LOAD_QUEUE_CAP {
+            let center = imp.visible_center.get() as i64;
+            q.sort_by_key(|r| (r.position as i64 - center).unsigned_abs());
+            q.truncate(LOAD_QUEUE_CAP);
+        }
+    }
+
+    /// Spawn load futures up to the in-flight bound, each pulling the queued
+    /// request nearest the viewport (visible-first fill). This is what keeps a
+    /// fling from spawning thousands of decode futures.
+    fn pump_loads(&self) {
+        let imp = self.imp();
+        while imp.load_inflight.get() < max_load_inflight() {
+            let Some(req) = self.pop_best_load() else {
+                break;
+            };
+            imp.load_inflight.set(imp.load_inflight.get() + 1);
+            glib::spawn_future_local(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                async move {
+                    window.run_load(req).await;
+                    let imp = window.imp();
+                    imp.load_inflight
+                        .set(imp.load_inflight.get().saturating_sub(1));
+                    window.pump_loads();
+                }
+            ));
+        }
+    }
+
+    /// Remove and return the queued request nearest the current viewport centre.
+    fn pop_best_load(&self) -> Option<LoadRequest> {
+        let imp = self.imp();
+        let mut q = imp.load_queue.borrow_mut();
+        let center = imp.visible_center.get() as i64;
+        let idx = q
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, r)| (r.position as i64 - center).unsigned_abs())
+            .map(|(i, _)| i)?;
+        Some(q.swap_remove(idx))
+    }
+
+    /// Load one request: decode (or reuse cache), store, and paint the cell if it
+    /// is still showing the item.
+    async fn run_load(&self, req: LoadRequest) {
+        // Skip if the cell recycled to another item before its turn came up.
+        if let Some(w) = &req.cell {
+            match w.upgrade() {
+                Some(c) if c.is_showing(&req.item) => {}
+                _ => return,
+            }
+        }
+        let cache = self.imp().thumb_cache.clone();
+        let key = crate::thumbnails::ram_key(&req.item.file().uri(), req.load_size);
+        let cached = cache.borrow_mut().get(&key).cloned();
+        let result = if cached.is_some() {
+            cached
+        } else {
+            let renderer = crate::thumbnails::renderer_source(self);
+            let loaded =
+                crate::thumbnails::load(req.item.file(), req.item.mtime(), req.load_size, renderer)
+                    .await;
+            match &loaded {
+                Some(tex) => {
+                    cache
+                        .borrow_mut()
+                        .put(key, tex.clone(), crate::thumbnails::texture_cost(tex))
+                }
+                None => req.item.mark_failed(),
+            }
+            loaded
+        };
+        if let Some(w) = &req.cell {
+            if let Some(c) = w.upgrade() {
+                c.apply(&req.item, result.as_ref());
+            }
         }
     }
 
@@ -671,24 +812,11 @@ impl VitrineWindow {
         if imp.thumb_cache.borrow().contains(&key) {
             return;
         }
-        let file = item.file();
-        let mtime = item.mtime();
-        let cache = imp.thumb_cache.clone();
-        let renderer_widget = crate::thumbnails::renderer_source(self);
-        glib::spawn_future_local(async move {
-            let _permit = crate::thumbnails::load_gate().acquire().await;
-            if cache.borrow().contains(&key) {
-                return;
-            }
-            if let Some(texture) =
-                crate::thumbnails::load(file, mtime, load_size, renderer_widget).await
-            {
-                cache.borrow_mut().put(
-                    key,
-                    texture.clone(),
-                    crate::thumbnails::texture_cost(&texture),
-                );
-            }
+        self.enqueue_load(LoadRequest {
+            cell: None,
+            item,
+            position,
+            load_size,
         });
     }
 
@@ -722,11 +850,16 @@ impl VitrineWindow {
                 // settles) only if the thumbnail isn't already cached.
                 if cell.bind(&item, &cache) {
                     let position = list_item.position();
-                    window
-                        .imp()
-                        .pending
-                        .borrow_mut()
-                        .push((cell.downgrade(), item, position));
+                    let mut pending = window.imp().pending.borrow_mut();
+                    pending.push((cell.downgrade(), item, position));
+                    // During a long fling keep only the most recent binds — older
+                    // ones have scrolled off and would be skipped at flush anyway
+                    // (this stops the debounce queue ballooning to thousands).
+                    if pending.len() > 400 {
+                        let drop = pending.len() - 400;
+                        pending.drain(0..drop);
+                    }
+                    drop(pending);
                     window.schedule_flush();
                 }
             }
@@ -2659,6 +2792,9 @@ impl VitrineWindow {
         // Stamp hash + rating before the items are shown, so cells paint their
         // star overlay on first bind (a re-stamp follows once indexing catches up).
         self.stamp_annotations(&items);
+        // A new folder invalidates any queued/debounced loads from the old one.
+        imp.pending.borrow_mut().clear();
+        imp.load_queue.borrow_mut().clear();
         imp.store.remove_all();
         imp.store.extend_from_slice(&items);
         imp.content_stack
