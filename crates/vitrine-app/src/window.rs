@@ -155,6 +155,9 @@ mod imp {
         pub duplicates_content: RefCell<Option<gtk::Box>>,
         /// Duplicate mode: false = exact (byte-identical), true = near (pHash).
         pub dedup_near: Cell<bool>,
+        /// Bumped on every dedup scan so a slow off-thread result that finishes
+        /// after the user switched modes (or left) is discarded, not rendered.
+        pub dedup_generation: Cell<u64>,
         #[template_child]
         pub nav_view: TemplateChild<adw::NavigationView>,
         #[template_child]
@@ -251,6 +254,7 @@ mod imp {
                 duplicates_page: RefCell::new(None),
                 duplicates_content: RefCell::new(None),
                 dedup_near: Cell::new(false),
+                dedup_generation: Cell::new(0),
                 nav_view: Default::default(),
                 toast_overlay: Default::default(),
                 icon_smaller: Default::default(),
@@ -1584,6 +1588,11 @@ impl VitrineWindow {
     }
 
     /// Run the dedup scan and rebuild the cluster cards.
+    /// Cap on how many cluster cards we render — a loose "Similar" scan over a
+    /// large library can produce thousands of clusters, and building a card (with
+    /// thumbnails) for each will exhaust memory/FDs. Show the worst offenders.
+    const DEDUP_MAX_CLUSTERS: usize = 200;
+
     fn refresh_duplicates(&self) {
         let imp = self.imp();
         let Some(content) = imp.duplicates_content.borrow().clone() else {
@@ -1593,20 +1602,64 @@ impl VitrineWindow {
             content.remove(&child);
         }
 
-        self.ensure_read_db();
         let near = imp.dedup_near.get();
-        let clusters = {
-            let db = imp.read_db.borrow();
-            match db.as_ref() {
-                Some(db) => if near {
-                    db.near_duplicates(8)
-                } else {
-                    db.exact_duplicates()
+
+        // The near-duplicate scan is O(n²) over every indexed file — seconds of
+        // work on a big library — so run it off the main thread behind a spinner
+        // instead of freezing (and eventually crashing) the UI.
+        let spinner = gtk::Spinner::new();
+        spinner.set_size_request(32, 32);
+        spinner.start();
+        let status = adw::StatusPage::builder()
+            .title(if near {
+                gettextrs::gettext("Scanning for similar images…")
+            } else {
+                gettextrs::gettext("Scanning for duplicates…")
+            })
+            .child(&spinner)
+            .vexpand(true)
+            .build();
+        content.append(&status);
+
+        let generation = imp.dedup_generation.get().wrapping_add(1);
+        imp.dedup_generation.set(generation);
+        let db_path = crate::index::index_db_path();
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let clusters = gio::spawn_blocking(move || {
+                    let Ok(db) = vitrine_engine::Db::open(db_path) else {
+                        return Vec::new();
+                    };
+                    if near {
+                        db.near_duplicates(8)
+                    } else {
+                        db.exact_duplicates()
+                    }
+                    .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+
+                // Discard if the user changed mode or left while we scanned.
+                if window.imp().dedup_generation.get() != generation {
+                    return;
                 }
-                .unwrap_or_default(),
-                None => Vec::new(),
+                window.render_duplicates(&clusters, near);
             }
+        ));
+    }
+
+    /// Render the scan results into the duplicates content box (capped).
+    fn render_duplicates(&self, clusters: &[vitrine_engine::DuplicateCluster], near: bool) {
+        let Some(content) = self.imp().duplicates_content.borrow().clone() else {
+            return;
         };
+        while let Some(child) = content.first_child() {
+            content.remove(&child);
+        }
 
         if clusters.is_empty() {
             content.append(
@@ -1623,7 +1676,21 @@ impl VitrineWindow {
             );
             return;
         }
-        for cluster in &clusters {
+
+        if clusters.len() > Self::DEDUP_MAX_CLUSTERS {
+            content.append(
+                &gtk::Label::builder()
+                    .label(format!(
+                        "Showing the {} largest of {} duplicate groups.",
+                        Self::DEDUP_MAX_CLUSTERS,
+                        clusters.len()
+                    ))
+                    .halign(gtk::Align::Start)
+                    .css_classes(["dim-label"])
+                    .build(),
+            );
+        }
+        for cluster in clusters.iter().take(Self::DEDUP_MAX_CLUSTERS) {
             content.append(&self.build_cluster_card(cluster));
         }
     }
@@ -1649,10 +1716,14 @@ impl VitrineWindow {
             .build();
         card.append(&heading);
 
+        // Cap thumbnails per card: a near-dup group can chain into hundreds of
+        // members, and each thumbnail spawns a decode. The trash button still
+        // acts on the whole group; the strip just previews the first few.
+        const DEDUP_MAX_THUMBS: usize = 12;
         let strip = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         strip.set_margin_start(10);
         strip.set_margin_end(10);
-        for (i, file) in cluster.files.iter().enumerate() {
+        for (i, file) in cluster.files.iter().take(DEDUP_MAX_THUMBS).enumerate() {
             let picture = gtk::Picture::builder()
                 .content_fit(gtk::ContentFit::Cover)
                 .width_request(96)
@@ -1666,6 +1737,15 @@ impl VitrineWindow {
                 .build();
             self.load_dedup_thumb(&picture, &file.path, file.mtime);
             strip.append(&picture);
+        }
+        if cluster.files.len() > DEDUP_MAX_THUMBS {
+            strip.append(
+                &gtk::Label::builder()
+                    .label(format!("+{}", cluster.files.len() - DEDUP_MAX_THUMBS))
+                    .css_classes(["dim-label", "title-2"])
+                    .valign(gtk::Align::Center)
+                    .build(),
+            );
         }
         card.append(&strip);
 

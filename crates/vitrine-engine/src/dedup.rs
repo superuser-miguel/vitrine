@@ -49,17 +49,54 @@ impl Db {
     /// Near-duplicate clusters: union-find over pHash Hamming distance
     /// `<= max_distance` (0 = identical). Files without a pHash only cluster by
     /// exact content hash. Includes exact duplicates.
+    ///
+    /// A brute-force O(n²) pass is quadratic in the whole library and does not
+    /// scale (tens of thousands of files ⇒ billions of comparisons). Instead we
+    /// union byte-identical files by content hash, then find near pHashes with a
+    /// [`BkTree`], which only visits candidates the triangle inequality allows.
     pub fn near_duplicates(&self, max_distance: u32) -> rusqlite::Result<Vec<DuplicateCluster>> {
         let files = self.query(&Query::default())?;
         let n = files.len();
         let mut dsu = Dsu::new(n);
-        for i in 0..n {
-            for j in (i + 1)..n {
-                if should_union(&files[i], &files[j], max_distance) {
-                    dsu.union(i, j);
+
+        // 1. Union byte-identical files (this also clusters pHash-less files).
+        let mut by_hash: HashMap<&str, usize> = HashMap::new();
+        for (i, file) in files.iter().enumerate() {
+            match by_hash.entry(file.content_hash.as_str()) {
+                std::collections::hash_map::Entry::Occupied(e) => dsu.union(*e.get(), i),
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(i);
                 }
             }
         }
+
+        // 2. Union files whose pHashes are within `max_distance`. Bucket file
+        //    indices by exact pHash so identical hashes collapse, index the
+        //    distinct pHashes in a BK-tree, then for each bucket union it with
+        //    every bucket the tree reports as near.
+        let mut buckets: HashMap<i64, Vec<usize>> = HashMap::new();
+        for (i, file) in files.iter().enumerate() {
+            if let Some(phash) = file.phash {
+                buckets.entry(phash).or_default().push(i);
+            }
+        }
+        let mut tree = BkTree::default();
+        for &phash in buckets.keys() {
+            tree.insert(phash);
+        }
+        for (&phash, indices) in &buckets {
+            // Collapse the identical-pHash bucket first.
+            for pair in indices.windows(2) {
+                dsu.union(pair[0], pair[1]);
+            }
+            // Then union with each near (distinct) pHash bucket.
+            for neighbour in tree.within(phash, max_distance) {
+                if neighbour != phash {
+                    dsu.union(indices[0], buckets[&neighbour][0]);
+                }
+            }
+        }
+
         let mut groups: HashMap<usize, Vec<FileRecord>> = HashMap::new();
         for (i, file) in files.into_iter().enumerate() {
             groups.entry(dsu.find(i)).or_default().push(file);
@@ -68,13 +105,68 @@ impl Db {
     }
 }
 
-fn should_union(a: &FileRecord, b: &FileRecord, max_distance: u32) -> bool {
-    if a.content_hash == b.content_hash {
-        return true; // byte-identical
+/// A [BK-tree](https://en.wikipedia.org/wiki/BK-tree) over pHash values under the
+/// Hamming metric — a metric tree that answers "all values within radius r of q"
+/// while visiting only the children the triangle inequality permits.
+#[derive(Default)]
+struct BkTree {
+    root: Option<BkNode>,
+}
+
+struct BkNode {
+    value: i64,
+    /// Children keyed by their exact distance from `value`.
+    children: HashMap<u32, BkNode>,
+}
+
+impl BkTree {
+    /// Insert a distinct value (duplicates are ignored).
+    fn insert(&mut self, value: i64) {
+        match &mut self.root {
+            None => self.root = Some(BkNode::new(value)),
+            Some(root) => root.insert(value),
+        }
     }
-    match (a.phash, b.phash) {
-        (Some(x), Some(y)) => phash_distance(x, y) <= max_distance,
-        _ => false,
+
+    /// Every stored value within Hamming distance `radius` of `query`.
+    fn within(&self, query: i64, radius: u32) -> Vec<i64> {
+        let mut out = Vec::new();
+        let mut stack: Vec<&BkNode> = self.root.iter().collect();
+        while let Some(node) = stack.pop() {
+            let d = phash_distance(node.value, query);
+            if d <= radius {
+                out.push(node.value);
+            }
+            let (lo, hi) = (d.saturating_sub(radius), d.saturating_add(radius));
+            for (&edge, child) in &node.children {
+                if (lo..=hi).contains(&edge) {
+                    stack.push(child);
+                }
+            }
+        }
+        out
+    }
+}
+
+impl BkNode {
+    fn new(value: i64) -> BkNode {
+        BkNode {
+            value,
+            children: HashMap::new(),
+        }
+    }
+
+    fn insert(&mut self, value: i64) {
+        let d = phash_distance(self.value, value);
+        if d == 0 {
+            return; // already present
+        }
+        match self.children.entry(d) {
+            std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().insert(value),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(BkNode::new(value));
+            }
+        }
     }
 }
 
@@ -213,5 +305,34 @@ mod tests {
         assert_eq!(strict.len(), 1);
         assert_eq!(strict[0].files.len(), 2);
         assert_eq!(strict[0].keeper().content_hash, "he");
+    }
+
+    #[test]
+    fn near_clusters_are_transitive() {
+        let db = Db::open_in_memory().unwrap();
+        // A chain a—b—c where each neighbour is 2 bits apart but a—c is 4 apart:
+        // with threshold 2 they must still land in ONE cluster (union-find is
+        // transitive even though a and c are never directly compared).
+        seed(&db, "/a.jpg", "ha", 30, Some(0b0000_0000));
+        seed(&db, "/b.jpg", "hb", 20, Some(0b0000_0011));
+        seed(&db, "/c.jpg", "hc", 10, Some(0b0000_1111));
+        let clusters = db.near_duplicates(2).unwrap();
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].files.len(), 3);
+        assert_eq!(clusters[0].keeper().path, "/a.jpg"); // largest
+    }
+
+    #[test]
+    fn bktree_within_finds_neighbours() {
+        let mut tree = BkTree::default();
+        for v in [0b0000, 0b0001, 0b0011, 0b1111_1111] {
+            tree.insert(v);
+        }
+        let mut near = tree.within(0b0000, 2);
+        near.sort();
+        assert_eq!(near, vec![0b0000, 0b0001, 0b0011]);
+        assert_eq!(tree.within(0b0000, 0), vec![0b0000]);
+        // The far value is reachable at a large enough radius.
+        assert!(tree.within(0b0000, 8).contains(&0b1111_1111));
     }
 }
