@@ -557,6 +557,33 @@ the header "Sort By" menu alongside the built-ins.
 - **Ties into:** the scripting tier above (shared Lua host + sandbox), §5 stored
   metadata (the key's input columns), and Phase 3 tags/ratings (richer keys).
 
+#### 10.3.2 More Lua use cases (user, 2026-07-15)
+
+Beyond custom sort keys (§10.3.1), the Lua tier should cover:
+
+- **Batch operations via ImageMagick** — expose a scripting hook that runs the
+  `magick` CLI as a *subprocess* (house rule 3: no C++ linking) over the current
+  selection: convert format, resize, rotate, watermark, strip metadata, etc. A
+  Lua script declares its name + params (glob of ImageMagick options) and a
+  destination policy (in place / copy to a subfolder / new suffix). This is the
+  gallery-dl-adjacent "process a batch" workflow. Sandbox: needs write access to
+  the target folder — flows through the portal like everything else.
+- **Rename patterns / predicate rules** — already sketched (smart-collection
+  predicates, rename templates); Lua expressions over item metadata.
+
+**Distinct from Lua: an in-app EDIT tier** (crop / rotate / resize / flip — the
+Loupe/gThumb "Edit File" feel). This is *app* work, not a plugin, and can use the
+**`image` crate we already depend on** (pure Rust, no C++) for the pixel ops +
+re-encode — no glycin (decode-only) and no new deps. Design intent:
+- **Non-destructive first**: record edits as an operations list keyed by
+  `content_hash` (a new `edits` table / sidecar), applied on export — so the
+  original is never clobbered. "Save a Copy" writes the baked result via `image`.
+- A minimal editor page (reuse the viewer): crop handles, rotate 90°, resize
+  dialog, flip. Loupe/gThumb are the UX references.
+- Later: expose these ops to Lua for *batch* editing (crop-all, resize-all).
+- Ordering: this is **v2/v3** and larger than the plugin tiers — keep it behind a
+  clear "editing" milestone; §9 already defers "editing tools".
+
 ### 10.4 BLAKE3 hashing — implementation notes
 
 This is **v1** (`hash.rs`, §5/Phase 2); notes for reference. Extremely fast
@@ -616,6 +643,35 @@ struct PluginOutput {
 - **Use cases (prioritized):** custom duplicate-similarity metrics; advanced filters/effects; batch converters/watermarking; AI-based tagging (future).
 - **Implementation (v2):** add `wasmtime` + `serde` to the engine (optional feature); define safe host functions (`host_log`, `host_decode_image`); plugin manager in the app (load from the extension point); strict capabilities (no filesystem access unless granted).
 - **Complementary Lua tier:** `mlua`/`rhai` for rules, rename patterns, smart-collection predicates — hot-reloadable, embedded.
+
+#### 10.5.1 WASM plugin ideas (user asked, 2026-07-15)
+
+Concrete compute-heavy use cases that justify the sandboxed WASM tier (each takes
+decoded pixels or a temp path in, returns tags/vectors/scores/bytes out — all
+local, no network unless granted):
+
+- **AI auto-tagging** — a bundled image-classification model (ONNX via `tract`, or
+  the plugin ships weights) labels objects/scenes → writes tags. Local, private.
+- **Semantic "find similar" / smarter dedup** — compute CLIP-style embeddings per
+  image; near-duplicate + "more like this" by vector distance, going *beyond*
+  pHash (the §10.1 forward note). Store the embedding as a blob keyed by
+  `content_hash`.
+- **Face detection + grouping** — detect faces, cluster by person (digiKam/Photos
+  style). Strictly on-device; a natural "People" smart collection.
+- **OCR** — pull text from screenshots/scans → searchable + auto-taggable.
+- **Quality/aesthetic scoring** — blur/exposure/sharpness detection → auto-flag or
+  auto-rate blurry shots; a "review the bad ones" workflow.
+- **Dominant-colour / palette extraction** — filter or sort by colour.
+- **Custom similarity metrics for the dedup finder** — SSIM, alternative
+  perceptual hashes, plugged into the union-find clustering.
+- **Heavy batch image ops** — filters/effects/watermark as sandboxed compute
+  (the original §10.5 use case), complementing the Lua+ImageMagick subprocess path.
+- **Exotic-format thumbnailers** — decode formats glycin doesn't, returning pixels.
+
+Recommendation: prioritise **auto-tagging** and **embeddings-based similarity** —
+they're the highest-leverage (they feed tags + smart collections + a better
+duplicate finder, all already built) and clearly *compute*, not *rules* (so WASM,
+not Lua). Capabilities per §10.5: memory/time limits, no FS unless granted.
 
 ### 10.6 Sidebar navigation — Tree + Bookmarks + view switcher (user request, 2026-07-15)
 
@@ -762,3 +818,60 @@ cache mapping, tighter FD limits), so tests must also run **inside** it:
 - Wire `checks.sh` (or a `checks-flatpak.sh`) to optionally run the in-sandbox
   suite when a flatpak build exists, so regressions in sandbox posture are caught
   before release.
+
+---
+
+## 12. Post-v1 navigation & multi-view (investigation — user, 2026-07-15)
+
+Natural extensions to the sidebar/back-nav work. Ordered easiest → biggest.
+
+### 12.1 Forward button
+
+The obvious companion to Back. The window already has a `history` stack of
+`Location`s; add a **forward** stack:
+- Going **Back** pushes the current location onto `forward` (as well as popping
+  `history`).
+- Any *new* navigation (not back/forward) **clears `forward`** (standard browser
+  semantics).
+- Forward pops `forward`, navigates (with the `navigating_back`-style guard), and
+  pushes onto `history`.
+Add a `go-next-symbolic` button beside Back; sensitivity tracks the stacks. Small,
+self-contained — the cheapest of these.
+
+### 12.2 Tabs
+
+A collection in one tab, a bookmarked dir in another, a filmstrip from a third —
+Nautilus-style. Use **`AdwTabView` + `AdwTabBar`**. This is the **big
+architectural change**: today the window owns *one* grid/store/sort/filter/history/
+viewer. Tabs need **N independent browse states**.
+- **Refactor:** extract a `BrowserView` widget that owns everything per-tab — the
+  `store` + `SortListModel` + `FilterListModel` + selection + grid + its own
+  `history`/`current_location` + its viewer/filmstrip. The window becomes a shell:
+  the shared **sidebar** (bookmarks/tree/collections) + an `AdwTabView` of
+  `BrowserView`s.
+- **Shared vs per-tab:** the index (`Db`), the `Indexer`/`Annotator`, the RAM
+  thumbnail cache, and settings stay **shared** (one process, one index). Sort,
+  filter, selection, history, current location are **per-tab**.
+- **Interactions:** middle-click a bookmark / tree node / collection → "open in
+  new tab" (the Nautilus gesture); `Ctrl+T` new tab, `Ctrl+W` close tab.
+- Sizeable but mechanical once `BrowserView` is extracted; do the extraction as
+  its own commit first (single tab, no behaviour change), then add the tab bar.
+
+### 12.3 Address bar
+
+A Nautilus-style top path bar showing e.g. `/home/user/Pictures/`:
+- **Breadcrumb mode** (default): clickable segment buttons; click a segment to
+  navigate up to it. Built from the current `Location::Folder(path)` split on `/`.
+- **Editable mode** (`Ctrl+L` / click the empty area): a `GtkEntry` to type or
+  paste a path; Enter navigates. Completion over accessible dirs is a nice-to-have.
+- For `Location::Collection`, show the collection name (not a path) — the bar is
+  location-aware, not just a folder path.
+- ⚠ **Sandbox:** typing a path outside the granted roots (Pictures / library
+  roots / portal-opened) will fail — only accessible paths resolve. The breadcrumb
+  is always safe (you're already there); the *editable* entry should surface a
+  clear "not accessible — open via the folder chooser to grant it" message rather
+  than silently failing.
+
+**Suggested order:** 12.1 Forward (trivial) → 12.3 Address bar (medium, mostly
+UI) → 12.2 Tabs (the `BrowserView` extraction is the real work). All three are
+post-v1 polish; none block shipping v1.
