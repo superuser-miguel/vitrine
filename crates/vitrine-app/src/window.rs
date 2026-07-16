@@ -1061,12 +1061,29 @@ impl VitrineWindow {
         // Reorder bookmarks: a list-level drop target lands the dragged bookmark
         // wherever you drop it (the row under the cursor, or the end).
         let reorder = gtk::DropTarget::new(i32::static_type(), gtk::gdk::DragAction::MOVE);
+        // Show a drop-line at the insert position as you drag over the list.
+        reorder.connect_motion(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            gtk::gdk::DragAction::empty(),
+            move |_, _, y| {
+                window.highlight_bookmark_drop(y);
+                gtk::gdk::DragAction::MOVE
+            }
+        ));
+        reorder.connect_leave(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.clear_bookmark_drop()
+        ));
         reorder.connect_drop(glib::clone!(
             #[weak(rename_to = window)]
             self,
             #[upgrade_or]
             false,
             move |_, value, _, y| {
+                window.clear_bookmark_drop();
                 let Ok(from) = value.get::<i32>() else {
                     return false;
                 };
@@ -1209,6 +1226,38 @@ impl VitrineWindow {
             imp.bookmarks_list.append(&row);
         }
         *imp.bookmarks.borrow_mut() = bookmarks;
+    }
+
+    /// Show a drop-line at the row the cursor is over (where a reordered
+    /// bookmark would land), or at the bottom of the last row past the end.
+    fn highlight_bookmark_drop(&self, y: f64) {
+        self.clear_bookmark_drop();
+        let list = &self.imp().bookmarks_list;
+        if let Some(row) = list.row_at_y(y as i32) {
+            row.add_css_class("drop-before");
+        } else {
+            // Below the last row → indicate an append.
+            let mut last = None;
+            let mut i = 0;
+            while let Some(row) = list.row_at_index(i) {
+                last = Some(row);
+                i += 1;
+            }
+            if let Some(row) = last {
+                row.add_css_class("drop-after");
+            }
+        }
+    }
+
+    /// Clear the reorder drop-line from every bookmark row.
+    fn clear_bookmark_drop(&self) {
+        let list = &self.imp().bookmarks_list;
+        let mut i = 0;
+        while let Some(row) = list.row_at_index(i) {
+            row.remove_css_class("drop-before");
+            row.remove_css_class("drop-after");
+            i += 1;
+        }
     }
 
     /// Right-click menu for a bookmark: open, rename, remove, move up/down.
