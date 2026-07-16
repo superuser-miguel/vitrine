@@ -279,6 +279,28 @@ impl VitrineViewer {
         ));
 
         imp.filmstrip_scroller.set_child(Some(&list_view));
+
+        // Mouse wheel scrolls the horizontal filmstrip: a vertical notch (or a
+        // trackpad's horizontal delta) moves the strip sideways. Without this the
+        // strip only moved by keyboard — a vertical wheel does nothing to
+        // horizontal content by default.
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
+        scroll.connect_scroll(glib::clone!(
+            #[weak(rename_to = viewer)]
+            self,
+            #[upgrade_or]
+            glib::Propagation::Proceed,
+            move |_, dx, dy| {
+                let hadj = viewer.imp().filmstrip_scroller.hadjustment();
+                // Prefer an explicit horizontal delta (trackpad); else map the
+                // vertical wheel to horizontal. ~1.5 thumbnails per notch.
+                let delta = if dx != 0.0 { dx } else { dy };
+                hadj.set_value(hadj.value() + delta * 108.0);
+                glib::Propagation::Stop
+            }
+        ));
+        imp.filmstrip_scroller.add_controller(scroll);
+
         *imp.filmstrip.borrow_mut() = Some(selection);
         *imp.filmstrip_view.borrow_mut() = Some(list_view);
     }
