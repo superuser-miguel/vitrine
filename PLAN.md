@@ -875,3 +875,125 @@ A Nautilus-style top path bar showing e.g. `/home/user/Pictures/`:
 **Suggested order:** 12.1 Forward (trivial) → 12.3 Address bar (medium, mostly
 UI) → 12.2 Tabs (the `BrowserView` extraction is the real work). All three are
 post-v1 polish; none block shipping v1.
+
+## 13. Rendering & decode-scheduling performance (research backlog — user, 2026-07-16)
+
+Perf is the app's north star. The decode/thumbnail pipeline is already
+*viewport-aware* (virtualized grid, bind-driven loads, 90ms scroll-settle
+debounce, directional prefetch `PREFETCH_AHEAD 64` / `PREFETCH_BEHIND 16`, a
+concurrency gate `thumbnails::load_gate`), but it is **not yet viewport-
+*ordered*** — when a settle fires, `flush_pending` (window.rs) spawns decodes in
+bind/drain order through a flat semaphore, so completion order is "whatever
+decodes fastest," and thumbnails pop in scattered rather than filling outward
+from where the eye is. This section captures the specific fix plus a researched
+catalog of scheduling/rendering ideas from browsers, virtualized-list libraries,
+GNOME image apps, and GPU texture pipelines — each mapped to Vitrine and to a
+concrete test. **None are needed to ship; all are perf polish to A/B on real
+folders.**
+
+Key fact grounding all of this: **the app already has the viewport info it
+needs** — the GPU is downstream and knows nothing about scrolling; GTK's
+virtualized `GridView` calls `connect_bind` only for on-screen cells (+ buffer)
+and hands us `list_item.position()`, and `grid_scroller.vadjustment()` gives the
+exact pixel viewport. So prioritization is purely an app-layer scheduling
+decision, no engine change.
+
+### 13.1 Viewport-ordered decode scheduler (the immediate optimization)
+
+**Problem.** Loads for a settle batch complete in decode-time order, not visual
+order; and if you scroll again before the queue drains, a now-stale queued load
+still holds its turn at the gate ahead of newly-visible items.
+
+**Design.**
+- Replace the flat `pending` drain + plain semaphore with a **priority queue**
+  keyed by *distance from the viewport* (top-visible index, or viewport centre
+  for centre-out fill). Compute the reference index from
+  `grid_scroller.vadjustment()` (value + page_size ÷ row height) at flush time.
+- Feed the gate from that priority queue so the visible region resolves **first
+  and in order**, then radiates outward, then the prefetch margins fill.
+- **Re-prioritize on each scroll settle**: newly-visible items jump ahead;
+  scrolled-past queued items are dropped or demoted (partially done today —
+  `flush_pending` already skips cells whose item changed).
+- Keep the existing debounce (don't decode mid-fling) and the directional
+  prefetch (bias in the scroll direction — see 13.2/overscan).
+
+**Test cases (extend VITRINE_SCROLLTEST / VITRINE_LOADTEST):**
+1. *Fill-order correctness* — on a cold folder, assert the first N completed
+   thumbnails are the top-of-viewport items (by position), not arbitrary.
+2. *Time-to-first-visible-thumb* — measure ms from folder-open (or scroll-stop)
+   to the moment every currently-visible cell has a real texture; compare
+   scheduler on/off. This is the metric that maps to perceived snappiness (cf.
+   browser LCP — see 13.2).
+3. *Scroll-jump staleness* — scroll to A, immediately jump to B before A drains;
+   assert B's visible cells decode before any remaining A-only cells.
+4. *No regression on cached folders* — with everything cached, scheduler adds no
+   measurable stall (priority queue overhead must be negligible).
+5. *Gate saturation* — big icon size + cold 27k folder: main-loop stall stays at
+   the current release floor (~9.6s scrolltest, ~52ms worst LOADTEST stall).
+
+### 13.2 Concept catalog (from real systems — A/B candidates)
+
+For each: *what it is · where it comes from · how it maps to Vitrine · how to
+test.*
+
+- **Priority hints / boost-visible-first.** Browsers start in-viewport images at
+  Low, then boost once layout finds them visible — often "too late." `fetchpriority`
+  lets the important image start High immediately (median 21ms vs 102ms to first
+  byte). *Vitrine:* the 13.1 priority queue *is* our fetchpriority; additionally
+  mark the item under the cursor / selected / just-activated as **High** so it
+  jumps the queue. *Test:* case 13.1.2 above, plus "selected item decodes first."
+- **Overscan / directional prefetch tuning.** Virtualized lists render a small
+  buffer beyond the viewport; overscan is a direct trade (fewer blank flashes vs.
+  more work), and good ones bias in the scroll direction. *Vitrine:* we have
+  `PREFETCH_AHEAD/BEHIND`; make them **velocity-adaptive** (faster scroll → larger
+  ahead margin, smaller behind) using vadjustment delta over time. *Test:* blank-
+  cell count during a fixed fling at several speeds; RSS stays flat (don't let
+  overscan defeat virtualization).
+- **Cancel / deprioritize scrolled-past work.** Windowing libs decode far-from-
+  viewport items at low priority "after running interactions." *Vitrine:* partly
+  done (debounce + skip-changed-cell); extend to **cancel in-flight decodes** for
+  items flung far off-screen (glycin decode is a subprocess — cancellation frees
+  the gate slot sooner). *Test:* VITRINE_CYCLE across dirs; assert no wasted
+  completed decodes for never-settled cells; FD/gate-slot flatness.
+- **Progressive / coarse-first fill.** GPU texture pipelines draw a coarse mip
+  when there isn't frame time to decode full detail, refining later; browsers
+  show a placeholder then swap. *Vitrine:* we downscale already; consider a
+  **two-pass fill** — blit the shared-cache 256px (already read-cheap) instantly,
+  then swap in the sharp x-large/xx-large bucket for the current icon size. *Test:*
+  time-to-*any*-pixels vs time-to-sharp; ensure no visible flicker on swap.
+- **Relevance-aware cache eviction.** Texture caches evict by more than raw LRU —
+  keep what's near the region of interest. *Vitrine:* `SizedLru` is pure LRU;
+  consider biasing eviction to protect items near the current viewport/folder.
+  *Test:* scroll away and back; assert near-viewport thumbnails survived. (Tie to
+  [[vitrine-thumbnail-cache-strategy]].)
+- **More parallel thumbnailers.** gThumb sped up thousand-image dirs by starting
+  more thumbnailers in parallel. *Vitrine:* the gate limit (`VITRINE_LOAD_LIMIT`,
+  default ~24) is our knob; glycin's pool is unbounded and must stay gated (see
+  the deadlock gotcha in §8). *Test:* sweep the gate limit vs. main-loop stall +
+  total fill time to find the real optimum per host (host glycin 2.1.5 vs //50).
+- **Per-frame decode budget / time-slicing.** Progressive renderers cap work per
+  frame to avoid dropped frames. *Vitrine:* if priority-queue draining ever
+  competes with the main loop, drain **at most k results/main-loop-iteration**
+  (idle callback) so applying textures never janks a scroll. *Test:* VITRINE_LOADTEST
+  worst-stall must not regress while a large batch applies.
+- **Decode-ahead in scroll direction (prefetch as prediction).** Covered by
+  overscan above, but note the *prediction* angle: use vadjustment velocity to
+  prefetch where the user is *going*, not a symmetric margin. Already partially
+  reflected in AHEAD>BEHIND; make it dynamic.
+
+### 13.3 Harness additions to make these measurable
+
+The above all need two metrics the current hooks don't cleanly expose:
+- **Fill-order log** — a VITRINE_DEBUG mode that records, per decode completion,
+  `(position, was_visible_at_completion, ms_since_settle)` so we can assert
+  order/latency instead of eyeballing.
+- **Time-to-visible-complete** — instrument the settle→"all visible cells have
+  real textures" interval (the perceptual analogue of browser LCP for our grid).
+
+References (for whoever builds this): Chrome fetchpriority / LCP request
+discovery (web.dev/articles/fetch-priority, developer.chrome.com/docs/performance/insights/lcp-discovery),
+react-window overscan (web.dev/articles/virtualize-long-lists-react-window),
+Loupe/glycin sandboxed per-file decode (blogs.gnome.org/sophieh 2023-08-30),
+gThumb parallel thumbnailers (gitlab.gnome.org/GNOME/gthumb), async multilevel
+texture pipelines / progressive refinement (US6618053B1; image-caching-for-fast-
+scroll US patent 9501415).
