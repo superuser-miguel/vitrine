@@ -361,12 +361,6 @@ async fn run_enrichment(requests: async_channel::Sender<Request>) {
             return;
         }
 
-        // Yield the decode gate to interactive thumbnail/viewer decodes before
-        // spending it on a batch of background phash decodes: park while the UI
-        // is actively loading (checked once per batch — not per item, which would
-        // spawn a poller per decode and churn the main loop while browsing).
-        crate::decode::yield_to_foreground().await;
-
         // Decode the whole batch concurrently (the decode gate bounds real
         // parallelism); await all so every Enrich write is enqueued before the
         // next TakeBatch, keeping the queue monotonic.

@@ -2124,60 +2124,20 @@ impl VitrineWindow {
     /// overlays and rating writes need no per-cell database hit. Best-effort:
     /// items the index hasn't caught up on stay unstamped until the re-stamp on
     /// scan completion.
-    /// Stamp content-hash + rating onto the store's items, off the main thread:
-    /// the `ratings_under` query runs on a worker; the results apply on main. This
-    /// keeps a folder-open (or re-stamp) from blocking the UI on the DB — stars
-    /// appear a beat later, reactively via `notify::rating`.
-    fn stamp_annotations_async(&self) {
+    fn stamp_annotations(&self, items: &[ImageObject]) {
         let Some(folder) = self.imp().current_folder.borrow().clone() else {
             return;
         };
-        let folder_key = folder.to_string_lossy().into_owned();
-        let db_path = crate::index::index_db_path();
-        glib::spawn_future_local(glib::clone!(
-            #[weak(rename_to = window)]
-            self,
-            async move {
-                let query_key = folder_key.clone();
-                let map = gio::spawn_blocking(move || {
-                    let db = Db::open(db_path).ok()?;
-                    let rows = db.ratings_under(&query_key).ok()?;
-                    Some(
-                        rows.into_iter()
-                            .map(|(path, hash, rating)| (path, (hash, rating)))
-                            .collect::<std::collections::HashMap<String, (String, i64)>>(),
-                    )
-                })
-                .await
-                .ok()
-                .flatten()
-                .unwrap_or_default();
-
-                // The user may have navigated away while the query ran.
-                let still_here = window
-                    .imp()
-                    .current_folder
-                    .borrow()
-                    .as_ref()
-                    .map(|f| f.to_string_lossy().into_owned())
-                    == Some(folder_key);
-                if still_here {
-                    window.apply_stamp_map(&map);
-                }
-            }
-        ));
-    }
-
-    /// Apply a `path → (hash, rating)` map to the items currently in the store.
-    fn apply_stamp_map(&self, map: &std::collections::HashMap<String, (String, i64)>) {
-        if map.is_empty() {
-            return;
-        }
-        let store = &self.imp().store;
-        for i in 0..store.n_items() {
-            let Some(item) = store.item(i).and_downcast::<ImageObject>() else {
-                continue;
-            };
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
+        let Some(db) = db.as_ref() else { return };
+        let map: std::collections::HashMap<String, (String, i64)> = db
+            .ratings_under(&folder.to_string_lossy())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(path, hash, rating)| (path, (hash, rating)))
+            .collect();
+        for item in items {
             if let Some(path) = item.file().path() {
                 if let Some((hash, rating)) = map.get(&path.to_string_lossy().into_owned()) {
                     item.set_content_hash(hash);
@@ -2185,12 +2145,15 @@ impl VitrineWindow {
                 }
             }
         }
-        self.refilter(); // freshly-stamped ratings may change a rating filter
     }
 
-    /// Re-stamp after indexing catches up (off the main thread).
+    /// Re-stamp the items currently in the store (after indexing catches up).
     fn restamp_store(&self) {
-        self.stamp_annotations_async();
+        let items: Vec<ImageObject> = (0..self.imp().store.n_items())
+            .filter_map(|i| self.imp().store.item(i).and_downcast::<ImageObject>())
+            .collect();
+        self.stamp_annotations(&items);
+        self.refilter(); // freshly-stamped ratings may change a rating filter
     }
 
     fn ensure_read_db(&self) {
@@ -2580,18 +2543,11 @@ impl VitrineWindow {
 
     fn populate(&self, items: Vec<ImageObject>) {
         let imp = self.imp();
+        // Stamp hash + rating before the items are shown, so cells paint their
+        // star overlay on first bind (a re-stamp follows once indexing catches up).
+        self.stamp_annotations(&items);
         imp.store.remove_all();
         imp.store.extend_from_slice(&items);
-        // Stamp ratings off the main thread (stamp_annotations_async) so opening a
-        // large folder never blocks on the DB query; stars appear a beat later,
-        // reactively via notify::rating.
-        self.stamp_annotations_async();
-        // A freshly-opened folder always starts at the top, whatever the sort
-        // order (deferred so it lands after the grid lays out the new model).
-        let scroller = imp.grid_scroller.clone();
-        glib::idle_add_local_once(move || {
-            scroller.vadjustment().set_value(0.0);
-        });
         imp.content_stack
             .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
         // The grid's SortListModel orders items live per the active sort — no
@@ -2884,7 +2840,11 @@ fn direction_id(descending: bool) -> &'static str {
 /// name tiebreak for a stable order, all reversed together when descending.
 fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Ordering {
     use std::cmp::Ordering;
-    let by_name = || a.cmp_by_name(b);
+    let by_name = || {
+        a.display_name()
+            .to_lowercase()
+            .cmp(&b.display_name().to_lowercase())
+    };
     let primary = match state.field {
         SortField::Name => Ordering::Equal,
         SortField::Size => a.size().cmp(&b.size()),
@@ -2977,8 +2937,10 @@ async fn collect_images(folder: &gio::File) -> Result<Vec<ImageObject>, glib::Er
         }
     }
 
-    // No initial sort: the grid's SortListModel orders items live per the active
-    // sort field (name by default), so pre-sorting here is redundant work (and a
-    // per-item `to_lowercase` allocation × the whole folder).
+    items.sort_by(|a, b| {
+        a.display_name()
+            .to_lowercase()
+            .cmp(&b.display_name().to_lowercase())
+    });
     Ok(items)
 }

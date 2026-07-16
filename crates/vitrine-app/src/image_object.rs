@@ -26,9 +26,6 @@ mod imp {
     pub struct ImageObject {
         pub file: RefCell<Option<gio::File>>,
         pub display_name: RefCell<String>,
-        /// Lowercased display name, precomputed so the grid's name sort compares
-        /// without allocating a `to_lowercase` String per comparison.
-        pub sort_name: RefCell<String>,
         /// Source mtime (unix seconds), for validating cached thumbnails and the
         /// "Modified" sort.
         pub mtime: Cell<i64>,
@@ -93,7 +90,6 @@ impl ImageObject {
         let imp = obj.imp();
         *imp.file.borrow_mut() = Some(file);
         *imp.display_name.borrow_mut() = display_name.to_string();
-        *imp.sort_name.borrow_mut() = display_name.to_lowercase();
         imp.mtime.set(mtime);
         imp.size.set(size);
         *imp.content_type.borrow_mut() = content_type.to_string();
@@ -106,14 +102,6 @@ impl ImageObject {
             .borrow()
             .clone()
             .expect("ImageObject always constructed with a file")
-    }
-
-    /// Allocation-free name comparison using the precomputed lowercased keys.
-    pub fn cmp_by_name(&self, other: &ImageObject) -> std::cmp::Ordering {
-        self.imp()
-            .sort_name
-            .borrow()
-            .cmp(&other.imp().sort_name.borrow())
     }
 
     pub fn display_name(&self) -> String {
