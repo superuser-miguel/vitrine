@@ -971,6 +971,24 @@ test.*
   default ~24) is our knob; glycin's pool is unbounded and must stay gated (see
   the deadlock gotcha in §8). *Test:* sweep the gate limit vs. main-loop stall +
   total fill time to find the real optimum per host (host glycin 2.1.5 vs //50).
+- **⭐ Cost-aware / lane-separated scheduling (LIKELY ROOT CAUSE — user, 2026-07-16).**
+  The gate is a flat count semaphore, so it treats a 24 MP AVIF and a 400 px JPEG
+  as equal. In a **mixed-size folder** (many small + some very large, the user's
+  real case), a burst of large decodes grabs the slots and each holds one for far
+  longer — **head-of-line blocking**: the small, *visible* thumbnails queued
+  behind them starve, so the grid fills erratically exactly where sizes vary.
+  Large sources also spike RAM (glycin often returns full-res on host loaders —
+  §8), so several concurrent big decodes = a transient memory bulge (cf. the 27k
+  OOM history). *Fixes to A/B:* (a) **estimate decode cost** — file bytes
+  (`item.size()`, known at enumerate) as the cold proxy, refined to pixel **area**
+  once enriched (`width*height` already indexed; `texture_cost` already computes
+  w·h·4); (b) run large decodes in a **separate low-concurrency lane** so they
+  can't monopolise the gate and starve small visible items (analogous to a
+  browser's per-host connection cap / HTTP-2 prioritisation); (c) **memory-budget
+  the gate** — bound *in-flight decoded bytes* (a weighted semaphore), not just
+  the count, so N big images don't decode at once. *Test:* the variable corpus in
+  §13.4 — a large image sharing the viewport must not delay the small visible
+  ones; RSS stays bounded with several large images visible at once.
 - **Per-frame decode budget / time-slicing.** Progressive renderers cap work per
   frame to avoid dropped frames. *Vitrine:* if priority-queue draining ever
   competes with the main loop, drain **at most k results/main-loop-iteration**
@@ -989,6 +1007,42 @@ The above all need two metrics the current hooks don't cleanly expose:
   order/latency instead of eyeballing.
 - **Time-to-visible-complete** — instrument the settle→"all visible cells have
   real textures" interval (the perceptual analogue of browser LCP for our grid).
+
+### 13.4 Test corpus: size & format variability (user, 2026-07-16)
+
+The committed fixtures (`tests/fixtures/images/`) are all uniform ~100×50 — fine
+for engine correctness, **useless for perf**, because the symptoms only appear
+when image *cost* varies. Perf test cases must run on a corpus that deliberately
+mixes:
+- **Size:** many small (e.g. 256–512 px) interleaved with some very large
+  (e.g. 6000×4000, ~24 MP) — and test several *arrangements*, since arrangement
+  is what triggers head-of-line blocking: a large image at the **top of the
+  viewport**, a **cluster** of large images, and large images **sprinkled** among
+  small ones.
+- **Format:** JPEG (fast) mixed with AVIF / JXL (much slower to decode) — decode
+  cost varies by format, not just by pixels, so the mix must too.
+- **Scale:** enough items (thousands) that virtualization + the gate actually
+  engage.
+
+**Do not commit this corpus** — it would bloat the repo (the fixture generator is
+deliberately kept under a couple MB). Add a *separate* generator
+(`tests/fixtures/perf_corpus.py` or a `VITRINE_*` dev mode) that synthesises a
+configurable mixed corpus into a scratch/temp dir on demand, so CI and manual
+perf runs build it fresh.
+
+**Assertions this corpus unlocks (tie to §13.1–13.3 metrics):**
+1. *No head-of-line starvation* — with a large image sharing the viewport, the
+   small visible thumbnails still reach a real texture within the target latency
+   (they must not wait on the big decode).
+2. *Bounded memory* — several large images visible/decoding at once keeps RSS
+   under budget (no full-res pile-up).
+3. *Fill order holds under cost variance* — the viewport-ordered scheduler
+   (§13.1) still fills top-down/centre-out even when decode times differ wildly.
+4. *Format-mix latency* — a viewport of AVIF/JXL fills within a tolerable factor
+   of an equivalent JPEG viewport (surfaces decoder-bound stalls).
+
+Run all of §13.1's cases against **each arrangement**, not just a uniform folder —
+uniform fixtures would hide the very bug the user is hitting.
 
 References (for whoever builds this): Chrome fetchpriority / LCP request
 discovery (web.dev/articles/fetch-priority, developer.chrome.com/docs/performance/insights/lcp-discovery),
