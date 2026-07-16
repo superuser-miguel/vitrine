@@ -1051,3 +1051,77 @@ Loupe/glycin sandboxed per-file decode (blogs.gnome.org/sophieh 2023-08-30),
 gThumb parallel thumbnailers (gitlab.gnome.org/GNOME/gthumb), async multilevel
 texture pipelines / progressive refinement (US6618053B1; image-caching-for-fast-
 scroll US patent 9501415).
+
+## 14. UX backlog: viewer pan + removable-media bookmarks (user, 2026-07-16)
+
+Two nice-to-haves flagged during the GPU/UI "lunch-and-learn" discussions.
+
+### 14.1 Click-drag pan in the viewer
+
+**Current state.** The viewer *already* pans when zoomed past fit — the image
+lives in `picture_scroller` (a `GtkScrolledWindow`), so scroll-wheel and
+scrollbars move it (viewer.rs). What's missing is the **grab-hand click-drag
+gesture** everyone expects from an image viewer (Loupe, browsers): press and drag
+the image itself to move it. Useful exactly when a large image is zoomed in.
+
+**Design.**
+- Add a `gtk::GestureDrag` on the picture (or scroller viewport). On
+  `drag-update`, pan by subtracting the delta from
+  `picture_scroller.hadjustment()`/`vadjustment()` (clamped to content bounds).
+- Cursor feedback: `grab` cursor when the content exceeds the viewport (pannable),
+  `grabbing` while dragging; default arrow at fit (nothing to pan).
+- Optional polish: kinetic/inertial fling after release (ScrolledWindow has
+  kinetic scrolling, but a raw drag bypasses it — would need momentum); middle-
+  button-drag pan; "zoom to point under cursor" so Ctrl+scroll zoom keeps the spot
+  under the pointer fixed (pairs naturally with drag-pan).
+- Two-finger touchpad/touch pan already works via scroll — this is specifically
+  the mouse click-drag path.
+
+**Test cases.** Zoom in on a large image → drag pans and clamps at edges; cursor
+changes to grab/grabbing; at fit there's nothing to pan (no cursor change, no
+drift); drag-pan + Ctrl+scroll-zoom compose sanely.
+
+### 14.2 Removable-media (USB) bookmarks — offline / greyed state
+
+**Problem.** Bookmarks persist as `{name, path}` (settings.ini). A folder on a USB
+drive lives under `/run/media/<user>/<label>/…` (or `/media/…`); unplug the drive
+and that path vanishes. Today `refresh_bookmarks` renders every bookmark
+identically with a folder icon and **no availability check**, so an offline USB
+bookmark looks normal and clicking it opens a broken/empty folder. We want it
+**greyed = offline**, kept in the list, and auto-revived on reconnect.
+
+**Logic to build.**
+- **Detect availability without blocking.** `Path::exists()` is the naive check
+  but can stall on stale network mounts and can't tell "drive unplugged" from
+  "folder deleted." Use GIO **`gio::VolumeMonitor`**: enumerate current mounts and
+  subscribe to `mount-added` / `mount-removed` (+ `volume-*`) to re-evaluate and
+  refresh the greyed state **live, no polling**. Resolve a bookmark's enclosing
+  mount via `gio::File::find_enclosing_mount` (or prefix-match against mounted
+  roots).
+- **Three states, not two:**
+  - *Online* — enclosing mount present and path resolves → normal row.
+  - *Offline* — the path's removable mount root isn't currently mounted → **grey /
+    insensitive**, swap the icon to `drive-removable-media-symbolic` (or an offline
+    badge), keep the bookmark.
+  - *Missing* — mount present but the folder was deleted → distinct "missing"
+    treatment (offer *Remove bookmark?*), NOT the same as offline.
+- **Interaction.** Clicking an offline bookmark shouldn't open an empty grid —
+  either attempt `gio::Volume::mount` if the volume is present-but-unmounted, or
+  toast "Drive not connected." On reconnect, VolumeMonitor un-greys it
+  automatically.
+- **Robustness follow-up (fragile-path problem).** USB drives can remount at a
+  *different* path (label collisions → `LABEL_1`, etc.), which silently breaks a
+  path-only bookmark. Robust version: store the **volume UUID/label + relative
+  path** and re-resolve the live mount point on access. Path-only + offline
+  detection is fine for a first cut; UUID re-resolution is the hardening step.
+- **⚠ Sandbox (ties to §4).** Under Flatpak, reaching `/run/media/…` needs the
+  right filesystem grant (or portal); a USB bookmark only works if the sandbox can
+  see the mount. Bookmarks added by drag/chooser outside the granted roots may be
+  unreadable even when the drive *is* plugged in — the "offline vs. no-permission"
+  distinction should surface a sensible message rather than a blank folder.
+
+**Test cases.** Bookmark a USB folder → unplug → row greys out (offline), no crash,
+no error spam; replug → auto-revives via VolumeMonitor; click while offline →
+mount-attempt or clear toast, never a broken empty grid; delete the folder while
+mounted → "missing" state distinct from offline; (stretch) drive remounts at a new
+path → UUID re-resolution still finds it.
