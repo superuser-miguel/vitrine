@@ -13,6 +13,56 @@ phase's acceptance criteria pass. Within a phase, keep commits small and topical
 
 ---
 
+## Status & North Star (@ `v1.0-stable`, 2026-07-16)
+
+**North Star.** Fast, *smooth* browsing of large image libraries — where
+Nautilus / Loupe / gThumb get sluggish on tens of thousands of images, Vitrine
+stays fluid. The bar is **browser-level thumbnail scrolling**: a browser renders a
+10k-image page in consistent visible order while scrolling; we want that. "Smooth"
+is judged **by hand**, not by a stall metric.
+
+**Anchor.** `v1.0-stable` (git tag) is the known-good, hand-verified baseline:
+windows slide with no lag, hover tracks the cursor, launch settles after 2–3 runs.
+`git checkout v1.0-stable` to return to it before any interaction-path experiment.
+
+**Shipped (v1 feature-complete).** DONE — the phase/feature sections below (§7,
+§10.6, §12.1) are kept for design rationale, not as a to-do list: browse
+(virtualized grid, Nautilus-style sort, icon-size, trash) · viewer + filmstrip +
+zoom · review (tags, 0–5 ratings, comments) · collections (catalogs + smart) ·
+filter bar · find-duplicates (exact + scalable "Similar" BK-tree) · sidebar
+(Places/Folders/Collections switcher, Nautilus bookmarks, Back/Forward) · XMP
+sidecar export · background content-hash index with EXIF/pHash enrichment.
+
+**Hard-won process lessons (2026-07-16 — do not relearn).**
+1. **A metric is never the acceptance test for *feel*.** LOADTEST worst-stall
+   *improved* while the UI got choppier. Engine correctness / crashes / memory are
+   headless-verifiable; scroll, hover, pan, fill smoothness are **only** verified by
+   the user actually using it.
+2. **Interaction-path changes land one at a time, user-verified.** Stacking four
+   perf changes made the regression un-bisectable. One change → user feels it →
+   keep or revert → next.
+3. **Prefer boring over clever on the hot path.** `set_incremental(true)` on the
+   sort model was clever and shuffled rows while settling → mid-scroll + hover lag.
+   Off-main DB stamping was boring and fine. Pick boring.
+4. **Tag a known-good state before experimenting.** `v1.0-stable` exists so a bad
+   run costs minutes, not trust.
+
+**Realigned perf priorities (honest, post-learnings).** The real felt costs, in
+order — each attempted *one at a time, against the anchor, user-verified*; detail,
+evidence, and rejected approaches in §13:
+1. **Enrichment must yield to browsing** — background pHash-decode of the whole
+   library shouldn't fight the visible thumbnails (the "why Nautilus beats us").
+2. **CPU off-main downscale** — replace the GSK `render_texture` downscale with a
+   CPU worker (`image` crate); kills the ~1.7 s per-launch Vulkan compile *and* the
+   per-large-image main-thread cost in one move.
+3. **Warm the cache during indexing** — enrichment already decodes every image;
+   have it write the display thumbnail too, so an indexed folder never decodes on
+   demand.
+4. **Fill metric, then viewport-ordered decode** — make fill order/latency
+   *measurable* (§13.3), then decode visible-first like a browser.
+
+---
+
 ## 0. Positioning (context, read once)
 
 - **Loupe** is the viewer done right but has no grid, no gallery, no filmstrip.
@@ -876,316 +926,128 @@ A Nautilus-style top path bar showing e.g. `/home/user/Pictures/`:
 UI) → 12.2 Tabs (the `BrowserView` extraction is the real work). All three are
 post-v1 polish; none block shipping v1.
 
-## 13. Rendering & decode-scheduling performance (research backlog — user, 2026-07-16)
+## 13. Performance — findings & backlog (North Star detail)
 
-Perf is the app's north star. The decode/thumbnail pipeline is already
-*viewport-aware* (virtualized grid, bind-driven loads, 90ms scroll-settle
-debounce, directional prefetch `PREFETCH_AHEAD 64` / `PREFETCH_BEHIND 16`, a
-concurrency gate `thumbnails::load_gate`), but it is **not yet viewport-
-*ordered*** — when a settle fires, `flush_pending` (window.rs) spawns decodes in
-bind/drain order through a flat semaphore, so completion order is "whatever
-decodes fastest," and thumbnails pop in scattered rather than filling outward
-from where the eye is. This section captures the specific fix plus a researched
-catalog of scheduling/rendering ideas from browsers, virtualized-list libraries,
-GNOME image apps, and GPU texture pipelines — each mapped to Vitrine and to a
-concrete test. **None are needed to ship; all are perf polish to A/B on real
-folders.**
+Perf is the North Star (see *Status & North Star* at the top). This section holds
+what we **proved** on real data and the honest backlog. Everything here is
+attempted **one at a time, user-verified against `v1.0-stable`** — a stall metric
+is not the acceptance test for feel (lesson 1). None of it blocks; the shipped app
+is smooth.
 
-Key fact grounding all of this: **the app already has the viewport info it
-needs** — the GPU is downstream and knows nothing about scrolling; GTK's
-virtualized `GridView` calls `connect_bind` only for on-screen cells (+ buffer)
-and hands us `list_item.position()`, and `grid_scroller.vadjustment()` gives the
-exact pixel viewport. So prioritization is purely an app-layer scheduling
-decision, no engine change.
+### 13.1 What we proved (2026-07-16, on the user's real 13k-image folders)
 
-### 13.1 Viewport-ordered decode scheduler (the immediate optimization)
+- **Enrichment starves the foreground — the primary "why Nautilus beats us."**
+  Interactive thumbnail decode and background pHash-enrichment contend for the
+  same CPU / glycin pool (which plateaus ~8 concurrent). `run_enrichment` decodes
+  flat-out until the backlog drains, never yielding — so a fresh backlog (~11k of
+  105k here) saturates decode *while you browse*. Nautilus has no decode-everything
+  pass; that's the gap. Measured (LOADTEST worst-stall, 13k folder): baseline
+  **723 ms**; throttling enrichment to 1 → **392 ms** (−46%). ⚠ Worst-stall is a
+  poor proxy for *fill smoothness* (lesson 1) — we need the fill metric (§13.3).
+- **Mixed image size compounds it.** The decode gate is a flat count semaphore; a
+  24 MP AVIF and a 400 px JPEG count the same. A burst of large decodes head-of-
+  line-blocks the small *visible* thumbnails and spikes RAM. The user's folders
+  span ~40× *within one folder* (p50 ≈ 250 KB, max ≈ 8.7 MB; some 12 MP).
+- **Per-launch shader compile.** The first GSK `render_texture` (first thumbnail
+  downscale) triggers a **~1.7 s Vulkan pipeline compile**, and it is **not cached
+  across launches** (radv recompiles per process). Only paid when something
+  actually downscales — all-cached browsing never pays it.
+- **Folder-open populate** was a synchronous ~533 ms spike (sort + filter + DB
+  stamp of 13k at once). NOT the scanner — `classify` skips unchanged files by
+  `(size, mtime)`, so back-nav is stat-only and never re-hashes.
 
-**Problem.** Loads for a settle batch complete in decode-time order, not visual
-order; and if you scroll again before the queue drains, a now-stale queued load
-still holds its turn at the gate ahead of newly-visible items.
+### 13.2 What's worth doing (priority order)
 
-**Design.**
-- Replace the flat `pending` drain + plain semaphore with a **priority queue**
-  keyed by *distance from the viewport* (top-visible index, or viewport centre
-  for centre-out fill). Compute the reference index from
-  `grid_scroller.vadjustment()` (value + page_size ÷ row height) at flush time.
-- Feed the gate from that priority queue so the visible region resolves **first
-  and in order**, then radiates outward, then the prefetch margins fill.
-- **Re-prioritize on each scroll settle**: newly-visible items jump ahead;
-  scrolled-past queued items are dropped or demoted (partially done today —
-  `flush_pending` already skips cells whose item changed).
-- Keep the existing debounce (don't decode mid-fling) and the directional
-  prefetch (bias in the scroll direction — see 13.2/overscan).
+1. **Enrichment yields to browsing.** Pause/throttle enrichment while thumbnail
+   loads are pending (a shared "UI busy" signal, checked **once per batch** — not
+   per item, which spawns a poller per decode and churns the main loop). Keep the
+   single-writer queue intact; throttle *admission*, not write order. Opportunistic:
+   capture pHash from the viewer's full decode to skip a separate enrichment decode.
+2. **CPU off-main downscale** (subsumes the shader problem). Replace the GSK
+   `render_texture` downscale with a CPU downscale on a worker thread (`image`
+   crate): no Vulkan pipeline compile *ever*, the per-large-image downscale moves
+   off the main thread, and the dmabuf-FD/readback dance goes away. Highest-leverage
+   single change.
+3. **Warm the cache during indexing.** Enrichment already decodes every image (for
+   pHash) — have it also produce + cache the display thumbnail, so an indexed folder
+   opens warm and never decodes on demand.
+4. **Viewport-ordered decode** (the "browser trick" the user asked about — *never
+   built*). A priority queue keyed by distance from the viewport so visible
+   thumbnails decode first, then radiate outward. Do this **last** — items 1–3
+   remove most of the pressure it manages. Do NOT confuse it with the sort-model
+   `incremental` footgun (§13.4); it reorders *decode priority*, never the grid.
+5. **Cost-aware / lane-separated gate.** Estimate decode cost (file bytes cold →
+   pixel area once enriched; `texture_cost` already computes w·h·4) and give large
+   decodes a separate low-concurrency lane + an in-flight-bytes memory budget, so
+   they can't starve small visible ones.
 
-**Test cases (extend VITRINE_SCROLLTEST / VITRINE_LOADTEST):**
-1. *Fill-order correctness* — on a cold folder, assert the first N completed
-   thumbnails are the top-of-viewport items (by position), not arbitrary.
-2. *Time-to-first-visible-thumb* — measure ms from folder-open (or scroll-stop)
-   to the moment every currently-visible cell has a real texture; compare
-   scheduler on/off. This is the metric that maps to perceived snappiness (cf.
-   browser LCP — see 13.2).
-3. *Scroll-jump staleness* — scroll to A, immediately jump to B before A drains;
-   assert B's visible cells decode before any remaining A-only cells.
-4. *No regression on cached folders* — with everything cached, scheduler adds no
-   measurable stall (priority queue overhead must be negligible).
-5. *Gate saturation* — big icon size + cold 27k folder: main-loop stall stays at
-   the current release floor (~9.6s scrolltest, ~52ms worst LOADTEST stall).
+Adjacent tunables, measure per host: velocity-adaptive prefetch margins
+(`PREFETCH_AHEAD/BEHIND`); gate size (`VITRINE_LOAD_LIMIT`); relevance-aware LRU
+eviction (protect near-viewport thumbs); cancel decodes for cells flung far past.
 
-### 13.2 Concept catalog (from real systems — A/B candidates)
+### 13.3 Measurement we still need
 
-For each: *what it is · where it comes from · how it maps to Vitrine · how to
-test.*
+Worst-stall (LOADTEST) can't see fill *order/latency* — the thing most of §13.2
+improves, and the reason a bad change once looked "good." Build a **fill-order log**
+`(position, visible_at_completion, ms_since_settle)` and a **time-to-visible-
+complete** metric (settle → every visible cell has a real texture; the grid
+analogue of browser LCP). Run perf tests on a **variable corpus** (generated, *not*
+committed — it would bloat the repo): thousands of files, ~40× size spread in
+several arrangements (large at top-of-viewport / clustered / sprinkled), JPEG mixed
+with slow AVIF/JXL, plus non-image siblings — uniform fixtures hide the bug. Assert:
+no head-of-line starvation, bounded RSS, fill-order holds under cost variance.
 
-- **Priority hints / boost-visible-first.** Browsers start in-viewport images at
-  Low, then boost once layout finds them visible — often "too late." `fetchpriority`
-  lets the important image start High immediately (median 21ms vs 102ms to first
-  byte). *Vitrine:* the 13.1 priority queue *is* our fetchpriority; additionally
-  mark the item under the cursor / selected / just-activated as **High** so it
-  jumps the queue. *Test:* case 13.1.2 above, plus "selected item decodes first."
-- **Overscan / directional prefetch tuning.** Virtualized lists render a small
-  buffer beyond the viewport; overscan is a direct trade (fewer blank flashes vs.
-  more work), and good ones bias in the scroll direction. *Vitrine:* we have
-  `PREFETCH_AHEAD/BEHIND`; make them **velocity-adaptive** (faster scroll → larger
-  ahead margin, smaller behind) using vadjustment delta over time. *Test:* blank-
-  cell count during a fixed fling at several speeds; RSS stays flat (don't let
-  overscan defeat virtualization).
-- **Cancel / deprioritize scrolled-past work.** Windowing libs decode far-from-
-  viewport items at low priority "after running interactions." *Vitrine:* partly
-  done (debounce + skip-changed-cell); extend to **cancel in-flight decodes** for
-  items flung far off-screen (glycin decode is a subprocess — cancellation frees
-  the gate slot sooner). *Test:* VITRINE_CYCLE across dirs; assert no wasted
-  completed decodes for never-settled cells; FD/gate-slot flatness.
-- **Progressive / coarse-first fill.** GPU texture pipelines draw a coarse mip
-  when there isn't frame time to decode full detail, refining later; browsers
-  show a placeholder then swap. *Vitrine:* we downscale already; consider a
-  **two-pass fill** — blit the shared-cache 256px (already read-cheap) instantly,
-  then swap in the sharp x-large/xx-large bucket for the current icon size. *Test:*
-  time-to-*any*-pixels vs time-to-sharp; ensure no visible flicker on swap.
-- **Relevance-aware cache eviction.** Texture caches evict by more than raw LRU —
-  keep what's near the region of interest. *Vitrine:* `SizedLru` is pure LRU;
-  consider biasing eviction to protect items near the current viewport/folder.
-  *Test:* scroll away and back; assert near-viewport thumbnails survived. (Tie to
-  [[vitrine-thumbnail-cache-strategy]].)
-- **More parallel thumbnailers.** gThumb sped up thousand-image dirs by starting
-  more thumbnailers in parallel. *Vitrine:* the gate limit (`VITRINE_LOAD_LIMIT`,
-  default ~24) is our knob; glycin's pool is unbounded and must stay gated (see
-  the deadlock gotcha in §8). *Test:* sweep the gate limit vs. main-loop stall +
-  total fill time to find the real optimum per host (host glycin 2.1.5 vs //50).
-- **⭐ Cost-aware / lane-separated scheduling (LIKELY ROOT CAUSE — user, 2026-07-16).**
-  The gate is a flat count semaphore, so it treats a 24 MP AVIF and a 400 px JPEG
-  as equal. In a **mixed-size folder** (many small + some very large, the user's
-  real case), a burst of large decodes grabs the slots and each holds one for far
-  longer — **head-of-line blocking**: the small, *visible* thumbnails queued
-  behind them starve, so the grid fills erratically exactly where sizes vary.
-  Large sources also spike RAM (glycin often returns full-res on host loaders —
-  §8), so several concurrent big decodes = a transient memory bulge (cf. the 27k
-  OOM history). *Fixes to A/B:* (a) **estimate decode cost** — file bytes
-  (`item.size()`, known at enumerate) as the cold proxy, refined to pixel **area**
-  once enriched (`width*height` already indexed; `texture_cost` already computes
-  w·h·4); (b) run large decodes in a **separate low-concurrency lane** so they
-  can't monopolise the gate and starve small visible items (analogous to a
-  browser's per-host connection cap / HTTP-2 prioritisation); (c) **memory-budget
-  the gate** — bound *in-flight decoded bytes* (a weighted semaphore), not just
-  the count, so N big images don't decode at once. *Test:* the variable corpus in
-  §13.4 — a large image sharing the viewport must not delay the small visible
-  ones; RSS stays bounded with several large images visible at once.
-- **Per-frame decode budget / time-slicing.** Progressive renderers cap work per
-  frame to avoid dropped frames. *Vitrine:* if priority-queue draining ever
-  competes with the main loop, drain **at most k results/main-loop-iteration**
-  (idle callback) so applying textures never janks a scroll. *Test:* VITRINE_LOADTEST
-  worst-stall must not regress while a large batch applies.
-- **Decode-ahead in scroll direction (prefetch as prediction).** Covered by
-  overscan above, but note the *prediction* angle: use vadjustment velocity to
-  prefetch where the user is *going*, not a symmetric margin. Already partially
-  reflected in AHEAD>BEHIND; make it dynamic.
+### 13.4 Rejected / dead ends (do not retry)
 
-### 13.3 Harness additions to make these measurable
+- **`set_incremental(true)` on the sort/filter models.** Killed the open-freeze
+  *metric* but shuffled rows while settling → mid-scroll + choppy hover. The
+  cautionary tale behind lesson 3 (boring > clever on the hot path). Reverted.
+- **Shader pre-warm at startup.** Moves the ~1.7 s compile to launch, but it's
+  *per-launch* (not cached), so it *forces* the cost onto every launch — including
+  all-cached browsing that would never pay it. A regression on the fast path.
+  Reverted; superseded by CPU off-main downscale (§13.2 item 2), which removes the
+  compile entirely.
+- **First grab-hand pan attempt** — see §14.1 (the gesture fought the ScrolledWindow).
 
-The above all need two metrics the current hooks don't cleanly expose:
-- **Fill-order log** — a VITRINE_DEBUG mode that records, per decode completion,
-  `(position, was_visible_at_completion, ms_since_settle)` so we can assert
-  order/latency instead of eyeballing.
-- **Time-to-visible-complete** — instrument the settle→"all visible cells have
-  real textures" interval (the perceptual analogue of browser LCP for our grid).
+### 13.5 Notes
 
-### 13.4 Test corpus: size & format variability (user, 2026-07-16)
+- **DB scale is a non-issue.** 105k files → 51 MB (~500 B/row, indexed
+  path/hash/pHash/date); SQLite scales to millions of rows / hundreds of MB. The
+  cost of a big library is the one-time enrichment decode pass, never the DB size.
+  Index freely.
+- **Splash / "building library" warm-up (idea, unbuilt).** A first-run splash
+  (like Lightroom/digiKam, or GIMP/Krita covering init) can honestly hide the
+  *bounded* launch work — shader compile, DB open, first screenful — but NOT the
+  unbounded library hashing (that must background). On-brand for a catalog tool,
+  and it *rescues* the pre-warm (a 1.7 s freeze behind an honest splash is fine,
+  not a regression). A complement to §13.2, not a substitute. A feel change → verify
+  by hand.
 
-The committed fixtures (`tests/fixtures/images/`) are all uniform ~100×50 — fine
-for engine correctness, **useless for perf**, because the symptoms only appear
-when image *cost* varies. Perf test cases must run on a corpus that deliberately
-mixes:
-- **Size:** many small (e.g. 256–512 px) interleaved with some very large
-  (e.g. 6000×4000, ~24 MP) — and test several *arrangements*, since arrangement
-  is what triggers head-of-line blocking: a large image at the **top of the
-  viewport**, a **cluster** of large images, and large images **sprinkled** among
-  small ones.
-- **Format:** JPEG (fast) mixed with AVIF / JXL (much slower to decode) — decode
-  cost varies by format, not just by pixels, so the mix must too.
-- **Scale:** enough items (thousands) that virtualization + the gate actually
-  engage.
+References: Chrome fetchpriority / LCP (web.dev/articles/fetch-priority),
+react-window overscan, Loupe/glycin sandboxed decode (blogs.gnome.org/sophieh),
+gThumb parallel thumbnailers.
 
-**Do not commit this corpus** — it would bloat the repo (the fixture generator is
-deliberately kept under a couple MB). Add a *separate* generator
-(`tests/fixtures/perf_corpus.py` or a `VITRINE_*` dev mode) that synthesises a
-configurable mixed corpus into a scratch/temp dir on demand, so CI and manual
-perf runs build it fresh.
+## 14. UX backlog: viewer pan + removable-media bookmarks
 
-**Assertions this corpus unlocks (tie to §13.1–13.3 metrics):**
-1. *No head-of-line starvation* — with a large image sharing the viewport, the
-   small visible thumbnails still reach a real texture within the target latency
-   (they must not wait on the big decode).
-2. *Bounded memory* — several large images visible/decoding at once keeps RSS
-   under budget (no full-res pile-up).
-3. *Fill order holds under cost variance* — the viewport-ordered scheduler
-   (§13.1) still fills top-down/centre-out even when decode times differ wildly.
-4. *Format-mix latency* — a viewport of AVIF/JXL fills within a tolerable factor
-   of an equivalent JPEG viewport (surfaces decoder-bound stalls).
+### 14.1 Click-drag pan in the viewer — BUILT then REVERTED (fix the gesture conflict)
 
-Run all of §13.1's cases against **each arrangement**, not just a uniform folder —
-uniform fixtures would hide the very bug the user is hitting.
+Built (68bf3de), then reverted: the grab-hand drag **jittered against the pan
+boundaries**. The `GtkGestureDrag` on the picture *and* the enclosing
+`GtkScrolledWindow` both tried to move the image, so at the clamp it stuttered —
+the user's "hitting a ceiling and trying to push it through."
 
-**Real reference corpus (user's gallery-dl folders, measured 2026-07-16).** Six
-Instagram folders, ~44k images / ~20 GB. Per folder: **7k–14k images**, byte size
-**p50 ≈ 200–340 KB, p90 ≈ 0.8–1.3 MB, p99 ≈ 1.4–3.4 MB, max ≈ 3–8.7 MB** — a
-~40× spread *within a single folder*. They also hold many **non-image files**
-(JSON sidecars, videos: one folder is 7,699 files but 1,807 images), i.e. the
-enumerate/scan walks far more entries than it displays. The synthetic corpus
-should match this shape: thousands of files, ~40× size spread, JPEG-dominant with
-some AVIF/JXL, and a chunk of non-image siblings.
+**Current state.** The viewer already pans when zoomed past fit via scroll-wheel /
+scrollbars (`picture_scroller`). The missing piece is a *non-fighting* grab-hand
+gesture.
 
-### 13.5 CONFIRMED root cause — background enrichment starves the foreground (2026-07-16)
-
-Diagnosed from code + the corpus above when the user reported "UI slow again,
-images not loading" after adding the folders. **This is the primary "why Nautilus
-beats us."**
-
-- **Two decode gates, one real resource.** Interactive thumbnail loads use
-  `thumbnails::load_gate` (~24); background enrichment uses `decode::decode_gate`
-  (`min(cores, 8)`, floor 4). They're separate semaphores but both spawn glycin
-  subprocess decodes that contend for the **same CPU cores / glycin pool**, which
-  the decode-gate note itself says **plateaus at ~8 concurrent**.
-- **Enrichment runs flat-out and never yields.** `run_enrichment` decodes whole
-  `TakeBatch` batches (64) concurrently, gated only by `decode_gate`, in a tight
-  loop until `paths_needing_enrichment` is empty. So a fresh backlog (here **~11k
-  un-enriched** of 105k) keeps ~8 full-image decodes running continuously,
-  **saturating decode throughput regardless of whether the user is actively
-  browsing**. The visible thumbnails then queue behind / lose CPU to enrichment →
-  slow, out-of-order fill. **Nautilus has no such decode-everything pass** — that
-  is precisely the gap.
-- **Mixed size compounds it** (§13.2 ⭐): the ~40× spread means big decodes hold
-  their slot far longer, so both the enrichment lane and the interactive lane
-  suffer head-of-line blocking.
-- The scanner is NOT at fault: `classify` skips unchanged files by `(size,mtime)`
-  (scanner.rs), so back-nav re-walks (stat only) but never re-hashes; its slowness
-  is the same decode contention hitting thumbnail reloads.
-
-**Measured evidence (2026-07-16, installed Flatpak, real `elizarosewatson`
-folder, 13,235 images, VITRINE_LOADTEST = worst main-loop stall over 10s):**
-- Baseline (enrichment competing): **723 ms**.
-- Enrichment throttled to 1 (`VITRINE_DECODE_LIMIT=1`): **392 ms** (−46%).
-- **After enrichment-yield fix** (commit — probe() awaits yield_to_foreground):
-  **533 ms** (−26% from baseline), backlog still 10,797. The modest LOADTEST delta
-  is a *measurement artifact*: worst-single-stall is dominated by the synchronous
-  **populate spike** (below), not decode — the yield fixes the *sustained* decode
-  starvation while browsing, which worst-stall under-measures. **Need the fill/
-  time-to-visible metric (§13.3) to score it properly.**
-- **Second cause found — synchronous populate spike.** `Window::populate`
-  (window.rs) runs on one main-loop iteration for the whole folder:
-  `stamp_annotations` (a `ratings_under` DB query + a loop over every item) then
-  `store.extend_from_slice(13k items)` → the SortListModel re-sorts and
-  FilterListModel re-filters all 13k at once. That is the folder-OPEN freeze (the
-  worst stall), distinct from decode contention. Fix: chunk/defer the insert
-  (extend in batches across iterations), and move stamping off the open path
-  (stamp lazily on bind, or after first paint). This is "Nautilus beats us on
-  folder open"; the enrichment-yield is "…and while browsing."
-- Interpretation: ~330 ms of the stall is enrichment contention; the remaining
-  ~392 ms is the interactive mixed-size path (big-image decode head-of-line +
-  the GPU downscale/readback done on the main thread for large images). For
-  reference, the post-Phase-1 floor on cold uniform folders was ~52 ms. Both
-  causes share the fix below; the interactive residual also wants the §13.1
-  viewport-ordered, cost-aware scheduler and moving large-image downscale
-  off-main. **723 ms is the "before" number to beat.**
-
-**Profiled 2026-07-16 (#1 populate fix landed).** Per-step timing on the 13k
-folder settled what worst-stall couldn't: `collect_images` name-sort 20 ms
-(redundant — removed), **`populate` synchronous 533 ms → 2 ms** (incremental
-sort/filter + off-main stamping worked), and the real worst-stall spikes were
-(a) a **~1.7 s GSK/Vulkan pipeline compile** on the first `render_texture` and
-(b) genuine **per-large-image GPU downscale on the main thread**
-(~75 ms for a 3024×4032 / 12 MP photo) — that's item #6 (off-main downscale), and
-these folders really do carry 12 MP images. Net: the recurring folder-open freeze
-is fixed; the remaining felt cost during browsing is per-large-image downscale +
-cold-folder decode throughput.
-
-**Shader pre-warm — tried and REJECTED (measured 2026-07-16).** Kicked a throwaway
-`render_texture` at startup to move the compile off the first-thumbnail path.
-Measurement killed it: the compile is **~1.7 s on *every* launch that downscales,
-NOT cached across launches** (`radv`/GSK-Vulkan recompiles the pipeline per
-process; the earlier "warm" run was fast only because it browsed *cached*
-thumbnails and never downscaled). So an unconditional pre-warm *forces* 1.7 s onto
-every launch — including cached-only browsing that would never have paid it — a
-regression on the fast path. Reverted. **The right fix is #6, and it subsumes
-this:** move the downscale to a **CPU worker thread** (the `image` crate) instead
-of GSK `render_texture`. That eliminates the Vulkan pipeline compile entirely (no
-1.7 s, ever) *and* takes the per-large-image downscale off the main thread — one
-change kills both, and drops the dmabuf-FD/readback dance too.
-
-**Fix (recommended, do next).** Make enrichment a true *background* task that
-**yields to the interactive foreground**: pause/throttle enrichment while thumbnail
-loads are pending or a scroll is in flight (a shared "UI busy" signal checked
-between batches/items), resuming after a short quiet period; and/or fold both into
-one **priority-aware decode admission** where visible loads preempt enrichment
-(§13.1). Keep enrichment correctness (single-writer monotonic queue) intact —
-throttle *admission*, not the write ordering. Opportunistic win: when a full image
-is decoded for the viewer, capture its pHash then to avoid a separate enrichment
-decode. *Test:* on the real corpus, time-to-visible-complete while a large
-enrichment backlog is pending must approach the backlog-idle case.
-
-**DB scale (user asked "how large can the DB be?").** Not a concern. Current:
-105,207 files → 51 MB (~500 B/row incl. indexes on path/hash/phash/date). SQLite's
-practical ceiling is terabytes; millions of rows stay fast on the B-tree indexes
-(~500 MB at 1M images). The real cost of a big library is the **one-time
-enrichment decode pass** (above) and the bounded RAM/disk caches — never the DB
-size. Index freely.
-
-References (for whoever builds this): Chrome fetchpriority / LCP request
-discovery (web.dev/articles/fetch-priority, developer.chrome.com/docs/performance/insights/lcp-discovery),
-react-window overscan (web.dev/articles/virtualize-long-lists-react-window),
-Loupe/glycin sandboxed per-file decode (blogs.gnome.org/sophieh 2023-08-30),
-gThumb parallel thumbnailers (gitlab.gnome.org/GNOME/gthumb), async multilevel
-texture pipelines / progressive refinement (US6618053B1; image-caching-for-fast-
-scroll US patent 9501415).
-
-## 14. UX backlog: viewer pan + removable-media bookmarks (user, 2026-07-16)
-
-Flagged during the GPU/UI "lunch-and-learn" discussions. **§14.1 (pan) is
-promoted from nice-to-have to a committed near-term add** (user: "required action
-IMO") — it's the next-up implementation task. §14.2 follows.
-
-### 14.1 Click-drag pan in the viewer — ⭐ NEXT UP (committed)
-
-**Current state.** The viewer *already* pans when zoomed past fit — the image
-lives in `picture_scroller` (a `GtkScrolledWindow`), so scroll-wheel and
-scrollbars move it (viewer.rs). What's missing is the **grab-hand click-drag
-gesture** everyone expects from an image viewer (Loupe, browsers): press and drag
-the image itself to move it. Useful exactly when a large image is zoomed in.
-
-**Design.**
-- Add a `gtk::GestureDrag` on the picture (or scroller viewport). On
-  `drag-update`, pan by subtracting the delta from
-  `picture_scroller.hadjustment()`/`vadjustment()` (clamped to content bounds).
-- Cursor feedback: `grab` cursor when the content exceeds the viewport (pannable),
-  `grabbing` while dragging; default arrow at fit (nothing to pan).
-- Optional polish: kinetic/inertial fling after release (ScrolledWindow has
-  kinetic scrolling, but a raw drag bypasses it — would need momentum); middle-
-  button-drag pan; "zoom to point under cursor" so Ctrl+scroll zoom keeps the spot
-  under the pointer fixed (pairs naturally with drag-pan).
-- Two-finger touchpad/touch pan already works via scroll — this is specifically
-  the mouse click-drag path.
-
-**Test cases.** Zoom in on a large image → drag pans and clamps at edges; cursor
-changes to grab/grabbing; at fit there's nothing to pan (no cursor change, no
-drift); drag-pan + Ctrl+scroll-zoom compose sanely.
+**Redo — the actual fix.** The bug was the gesture and the scroller both driving
+the image. Make exactly one of them move it: either claim the gesture / set
+propagation so the ScrolledWindow ignores the drag while our handler drives its
+adjustments, or disable the scroller's own kinetic panning during the drag. Then
+the original design applies — drive `hadjustment`/`vadjustment` by the drag delta,
+clamp to `[lower, upper - page_size]`, grab/grabbing cursor, engage only when
+pannable. Optional later: kinetic fling, zoom-to-point-under-cursor. **This is a
+feel change → verify the drag by hand, one change, against `v1.0-stable`.**
 
 ### 14.2 Removable-media (USB) bookmarks — offline / greyed state
 
