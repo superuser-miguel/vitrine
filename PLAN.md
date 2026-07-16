@@ -1083,6 +1083,21 @@ beats us."**
 folder, 13,235 images, VITRINE_LOADTEST = worst main-loop stall over 10s):**
 - Baseline (enrichment competing): **723 ms**.
 - Enrichment throttled to 1 (`VITRINE_DECODE_LIMIT=1`): **392 ms** (−46%).
+- **After enrichment-yield fix** (commit — probe() awaits yield_to_foreground):
+  **533 ms** (−26% from baseline), backlog still 10,797. The modest LOADTEST delta
+  is a *measurement artifact*: worst-single-stall is dominated by the synchronous
+  **populate spike** (below), not decode — the yield fixes the *sustained* decode
+  starvation while browsing, which worst-stall under-measures. **Need the fill/
+  time-to-visible metric (§13.3) to score it properly.**
+- **Second cause found — synchronous populate spike.** `Window::populate`
+  (window.rs) runs on one main-loop iteration for the whole folder:
+  `stamp_annotations` (a `ratings_under` DB query + a loop over every item) then
+  `store.extend_from_slice(13k items)` → the SortListModel re-sorts and
+  FilterListModel re-filters all 13k at once. That is the folder-OPEN freeze (the
+  worst stall), distinct from decode contention. Fix: chunk/defer the insert
+  (extend in batches across iterations), and move stamping off the open path
+  (stamp lazily on bind, or after first paint). This is "Nautilus beats us on
+  folder open"; the enrichment-yield is "…and while browsing."
 - Interpretation: ~330 ms of the stall is enrichment contention; the remaining
   ~392 ms is the interactive mixed-size path (big-image decode head-of-line +
   the GPU downscale/readback done on the main thread for large images). For
