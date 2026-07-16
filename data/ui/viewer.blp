@@ -15,6 +15,19 @@ template $VitrineViewer: Adw.NavigationPage {
         title: _("Viewer");
       };
 
+      [start]
+      Gtk.ToggleButton fullscreen_button {
+        icon-name: "view-fullscreen-symbolic";
+        tooltip-text: _("Fullscreen (F11)");
+      }
+
+      [start]
+      Gtk.ToggleButton filmstrip_button {
+        icon-name: "view-list-symbolic";
+        tooltip-text: _("Show Filmstrip");
+        active: true;
+      }
+
       [end]
       Gtk.ToggleButton info_button {
         icon-name: "dialog-information-symbolic";

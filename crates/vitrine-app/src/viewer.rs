@@ -63,6 +63,10 @@ mod imp {
         #[template_child]
         pub zoom_fit_button: TemplateChild<gtk::Button>,
         #[template_child]
+        pub fullscreen_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub filmstrip_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
         pub info_split: TemplateChild<adw::OverlaySplitView>,
         #[template_child]
         pub rating_box: TemplateChild<gtk::Box>,
@@ -131,6 +135,8 @@ mod imp {
                 zoom_in_button: Default::default(),
                 zoom_out_button: Default::default(),
                 zoom_fit_button: Default::default(),
+                fullscreen_button: Default::default(),
+                filmstrip_button: Default::default(),
                 info_split: Default::default(),
                 rating_box: Default::default(),
                 comment_row: Default::default(),
@@ -414,6 +420,18 @@ impl VitrineViewer {
         }
     }
 
+    /// Fullscreen (or restore) the top-level window, and swap the button icon.
+    fn set_fullscreen(&self, on: bool) {
+        if let Some(win) = self.root().and_downcast::<gtk::Window>() {
+            win.set_fullscreened(on);
+        }
+        self.imp().fullscreen_button.set_icon_name(if on {
+            "view-restore-symbolic"
+        } else {
+            "view-fullscreen-symbolic"
+        });
+    }
+
     /// Show/hide the Properties sidebar (used by the VITRINE_SOAK journey).
     pub fn set_properties_shown(&self, shown: bool) {
         self.imp().info_split.set_show_sidebar(shown);
@@ -445,6 +463,20 @@ impl VitrineViewer {
             move |_| v.zoom_fit()
         ));
 
+        // Hide/show the filmstrip (more room for the image).
+        imp.filmstrip_button.connect_toggled(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |btn| v.imp().filmstrip_scroller.set_visible(btn.is_active())
+        ));
+
+        // Fullscreen the top-level window (also F11, see the key controller).
+        imp.fullscreen_button.connect_toggled(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |btn| v.set_fullscreen(btn.is_active())
+        ));
+
         // Keyboard: arrows navigate, +/-/0 zoom.
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed(glib::clone!(
@@ -460,6 +492,10 @@ impl VitrineViewer {
                     gdk::Key::minus | gdk::Key::KP_Subtract => v.zoom_by(1.0 / ZOOM_STEP),
                     gdk::Key::_0 | gdk::Key::KP_0 => v.zoom_fit(),
                     gdk::Key::_1 | gdk::Key::KP_1 => v.zoom_actual(),
+                    gdk::Key::F11 => {
+                        let btn = &v.imp().fullscreen_button;
+                        btn.set_active(!btn.is_active());
+                    }
                     _ => return glib::Propagation::Proceed,
                 }
                 glib::Propagation::Stop
