@@ -1106,6 +1106,18 @@ folder, 13,235 images, VITRINE_LOADTEST = worst main-loop stall over 10s):**
   viewport-ordered, cost-aware scheduler and moving large-image downscale
   off-main. **723 ms is the "before" number to beat.**
 
+**Profiled 2026-07-16 (#1 populate fix landed).** Per-step timing on the 13k
+folder settled what worst-stall couldn't: `collect_images` name-sort 20 ms
+(redundant — removed), **`populate` synchronous 533 ms → 2 ms** (incremental
+sort/filter + off-main stamping worked), and the real worst-stall spikes were
+(a) a **one-time ~1.7 s GSK/mesa shader compile** on the first `render_texture`
+(disk-cached, once per machine — pre-warm off the first-thumbnail path if we want
+to hide it) and (b) genuine **per-large-image GPU downscale on the main thread**
+(~75 ms for a 3024×4032 / 12 MP photo) — that's item #6 (off-main downscale), and
+these folders really do carry 12 MP images. Net: the recurring folder-open freeze
+is fixed; the remaining felt cost during browsing is per-large-image downscale +
+cold-folder decode throughput.
+
 **Fix (recommended, do next).** Make enrichment a true *background* task that
 **yields to the interactive foreground**: pause/throttle enrichment while thumbnail
 loads are pending or a scroll is in flight (a shared "UI busy" signal checked
