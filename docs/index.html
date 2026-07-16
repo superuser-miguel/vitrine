@@ -142,7 +142,8 @@
     <div class="card"><h3>Collections</h3><p>Hand-curated catalogs (drag images in, reorder) and smart collections — a saved filter that keeps itself up to date.</p></div>
     <div class="card"><h3>Rename-proof index</h3><p>A background SQLite catalog keyed by BLAKE3 content hash. Move or rename a file and its tags, rating, comment, and collection memberships follow the bytes.</p></div>
     <div class="card"><h3>Find duplicates</h3><p>Exact (byte-identical) and near (perceptual-hash) clustering, with a reclaimable-space readout and one-click "keep the largest, trash the rest".</p></div>
-    <div class="card"><h3>Nautilus-style navigation</h3><p>A switchable sidebar — bookmarks, a folder tree, and collections — plus back-button history and a filter bar.</p></div>
+    <div class="card"><h3>Nautilus-style navigation</h3><p>A switchable sidebar — bookmarks, a folder tree, and collections — plus Back/Forward history and a filter bar.</p></div>
+    <div class="card"><h3>Interoperable</h3><p>Export XMP sidecars (<code>xmp:Rating</code> / <code>dc:description</code> / <code>dc:subject</code>) so digiKam, darktable, Lightroom, and XnView read your ratings, comments, and tags. Originals are never rewritten.</p></div>
   </div>
 </section>
 
@@ -153,18 +154,19 @@
     <li class="done"><b>Browse · view · index</b> — grid, viewer, filmstrip, content-hash catalog.</li>
     <li class="done"><b>Review &amp; organize</b> — ratings, comments, tags, collections, filter bar.</li>
     <li class="done"><b>Find duplicates</b> — exact and perceptual-hash clustering.</li>
-    <li class="done"><b>Navigation</b> — switchable sidebar, bookmarks, folder tree, back button.</li>
-    <li><b>More navigation</b> — forward button, address bar, tabs.</li>
+    <li class="done"><b>Navigation</b> — switchable sidebar, bookmarks, folder tree, Back/Forward.</li>
+    <li class="done"><b>XMP sidecar export</b> — ratings/comments/tags out to <code>.xmp</code> for other tools.</li>
+    <li><b>More navigation</b> — address bar and tabs.</li>
     <li><b>Lua scripting</b> — custom sort orders, batch ImageMagick, rename rules.</li>
     <li><b>Edit tier</b> — non-destructive crop / rotate / resize.</li>
     <li><b>WASM plugins</b> — local auto-tagging and embedding-based "find similar".</li>
-    <li><b>Embedded-metadata write</b> — sync ratings/tags/comments into files' XMP.</li>
+    <li><b>In-file XMP embed</b> — write the packet directly into JPEG/PNG containers.</li>
   </ul>
 </section>
 
 <section class="wrap">
   <h2>Build &amp; run</h2>
-  <p class="sub">GNOME 48+ · a Rust toolchain · <code>blueprint-compiler</code>. Not on Flathub yet.</p>
+  <p class="sub">GNOME 48+ · a Rust toolchain · <code>blueprint-compiler</code>. Released as a Flatpak bundle on GitHub — not Flathub.</p>
   <pre><code># Flatpak (recommended)
 flatpak-builder --user --install --force-clean build-dir \
   build-aux/io.github.superuser_miguel.Vitrine.yml

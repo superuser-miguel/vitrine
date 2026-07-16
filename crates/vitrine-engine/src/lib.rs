@@ -41,6 +41,7 @@ pub mod scanner;
 pub mod schema;
 pub mod tags;
 pub mod thumbnail_cache;
+pub mod xmp;
 
 pub use collections::{Collection, CollectionKind};
 pub use db::Db;
@@ -51,6 +52,7 @@ pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
 pub use query::{Direction, Query, SortKey};
 pub use scanner::{classify, walk_images, Change, ScannedFile};
 pub use tags::Tag;
+pub use xmp::{sidecar_path, XmpMetadata};
 
 pub use lru::SizedLru;
 pub use thumbnail_cache::{cache_key, relative_path, ThumbBucket};

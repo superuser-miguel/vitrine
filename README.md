@@ -1,18 +1,24 @@
-# Vitrine
+<p align="center">
+  <img src="data/icons/hicolor/scalable/apps/io.github.superuser_miguel.Vitrine.svg" alt="Vitrine icon" width="96" height="96">
+</p>
 
-A fast, focused, **catalog-aware image browser + reviewer** for GNOME.
+<h1 align="center">Vitrine</h1>
+
+<p align="center"><strong>Browse images that happen to be files — with a review layer that survives every rename.</strong></p>
+
+Vitrine is a fast, focused, **catalog-aware image browser + reviewer** for
+GNOME: Loupe's viewer architecture + Nautilus's grid and selection model + a
+catalog/tag layer keyed by content hash so ratings, tags, comments, and
+collections survive gallery-dl renames and moves.
 
 Rust · GTK4 · gtk-rs · libadwaita · Blueprint · glycin · SQLite · Flatpak.
+See [`PLAN.md`](PLAN.md) for the phased build plan.
 
-> Browse *images that happen to be files*: Loupe's viewer architecture +
-> Nautilus's grid/selection model + a catalog/tag layer keyed to survive
-> gallery-dl renames. See [`PLAN.md`](PLAN.md) for the phased build plan.
-
-## Status
-
-**v1 feature-complete.** Vitrine browses, views, indexes, reviews, organizes,
-and de-duplicates — all keyed to survive renames. Builds via cargo, Meson, and
-flatpak-builder; the engine ships 68 tests and stays UI-free.
+> **Status: v1 feature-complete.** Vitrine browses, views, indexes, reviews,
+> organizes, and de-duplicates — all keyed to survive renames. Builds via cargo,
+> Meson, and flatpak-builder; the engine ships 73 tests and stays UI-free.
+> Distributed as a Flatpak bundle via GitHub Releases, with the project page on
+> [GitHub Pages](https://superuser-miguel.github.io/vitrine/) — **not** Flathub.
 
 ## Features
 
@@ -25,7 +31,7 @@ flatpak-builder; the engine ships 68 tests and stays UI-free.
   managed, EXIF-oriented, decoded in sandboxed subprocesses.
 - **Sidebar** — a gThumb-style switcher between **Places** (Nautilus-style
   bookmarks: rename, reorder by drag, remove), a lazy **Folders** tree, and
-  **Collections**. Back-button folder history.
+  **Collections**. Back / Forward navigation history.
 - **Nautilus-style sorting** — Name / Size / Modified / Type with an independent
   ascending/descending toggle; instant, live, remembered across sessions.
 
@@ -52,24 +58,30 @@ flatpak-builder; the engine ships 68 tests and stays UI-free.
   moves**. Move/delete reconciliation; background EXIF + perceptual-hash
   enrichment. Browsing never waits on the index.
 - Portable **backup / export** of all annotations (JSON, content-hash keyed).
+- **XMP sidecar export** — write `photo.jpg.xmp` sidecars (`xmp:Rating` /
+  `dc:description` / `dc:subject`) for the selection so digiKam, darktable,
+  Lightroom, and XnView read Vitrine's ratings, comments, and tags.
+  Non-destructive: originals are never rewritten.
 - **Preferences** for library roots and the thumbnail-cache budget.
 
 ## Roadmap
 
 v1 is done. Planned next (see [`PLAN.md`](PLAN.md) for full specs):
 
-- **Navigation** — Forward button, a Nautilus-style address bar, and tabs.
+- **Navigation** — a Nautilus-style address bar and tabs (Back/Forward shipped).
 - **Lua scripting** — custom sort orders, batch ImageMagick ops, rename rules.
 - **A non-destructive edit tier** — crop / rotate / resize (Loupe/gThumb-style).
 - **WASM compute plugins** — local auto-tagging and embedding-based "find
   similar", plus faces / OCR / quality scoring.
-- **Embedded-metadata write** — sync ratings/tags/comments into files' XMP
-  (`Xmp.xmp.Rating` / `Xmp.dc.description`); the schema seams are already in place.
+- **In-file XMP embed** — write the packet directly into JPEG/PNG containers, on
+  top of the sidecar export that ships today.
 
 ## Install
 
-Not on Flathub yet. Build the Flatpak locally (below), or grab a release bundle
-when one is posted.
+**Not on Flathub** — Vitrine is distributed as a Flatpak **bundle via
+[GitHub Releases](https://github.com/superuser-miguel/vitrine/releases)**, with
+the project page on [GitHub Pages](https://superuser-miguel.github.io/vitrine/).
+Grab a release `.flatpak` and `flatpak install` it, or build it locally (below).
 
 ## Layout
 
@@ -117,8 +129,9 @@ flatpak-builder --user --install --force-clean build-dir \
 flatpak run io.github.superuser_miguel.Vitrine
 ```
 
-The manifest currently allows build-time network for local iteration. Before a
-Flathub submission, vendor the crate graph
+The manifest currently allows build-time network for local iteration. For a
+reproducible **release bundle** (`flatpak build-bundle`) to publish on GitHub
+Releases, vendor the crate graph
 (`python3 flatpak-cargo-generator.py Cargo.lock -o build-aux/cargo-sources.json`),
 add it to the app module, remove the `--share=network` **build-arg**, and build
 with `-Doffline=true`.

@@ -135,6 +135,8 @@ mod imp {
         pub folder_tree: TemplateChild<gtk::ListView>,
         #[template_child]
         pub back_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub forward_button: TemplateChild<gtk::Button>,
         /// Collection ids parallel to `collections_list` rows (by index).
         pub collection_ids: RefCell<Vec<i64>>,
         /// Bookmarks parallel to `bookmarks_list` rows (by index) — the UI's
@@ -142,9 +144,11 @@ mod imp {
         pub bookmarks: RefCell<Vec<crate::settings::Bookmark>>,
         /// Back-navigation history of visited locations (the current one excluded).
         pub history: RefCell<Vec<Location>>,
+        /// Forward stack: locations we backed out of, re-reachable with Forward.
+        pub forward: RefCell<Vec<Location>>,
         /// Where we are now (folder or collection), for history recording.
         pub current_location: RefCell<Option<Location>>,
-        /// True while navigating back, so navigation doesn't re-record history.
+        /// True while navigating via Back/Forward, so it doesn't re-record history.
         pub navigating_back: Cell<bool>,
         /// The lazily-built "Duplicates" page + its content box (rebuilt per scan).
         pub duplicates_page: RefCell<Option<adw::NavigationPage>>,
@@ -237,9 +241,11 @@ mod imp {
                 bookmarks_list: Default::default(),
                 folder_tree: Default::default(),
                 back_button: Default::default(),
+                forward_button: Default::default(),
                 collection_ids: RefCell::new(Vec::new()),
                 bookmarks: RefCell::new(Vec::new()),
                 history: RefCell::new(Vec::new()),
+                forward: RefCell::new(Vec::new()),
                 current_location: RefCell::new(None),
                 navigating_back: Cell::new(false),
                 duplicates_page: RefCell::new(None),
@@ -1012,6 +1018,12 @@ impl VitrineWindow {
             move |_| window.go_back()
         ));
 
+        imp.forward_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.go_forward()
+        ));
+
         // Bookmarks: click to open.
         imp.bookmarks_list.connect_row_activated(glib::clone!(
             #[weak(rename_to = window)]
@@ -1112,7 +1124,8 @@ impl VitrineWindow {
     }
 
     /// Move to `new`, pushing the current location onto the Back history (unless
-    /// we're navigating back). No-op if it's where we already are.
+    /// we're navigating via Back/Forward). A fresh navigation invalidates the
+    /// Forward stack, as in a web browser. No-op if it's where we already are.
     fn set_location(&self, new: Location) {
         let imp = self.imp();
         let previous = imp.current_location.borrow().clone();
@@ -1123,29 +1136,53 @@ impl VitrineWindow {
             if let Some(previous) = previous {
                 imp.history.borrow_mut().push(previous);
             }
+            imp.forward.borrow_mut().clear();
         }
         *imp.current_location.borrow_mut() = Some(new);
-        self.update_back_sensitivity();
+        self.update_nav_sensitivity();
     }
 
-    /// Go to the previously-visited location (folder or collection).
+    /// Go to the previously-visited location, banking the current one on Forward.
     fn go_back(&self) {
         let Some(previous) = self.imp().history.borrow_mut().pop() else {
             return;
         };
+        if let Some(current) = self.imp().current_location.borrow().clone() {
+            self.imp().forward.borrow_mut().push(current);
+        }
+        self.navigate_to(previous);
+    }
+
+    /// Go to the location we last backed out of, banking the current one on Back.
+    fn go_forward(&self) {
+        let Some(next) = self.imp().forward.borrow_mut().pop() else {
+            return;
+        };
+        if let Some(current) = self.imp().current_location.borrow().clone() {
+            self.imp().history.borrow_mut().push(current);
+        }
+        self.navigate_to(next);
+    }
+
+    /// Load `target` without recording history (used by Back/Forward, which
+    /// manage the stacks themselves).
+    fn navigate_to(&self, target: Location) {
         self.imp().navigating_back.set(true);
-        match &previous {
+        match &target {
             Location::Folder(path) => self.load_folder(gio::File::for_path(path)),
             Location::Collection(id) => self.open_collection(*id),
         }
-        *self.imp().current_location.borrow_mut() = Some(previous);
+        *self.imp().current_location.borrow_mut() = Some(target);
         self.imp().navigating_back.set(false);
-        self.update_back_sensitivity();
+        self.update_nav_sensitivity();
     }
 
-    fn update_back_sensitivity(&self) {
-        let has_history = !self.imp().history.borrow().is_empty();
-        self.imp().back_button.set_sensitive(has_history);
+    fn update_nav_sensitivity(&self) {
+        let imp = self.imp();
+        imp.back_button
+            .set_sensitive(!imp.history.borrow().is_empty());
+        imp.forward_button
+            .set_sensitive(!imp.forward.borrow().is_empty());
     }
 
     /// Bookmark the folder currently shown.
@@ -2188,6 +2225,78 @@ impl VitrineWindow {
             move |_, _| window.show_duplicates()
         ));
         self.add_action(&find_duplicates);
+
+        let write_xmp = gio::SimpleAction::new("write-xmp", None);
+        write_xmp.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| window.write_xmp_sidecars()
+        ));
+        self.add_action(&write_xmp);
+    }
+
+    /// Write XMP sidecar files (`photo.jpg.xmp`) for the current selection — or
+    /// the whole visible grid if nothing is selected — so other photo tools can
+    /// read Vitrine's ratings, comments, and tags. Non-destructive: originals
+    /// are never touched.
+    fn write_xmp_sidecars(&self) {
+        use vitrine_engine::sidecar_path;
+
+        // The images to export: the selection, or everything if none is selected.
+        let items: Vec<(String, PathBuf)> = {
+            let selected = self.selected_positions();
+            let positions: Vec<u32> = if selected.is_empty() {
+                self.model()
+                    .map(|m| (0..m.n_items()).collect())
+                    .unwrap_or_default()
+            } else {
+                selected
+            };
+            let Some(model) = self.model() else {
+                return;
+            };
+            positions
+                .into_iter()
+                .filter_map(|pos| model.item(pos).and_downcast::<ImageObject>())
+                .filter_map(|item| {
+                    let hash = item.content_hash();
+                    let path = item.file().path()?;
+                    (!hash.is_empty()).then_some((hash, path))
+                })
+                .collect()
+        };
+
+        if items.is_empty() {
+            self.toast("Nothing to export");
+            return;
+        }
+
+        // A short-lived read connection; the index may not have spawned yet.
+        let Ok(db) = Db::open(crate::index::index_db_path()) else {
+            self.toast("Could not open the catalog");
+            return;
+        };
+
+        let mut written = 0usize;
+        let mut skipped = 0usize;
+        for (hash, path) in &items {
+            let Ok(meta) = db.xmp_for_hash(hash) else {
+                continue;
+            };
+            if meta.is_empty() {
+                skipped += 1;
+                continue;
+            }
+            if std::fs::write(sidecar_path(path), meta.to_packet()).is_ok() {
+                written += 1;
+            }
+        }
+
+        self.toast(&match (written, skipped) {
+            (0, _) => "No ratings, comments, or tags to export".to_string(),
+            (1, _) => "Wrote 1 XMP sidecar".to_string(),
+            (n, _) => format!("Wrote {n} XMP sidecars"),
+        });
     }
 
     /// Enqueue a library root for background indexing (used by Preferences).

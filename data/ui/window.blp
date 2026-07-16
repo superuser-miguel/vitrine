@@ -7,6 +7,11 @@ menu primary_menu {
       label: _("Find _Duplicates");
       action: "win.find-duplicates";
     }
+
+    item {
+      label: _("_Write Metadata Sidecars");
+      action: "win.write-xmp";
+    }
   }
 
   section {
@@ -217,10 +222,22 @@ template $VitrineWindow: Adw.ApplicationWindow {
             [top]
             Adw.HeaderBar {
               [start]
-              Gtk.Button back_button {
-                icon-name: "go-previous-symbolic";
-                tooltip-text: _("Back");
-                sensitive: false;
+              Gtk.Box {
+                styles [
+                  "linked",
+                ]
+
+                Gtk.Button back_button {
+                  icon-name: "go-previous-symbolic";
+                  tooltip-text: _("Back");
+                  sensitive: false;
+                }
+
+                Gtk.Button forward_button {
+                  icon-name: "go-next-symbolic";
+                  tooltip-text: _("Forward");
+                  sensitive: false;
+                }
               }
 
               [start]
