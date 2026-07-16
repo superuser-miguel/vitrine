@@ -378,9 +378,6 @@ impl VitrineWindow {
             true
         });
         let filter_model = gtk::FilterListModel::new(Some(imp.store.clone()), Some(filter.clone()));
-        // Incremental: spread filtering/sorting of a big folder across frames
-        // instead of blocking one main-loop iteration (the folder-open freeze).
-        filter_model.set_incremental(true);
 
         let state = imp.sort_state.clone();
         let sorter = gtk::CustomSorter::new(move |a, b| {
@@ -389,7 +386,6 @@ impl VitrineWindow {
             compare_images(a, b, state.get())
         });
         let sort_model = gtk::SortListModel::new(Some(filter_model), Some(sorter.clone()));
-        sort_model.set_incremental(true);
         *imp.filter.borrow_mut() = Some(filter);
 
         let selection = gtk::MultiSelection::new(Some(sort_model.clone()));
@@ -2590,6 +2586,12 @@ impl VitrineWindow {
         // large folder never blocks on the DB query; stars appear a beat later,
         // reactively via notify::rating.
         self.stamp_annotations_async();
+        // A freshly-opened folder always starts at the top, whatever the sort
+        // order (deferred so it lands after the grid lays out the new model).
+        let scroller = imp.grid_scroller.clone();
+        glib::idle_add_local_once(move || {
+            scroller.vadjustment().set_value(0.0);
+        });
         imp.content_stack
             .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
         // The grid's SortListModel orders items live per the active sort — no
@@ -2882,11 +2884,7 @@ fn direction_id(descending: bool) -> &'static str {
 /// name tiebreak for a stable order, all reversed together when descending.
 fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Ordering {
     use std::cmp::Ordering;
-    let by_name = || {
-        a.display_name()
-            .to_lowercase()
-            .cmp(&b.display_name().to_lowercase())
-    };
+    let by_name = || a.cmp_by_name(b);
     let primary = match state.field {
         SortField::Name => Ordering::Equal,
         SortField::Size => a.size().cmp(&b.size()),
