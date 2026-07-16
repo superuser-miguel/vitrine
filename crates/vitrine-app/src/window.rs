@@ -2979,10 +2979,8 @@ async fn collect_images(folder: &gio::File) -> Result<Vec<ImageObject>, glib::Er
         }
     }
 
-    items.sort_by(|a, b| {
-        a.display_name()
-            .to_lowercase()
-            .cmp(&b.display_name().to_lowercase())
-    });
+    // No initial sort: the grid's SortListModel orders items live per the active
+    // sort field (name by default), so pre-sorting here is redundant work (and a
+    // per-item `to_lowercase` allocation × the whole folder).
     Ok(items)
 }
