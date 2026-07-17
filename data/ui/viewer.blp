@@ -59,14 +59,34 @@ template $VitrineViewer: Adw.NavigationPage {
       max-sidebar-width: 340;
       show-sidebar: bind info_button.active bidirectional;
 
-      content: Gtk.ScrolledWindow picture_scroller {
-        hexpand: true;
-        vexpand: true;
+      content: Gtk.Overlay {
+        child: Gtk.ScrolledWindow picture_scroller {
+          hexpand: true;
+          vexpand: true;
 
-        child: Gtk.Picture picture {
-          content-fit: contain;
-          can-shrink: true;
+          child: Gtk.Picture picture {
+            content-fit: contain;
+            can-shrink: true;
+          };
         };
+
+        // A visible close control for immersive fullscreen (shown only then), so
+        // the image mode is always exitable without knowing Esc/F11.
+        [overlay]
+        Gtk.Button fs_close_button {
+          icon-name: "window-close-symbolic";
+          tooltip-text: _("Exit Fullscreen (Esc)");
+          halign: end;
+          valign: start;
+          margin-top: 12;
+          margin-end: 12;
+          visible: false;
+
+          styles [
+            "osd",
+            "circular",
+          ]
+        }
       };
 
       sidebar: Adw.PreferencesPage {

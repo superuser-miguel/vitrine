@@ -55,6 +55,8 @@ mod imp {
         #[template_child]
         pub toolbar_view: TemplateChild<adw::ToolbarView>,
         #[template_child]
+        pub fs_close_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub picture_scroller: TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub filmstrip_scroller: TemplateChild<gtk::ScrolledWindow>,
@@ -133,6 +135,7 @@ mod imp {
                 title: Default::default(),
                 picture: Default::default(),
                 toolbar_view: Default::default(),
+                fs_close_button: Default::default(),
                 picture_scroller: Default::default(),
                 filmstrip_scroller: Default::default(),
                 zoom_in_button: Default::default(),
@@ -423,16 +426,17 @@ impl VitrineViewer {
         }
     }
 
-    /// Immersive fullscreen: fill the screen with just the image — fullscreen the
-    /// window *and* hide the header bar and filmstrip (a lightbox). Exiting
-    /// restores the chrome (the filmstrip to whatever its own toggle says). Escape
-    /// or F11 exits.
+    /// Immersive lightbox: fill the screen with just the image — fullscreen the
+    /// window, hide the header bar and filmstrip, and show a floating ✕ close
+    /// button so the mode is always exitable (Escape and the ✕ both leave it).
+    /// Exiting restores the chrome (the filmstrip to whatever its toggle says).
     fn set_fullscreen(&self, on: bool) {
         let imp = self.imp();
         if let Some(win) = self.root().and_downcast::<gtk::Window>() {
             win.set_fullscreened(on);
         }
         imp.toolbar_view.set_reveal_top_bars(!on);
+        imp.fs_close_button.set_visible(on);
         if on {
             imp.filmstrip_scroller.set_visible(false);
         } else {
@@ -446,9 +450,21 @@ impl VitrineViewer {
         });
     }
 
-    /// Whether the viewer is currently in immersive fullscreen.
+    /// Whether the immersive lightbox is active.
     fn is_fullscreen(&self) -> bool {
         self.imp().fullscreen_button.is_active()
+    }
+
+    /// F11: plain whole-app fullscreen (chrome stays) — distinct from the viewer's
+    /// immersive lightbox. If the lightbox is active, F11 just exits it cleanly.
+    fn toggle_app_fullscreen(&self) {
+        if self.is_fullscreen() {
+            self.imp().fullscreen_button.set_active(false);
+            return;
+        }
+        if let Some(win) = self.root().and_downcast::<gtk::Window>() {
+            win.set_fullscreened(!win.is_fullscreen());
+        }
     }
 
     /// Show/hide the Properties sidebar (used by the VITRINE_SOAK journey).
@@ -489,11 +505,16 @@ impl VitrineViewer {
             move |btn| v.imp().filmstrip_scroller.set_visible(btn.is_active())
         ));
 
-        // Fullscreen the top-level window (also F11, see the key controller).
+        // Immersive lightbox (also toggled by the ✕ overlay and Escape).
         imp.fullscreen_button.connect_toggled(glib::clone!(
             #[weak(rename_to = v)]
             self,
             move |btn| v.set_fullscreen(btn.is_active())
+        ));
+        imp.fs_close_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.imp().fullscreen_button.set_active(false)
         ));
 
         // Keyboard: arrows navigate, +/-/0 zoom.
@@ -511,11 +532,9 @@ impl VitrineViewer {
                     gdk::Key::minus | gdk::Key::KP_Subtract => v.zoom_by(1.0 / ZOOM_STEP),
                     gdk::Key::_0 | gdk::Key::KP_0 => v.zoom_fit(),
                     gdk::Key::_1 | gdk::Key::KP_1 => v.zoom_actual(),
-                    gdk::Key::F11 => {
-                        let btn = &v.imp().fullscreen_button;
-                        btn.set_active(!btn.is_active());
-                    }
-                    // Escape leaves immersive fullscreen; otherwise it propagates
+                    // F11 = plain whole-app fullscreen (or exit the lightbox).
+                    gdk::Key::F11 => v.toggle_app_fullscreen(),
+                    // Escape leaves the immersive lightbox; otherwise it propagates
                     // (so the nav view can pop back to the grid).
                     gdk::Key::Escape if v.is_fullscreen() => {
                         v.imp().fullscreen_button.set_active(false);
