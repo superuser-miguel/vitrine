@@ -983,9 +983,14 @@ is smooth.
    crate): no Vulkan pipeline compile *ever*, the per-large-image downscale moves
    off the main thread, and the dmabuf-FD/readback dance goes away. Highest-leverage
    single change.
-3. **Warm the cache during indexing.** Enrichment already decodes every image (for
-   pHash) — have it also produce + cache the display thumbnail, so an indexed folder
-   opens warm and never decodes on demand.
+3. **Warm the cache during indexing.** ✅ **SHIPPED (d8dea14).** Enrichment now
+   decodes at the grid's 256px thumbnail size (not a 64px pHash-only frame),
+   computes the pHash from that, *and* writes the display thumbnail to the same
+   URI-keyed disk cache the grid reads (`thumbnails::warm_cache`, awaited +
+   unbounded so no write is dropped by store()'s backlog cap). An indexed folder
+   now browses with **zero on-demand decode**. Verified on a 200-image varied
+   fixture: warmed browse = 0 decodes / 100% hit / 113fps vs 212 decodes cold;
+   enrichment RSS 297MB idle / 557MB peak (no regression).
 4. **Viewport-ordered decode** (the "browser trick" the user asked about — *never
    built*). A priority queue keyed by distance from the viewport so visible
    thumbnails decode first, then radiate outward. Do this **last** — items 1–3
