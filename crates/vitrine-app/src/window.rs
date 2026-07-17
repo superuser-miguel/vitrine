@@ -354,7 +354,6 @@ mod imp {
             self.obj().setup_collections();
             self.obj().setup_filtering();
             self.obj().setup_navigation();
-            self.obj().setup_memory_trim();
             self.obj().setup_debug_hud();
             self.obj().maybe_soak();
             self.obj().maybe_openfolder_test();
@@ -672,22 +671,6 @@ impl VitrineWindow {
         self.imp().sort_model.borrow().clone()
     }
 
-    /// Periodically return freed heap to the OS. Decoding downloads full-resolution
-    /// buffers (tens of MB) to CPU for the off-main resize; glibc keeps that arena
-    /// at its high-water mark rather than munmapping it, so RSS stays inflated long
-    /// after a cold browse even though the buffers were dropped. `malloc_trim` gives
-    /// it back.
-    fn setup_memory_trim(&self) {
-        glib::timeout_add_seconds_local(4, || {
-            // Off the main thread — malloc_trim can scan a large heap, which would
-            // hitch the UI if run on the main loop. Safety: it only releases unused
-            // top-of-heap back to the OS.
-            gio::spawn_blocking(|| unsafe {
-                libc::malloc_trim(0);
-            });
-            glib::ControlFlow::Continue
-        });
-    }
 
     /// VITRINE_DEBUG: a MangoHUD-style readout of the thumbnail pipeline. Samples
     /// render frame time, worst main-loop stall, decode throughput, cache hit
