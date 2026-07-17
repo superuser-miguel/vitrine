@@ -6,7 +6,7 @@
 //!     the thumbnails Nautilus/GNOME already generated — no decode at all.
 //!  2. **App-private cache** (`$XDG_CACHE_HOME/thumbnails/…`) — where our own
 //!     decodes are stored.
-//!  3. **glycin decode** (concurrency-gated) + GPU downscale, then written to
+//!  3. **glycin decode** (concurrency-gated) + CPU downscale on a worker thread, then written to
 //!     the app-private cache.
 //!
 //! **§4 RISK, resolved:** cache keys are the MD5 of the file *URI*. Real paths
@@ -24,8 +24,6 @@ use std::sync::OnceLock;
 use gtk::gdk;
 use gtk::gio;
 use gtk::glib;
-use gtk::graphene;
-use gtk::gsk;
 use gtk::prelude::*;
 
 use vitrine_engine::thumbnail_cache::{self, ThumbBucket};
@@ -103,7 +101,7 @@ pub async fn load(
     file: gio::File,
     source_mtime: i64,
     target_px: u32,
-    renderer_widget: glib::WeakRef<gtk::Widget>,
+    _renderer_widget: glib::WeakRef<gtk::Widget>,
 ) -> Option<gdk::Texture> {
     let bucket = ThumbBucket::for_target(target_px);
     let uri = file.uri().to_string();
@@ -134,21 +132,54 @@ pub async fn load(
         }
     };
 
-    // glycin may return full resolution; shrink for cache + display. Only cache
-    // when we actually downscaled — never store a multi-MB "thumbnail". Resolve
-    // the renderer now that decoding is done and the cell is realized.
-    let renderer = renderer_widget
-        .upgrade()
-        .and_then(|w| w.native())
-        .and_then(|n| n.renderer());
-    match renderer {
-        Some(renderer) => {
-            let thumb = downscale(&texture, bucket.pixels(), &renderer);
+    // glycin may return full resolution; shrink for cache + display on a worker
+    // thread (CPU resize) so a large image never blocks the main loop — and with
+    // no GSK render_texture there's no ~1.7s shader compile. Only cache when we
+    // actually shrank (never a multi-MB "thumbnail").
+    match downscale_cpu(texture, bucket.pixels()).await {
+        Some(thumb) => {
             store(&uri, source_mtime, bucket, &thumb, is_shareable(&file));
             Some(thumb)
         }
-        None => Some(texture),
+        None => None,
     }
+}
+
+/// Shrink a decoded texture on a worker thread: download its RGBA, resize in the
+/// engine (pure pixel math), and rebuild a small `MemoryTexture` (which holds no
+/// dmabuf FD). Returns the input unchanged if it already fits the bucket, or
+/// `None` on failure. This is what moves the downscale off the main thread.
+async fn downscale_cpu(texture: gdk::Texture, max: u32) -> Option<gdk::Texture> {
+    let w = texture.width() as u32;
+    let h = texture.height() as u32;
+    if w == 0 || h == 0 {
+        return None;
+    }
+    if w.max(h) <= max {
+        return Some(texture); // already thumbnail-sized (glycin honored the scale)
+    }
+    gio::spawn_blocking(move || {
+        let mut downloader = gdk::TextureDownloader::new(&texture);
+        downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+        let (bytes, stride) = downloader.download_bytes();
+        let (out, nw, nh) = vitrine_engine::resize_rgba(&bytes, w, h, stride as u32, max);
+        if out.is_empty() || nw == 0 || nh == 0 {
+            return None;
+        }
+        Some(
+            gdk::MemoryTextureBuilder::new()
+                .set_bytes(Some(&glib::Bytes::from_owned(out)))
+                .set_width(nw as i32)
+                .set_height(nh as i32)
+                .set_stride((nw as usize) * 4)
+                .set_format(gdk::MemoryFormat::R8g8b8a8)
+                .build()
+                .upcast::<gdk::Texture>(),
+        )
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Whether a decode for `file` may be written to the *shared* cache: only for
@@ -295,43 +326,4 @@ fn store(
             }
         }
     });
-}
-
-/// Downscale `texture` so its longest edge is at most `max` px, preserving
-/// aspect. Returns the input unchanged if it already fits. Uses the GSK renderer
-/// to scale, then copies the result into a **`MemoryTexture`**: a GPU texture is
-/// backed by a dmabuf file descriptor, and thousands cached across folders leak
-/// FDs (→ "too many open files"); memory textures hold no FD.
-pub fn downscale(texture: &gdk::Texture, max: u32, renderer: &gsk::Renderer) -> gdk::Texture {
-    let w = texture.width();
-    let h = texture.height();
-    let longest = w.max(h);
-    if longest <= max as i32 {
-        return texture.clone();
-    }
-
-    let scale = max as f32 / longest as f32;
-    let nw = (w as f32 * scale).round().max(1.0);
-    let nh = (h as f32 * scale).round().max(1.0);
-    let bounds = graphene::Rect::new(0.0, 0.0, nw, nh);
-
-    let node = gsk::TextureScaleNode::new(texture, &bounds, gsk::ScalingFilter::Trilinear);
-    let gpu = renderer.render_texture(node, Some(&bounds));
-    to_memory_texture(&gpu)
-}
-
-/// Copy a texture's pixels into a `MemoryTexture` (holds no GPU/dmabuf FD),
-/// dropping the source GPU texture.
-fn to_memory_texture(texture: &gdk::Texture) -> gdk::Texture {
-    let mut downloader = gdk::TextureDownloader::new(texture);
-    downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
-    let (bytes, stride) = downloader.download_bytes();
-    gdk::MemoryTextureBuilder::new()
-        .set_bytes(Some(&bytes))
-        .set_width(texture.width())
-        .set_height(texture.height())
-        .set_stride(stride)
-        .set_format(gdk::MemoryFormat::R8g8b8a8)
-        .build()
-        .upcast()
 }
