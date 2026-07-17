@@ -679,10 +679,12 @@ impl VitrineWindow {
     /// it back.
     fn setup_memory_trim(&self) {
         glib::timeout_add_seconds_local(4, || {
-            // Safety: malloc_trim only releases unused top-of-heap back to the OS.
-            unsafe {
+            // Off the main thread — malloc_trim can scan a large heap, which would
+            // hitch the UI if run on the main loop. Safety: it only releases unused
+            // top-of-heap back to the OS.
+            gio::spawn_blocking(|| unsafe {
                 libc::malloc_trim(0);
-            }
+            });
             glib::ControlFlow::Continue
         });
     }
