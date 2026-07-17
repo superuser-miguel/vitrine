@@ -2117,6 +2117,7 @@ dependencies = [
  "glycin",
  "gtk4",
  "libadwaita",
+ "libc",
  "vitrine-engine",
 ]
 

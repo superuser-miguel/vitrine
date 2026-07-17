@@ -14,6 +14,7 @@ name = "vitrine"
 path = "src/main.rs"
 
 [dependencies]
+libc = "0.2"
 # gtk4 >= 4.14 (PLAN §3). Imported as `gtk`; it re-exports gio & glib.
 gtk = { version = "0.11", package = "gtk4", features = ["v4_14"] }
 # libadwaita >= 1.5 (AdwAboutDialog etc.). Imported as `adw`.
