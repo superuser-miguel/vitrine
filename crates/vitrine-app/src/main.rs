@@ -5,14 +5,6 @@
 //! `AdwApplicationWindow` with a headerbar and About dialog. The browser grid,
 //! viewer, filmstrip, index and dedup layers land in later phases (see PLAN.md).
 
-// mimalloc returns freed memory to the OS aggressively — unlike glibc's malloc,
-// which keeps its arena at the high-water mark. Matters because decoding downloads
-// full-resolution buffers (tens of MB each) to CPU for the off-main thumbnail
-// resize; under glibc, RSS stayed inflated (~2 GB) after a cold browse even though
-// the buffers were dropped. mimalloc is C (not C++), so it respects the house rule.
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
-
 mod debug;
 mod decode;
 mod grid_cell;
