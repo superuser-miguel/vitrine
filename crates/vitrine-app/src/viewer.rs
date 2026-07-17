@@ -53,6 +53,8 @@ mod imp {
         #[template_child]
         pub picture: TemplateChild<gtk::Picture>,
         #[template_child]
+        pub toolbar_view: TemplateChild<adw::ToolbarView>,
+        #[template_child]
         pub picture_scroller: TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
         pub filmstrip_scroller: TemplateChild<gtk::ScrolledWindow>,
@@ -130,6 +132,7 @@ mod imp {
             Self {
                 title: Default::default(),
                 picture: Default::default(),
+                toolbar_view: Default::default(),
                 picture_scroller: Default::default(),
                 filmstrip_scroller: Default::default(),
                 zoom_in_button: Default::default(),
@@ -420,16 +423,32 @@ impl VitrineViewer {
         }
     }
 
-    /// Fullscreen (or restore) the top-level window, and swap the button icon.
+    /// Immersive fullscreen: fill the screen with just the image — fullscreen the
+    /// window *and* hide the header bar and filmstrip (a lightbox). Exiting
+    /// restores the chrome (the filmstrip to whatever its own toggle says). Escape
+    /// or F11 exits.
     fn set_fullscreen(&self, on: bool) {
+        let imp = self.imp();
         if let Some(win) = self.root().and_downcast::<gtk::Window>() {
             win.set_fullscreened(on);
         }
-        self.imp().fullscreen_button.set_icon_name(if on {
+        imp.toolbar_view.set_reveal_top_bars(!on);
+        if on {
+            imp.filmstrip_scroller.set_visible(false);
+        } else {
+            imp.filmstrip_scroller
+                .set_visible(imp.filmstrip_button.is_active());
+        }
+        imp.fullscreen_button.set_icon_name(if on {
             "view-restore-symbolic"
         } else {
             "view-fullscreen-symbolic"
         });
+    }
+
+    /// Whether the viewer is currently in immersive fullscreen.
+    fn is_fullscreen(&self) -> bool {
+        self.imp().fullscreen_button.is_active()
     }
 
     /// Show/hide the Properties sidebar (used by the VITRINE_SOAK journey).
@@ -495,6 +514,11 @@ impl VitrineViewer {
                     gdk::Key::F11 => {
                         let btn = &v.imp().fullscreen_button;
                         btn.set_active(!btn.is_active());
+                    }
+                    // Escape leaves immersive fullscreen; otherwise it propagates
+                    // (so the nav view can pop back to the grid).
+                    gdk::Key::Escape if v.is_fullscreen() => {
+                        v.imp().fullscreen_button.set_active(false);
                     }
                     _ => return glib::Propagation::Proceed,
                 }
