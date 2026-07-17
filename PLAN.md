@@ -1002,6 +1002,22 @@ eviction (protect near-viewport thumbs); cancel decodes for cells flung far past
 
 ### 13.3 Measurement we still need
 
+**User-reported test case (2026-07-17): thumbnail *render order* in the viewport.**
+Thumbnails still "pop up randomly / take 3-5s" on a cold folder. Diagnosis: the
+scheduler already *starts* them viewport-first (`pop_best_load` picks nearest
+`visible_center`, respecting the active sort — e.g. newest-first shows/decodes the
+newest visible items first). The randomness is **completion-order variance** (big
+12MP images finish after small ones started later), and the 3-5s is **cold decode
+latency of a screenful**, not wrong ordering. So the render-order test must
+measure *completion* order + latency, not just start order:
+- fill-order log `(position, visible_at_completion, ms_since_settle)`;
+- assert the first N *completions* are top-of-viewport items within a target ms;
+- flag decode-time variance (big-image completions lagging).
+The real fix for "instant thumbnails" is §13.2 item 3 (warm cache during indexing)
+— it removes the decode wait entirely for indexed folders; ordering only matters
+*while* waiting.
+
+
 Worst-stall (LOADTEST) can't see fill *order/latency* — the thing most of §13.2
 improves, and the reason a bad change once looked "good." Build a **fill-order log**
 `(position, visible_at_completion, ms_since_settle)` and a **time-to-visible-
