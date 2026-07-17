@@ -76,6 +76,23 @@ pub fn load_gate() -> &'static async_lock::Semaphore {
     })
 }
 
+/// Memory bound for the *decode + downscale* path: caps how many full-resolution
+/// images exist at once. A full-res decode is tens of MB; with the resize now
+/// off the main thread, many cache-miss loads would otherwise hold full-res
+/// buffers simultaneously and balloon RSS. Cache *hits* never acquire this, so
+/// warm browsing is unaffected. Override with `VITRINE_HEAVY_LIMIT`.
+fn heavy_gate() -> &'static async_lock::Semaphore {
+    static GATE: OnceLock<async_lock::Semaphore> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let limit = std::env::var("VITRINE_HEAVY_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(6);
+        async_lock::Semaphore::new(limit)
+    })
+}
+
 /// The shared freedesktop thumbnail cache (host cache; shared with Nautilus).
 fn shared_dir() -> PathBuf {
     glib::home_dir().join(".cache/thumbnails")
@@ -121,6 +138,9 @@ pub async fn load(
     }
 
     crate::debug::cache_miss();
+    // Hold a heavy permit across decode + downscale so only a few full-resolution
+    // images are alive at once (bounds RSS on cold/large folders).
+    let _heavy = heavy_gate().acquire().await;
     crate::debug::decode_begin();
     let decoded = crate::decode::thumbnail(&file, bucket.pixels()).await;
     crate::debug::decode_end();
