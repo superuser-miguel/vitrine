@@ -159,13 +159,17 @@ async fn downscale_cpu(texture: gdk::Texture, max: u32) -> Option<gdk::Texture> 
         return Some(texture); // already thumbnail-sized (glycin honored the scale)
     }
     gio::spawn_blocking(move || {
-        let mut downloader = gdk::TextureDownloader::new(&texture);
-        downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
-        let (bytes, stride) = downloader.download_bytes();
-        let (out, nw, nh) = vitrine_engine::resize_rgba(&bytes, w, h, stride as u32, max);
-        if out.is_empty() || nw == 0 || nh == 0 {
-            return None;
-        }
+        let (bytes, stride) = {
+            let mut downloader = gdk::TextureDownloader::new(&texture);
+            downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+            downloader.download_bytes()
+        };
+        // Free the full-resolution texture (tens of MB) before resizing, so many
+        // concurrent downscales don't pile up full-res images in memory.
+        drop(texture);
+        let resized = vitrine_engine::resize_rgba(&bytes, w, h, stride as u32, max);
+        drop(bytes);
+        let (out, nw, nh) = resized?;
         Some(
             gdk::MemoryTextureBuilder::new()
                 .set_bytes(Some(&glib::Bytes::from_owned(out)))
