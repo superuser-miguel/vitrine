@@ -76,23 +76,6 @@ pub fn load_gate() -> &'static async_lock::Semaphore {
     })
 }
 
-/// Memory bound for the *decode + downscale* path: caps how many full-resolution
-/// images exist at once. A full-res decode is tens of MB; with the resize now
-/// off the main thread, many cache-miss loads would otherwise hold full-res
-/// buffers simultaneously and balloon RSS. Cache *hits* never acquire this, so
-/// warm browsing is unaffected. Override with `VITRINE_HEAVY_LIMIT`.
-fn heavy_gate() -> &'static async_lock::Semaphore {
-    static GATE: OnceLock<async_lock::Semaphore> = OnceLock::new();
-    GATE.get_or_init(|| {
-        let limit = std::env::var("VITRINE_HEAVY_LIMIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .filter(|&n| n > 0)
-            .unwrap_or(6);
-        async_lock::Semaphore::new(limit)
-    })
-}
-
 /// The shared freedesktop thumbnail cache (host cache; shared with Nautilus).
 fn shared_dir() -> PathBuf {
     glib::home_dir().join(".cache/thumbnails")
@@ -138,9 +121,6 @@ pub async fn load(
     }
 
     crate::debug::cache_miss();
-    // Hold a heavy permit across decode + downscale so only a few full-resolution
-    // images are alive at once (bounds RSS on cold/large folders).
-    let _heavy = heavy_gate().acquire().await;
     crate::debug::decode_begin();
     let decoded = crate::decode::thumbnail(&file, bucket.pixels()).await;
     crate::debug::decode_end();
@@ -326,6 +306,19 @@ fn store(
     texture: &gdk::Texture,
     shareable: bool,
 ) {
+    // Bound in-flight disk writes: a fast cold scroll produces thumbnails faster
+    // than they can be PNG-encoded + written, and unbounded fire-and-forget encode
+    // tasks each hold thumbnail data → RSS balloons. If we're backed up, skip the
+    // disk cache for this one (it stays in the RAM cache; a later visit re-decodes
+    // or hits the shared cache) instead of piling up.
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static PENDING: AtomicUsize = AtomicUsize::new(0);
+    const MAX_PENDING: usize = 16;
+    if PENDING.load(Ordering::Relaxed) >= MAX_PENDING {
+        return;
+    }
+    PENDING.fetch_add(1, Ordering::Relaxed);
+
     let texture = texture.clone(); // gdk::Texture is Send
     let uri = uri.to_string();
     let mtime = source_mtime.to_string();
@@ -349,5 +342,6 @@ fn store(
                 let _ = std::fs::write(dir.join(&rel), &png);
             }
         }
+        PENDING.fetch_sub(1, Ordering::Relaxed);
     });
 }
