@@ -186,6 +186,30 @@ async fn downscale_cpu(texture: gdk::Texture, max: u32) -> Option<gdk::Texture> 
     .flatten()
 }
 
+/// Thumbnail size the background enrichment pass warms into the disk cache — the
+/// grid's default load size — so an indexed folder opens with no on-demand decode.
+pub const WARM_PX: u32 = 256;
+
+/// Warm the on-disk thumbnail cache for `file` from a texture the enrichment pass
+/// already decoded (it decodes every image for the pHash anyway). The grid reads
+/// this same URI-keyed cache, so a folder that has been indexed shows thumbnails
+/// instantly instead of decoding on scroll. Disk only — enrichment isn't display,
+/// so it doesn't touch the RAM cache.
+pub async fn warm_cache(file: &gio::File, source_mtime: i64, frame: &gdk::Texture) {
+    let bucket = ThumbBucket::for_target(WARM_PX);
+    let Some(thumb) = downscale_cpu(frame.clone(), bucket.pixels()).await else {
+        return;
+    };
+    let uri = file.uri().to_string();
+    let roots = roots_for(is_shareable(file));
+    // Awaited (not fire-and-forget) and unbounded, unlike `store`: warm thumbnails
+    // are already small (no full-res RSS risk), and enrichment's own bounded
+    // concurrency paces these — so every indexed image actually gets warmed rather
+    // than being dropped by the write backlog cap.
+    let _ =
+        gio::spawn_blocking(move || write_thumb(&thumb, &uri, source_mtime, bucket, &roots)).await;
+}
+
 /// Whether a decode for `file` may be written to the *shared* cache: only for
 /// real paths, whose URI matches the host's. Document-portal paths
 /// (`/run/user/<uid>/doc/…`) present a sandbox-only URI, so their key wouldn't
@@ -299,6 +323,45 @@ pub fn prune_private_cache() {
 /// write happen on a worker thread** (both are pure CPU/IO and were a major
 /// main-loop stall while populating). Always writes the app-private cache; also
 /// the shared cache when `shareable` (real-path files, contributing to Nautilus).
+/// The cache roots a thumbnail is written to: always the app-private cache, plus
+/// the shared freedesktop cache when the file is shareable (a real host path).
+fn roots_for(shareable: bool) -> Vec<PathBuf> {
+    let mut roots = vec![private_dir()];
+    let shared = shared_dir();
+    if shareable && shared != private_dir() {
+        roots.push(shared);
+    }
+    roots
+}
+
+/// PNG-encode `texture` (with the freedesktop `Thumb::URI`/`Thumb::MTime` chunks)
+/// and write it into each cache root. Runs on a worker thread (callers wrap it in
+/// `spawn_blocking`).
+fn write_thumb(
+    texture: &gdk::Texture,
+    uri: &str,
+    source_mtime: i64,
+    bucket: ThumbBucket,
+    roots: &[PathBuf],
+) {
+    let png = texture.save_to_png_bytes();
+    let png = vitrine_engine::png_meta::add_text_chunks(
+        &png,
+        &[
+            ("Thumb::URI", uri),
+            ("Thumb::MTime", &source_mtime.to_string()),
+        ],
+    )
+    .unwrap_or_else(|| png.to_vec());
+    let rel = format!("{}.png", thumbnail_cache::cache_key(uri));
+    for root in roots {
+        let dir = root.join(bucket.dir());
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(dir.join(&rel), &png);
+        }
+    }
+}
+
 fn store(
     uri: &str,
     source_mtime: i64,
@@ -321,27 +384,10 @@ fn store(
 
     let texture = texture.clone(); // gdk::Texture is Send
     let uri = uri.to_string();
-    let mtime = source_mtime.to_string();
-    let rel = format!("{}.png", thumbnail_cache::cache_key(&uri));
-    let mut roots = vec![private_dir()];
-    let shared = shared_dir();
-    if shareable && shared != private_dir() {
-        roots.push(shared);
-    }
+    let roots = roots_for(shareable);
 
     gio::spawn_blocking(move || {
-        let png = texture.save_to_png_bytes();
-        let png = vitrine_engine::png_meta::add_text_chunks(
-            &png,
-            &[("Thumb::URI", &uri), ("Thumb::MTime", &mtime)],
-        )
-        .unwrap_or_else(|| png.to_vec());
-        for root in roots {
-            let dir = root.join(bucket.dir());
-            if std::fs::create_dir_all(&dir).is_ok() {
-                let _ = std::fs::write(dir.join(&rel), &png);
-            }
-        }
+        write_thumb(&texture, &uri, source_mtime, bucket, &roots);
         PENDING.fetch_sub(1, Ordering::Relaxed);
     });
 }

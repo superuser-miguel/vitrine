@@ -671,7 +671,6 @@ impl VitrineWindow {
         self.imp().sort_model.borrow().clone()
     }
 
-
     /// VITRINE_DEBUG: a MangoHUD-style readout of the thumbnail pipeline. Samples
     /// render frame time, worst main-loop stall, decode throughput, cache hit
     /// rate, pending-queue depth, and RSS, and logs a `VDBG` line to stderr each

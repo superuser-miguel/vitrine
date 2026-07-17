@@ -33,9 +33,6 @@ pub fn index_db_path() -> PathBuf {
 
 /// How many un-enriched files the driver pulls per round-trip to the writer.
 const ENRICH_BATCH: i64 = 64;
-/// Frame size (px) requested for perceptual hashing — dHash reduces to 8×8, so a
-/// small decode is ample and keeps the enrichment pass cheap.
-const PHASH_PX: u32 = 64;
 
 /// Progress emitted by the indexer for the UI.
 #[derive(Debug, Clone)]
@@ -389,7 +386,9 @@ async fn run_enrichment(requests: async_channel::Sender<Request>) {
 /// retried forever.
 async fn enrich_one(path: &str) -> Enrichment {
     let file = gio::File::for_path(path);
-    let Some(probe) = crate::decode::probe(&file, PHASH_PX).await else {
+    // Decode at the grid's thumbnail size, not a pHash-only 64px frame: the same
+    // decode now serves both the pHash *and* the warmed display thumbnail (#3).
+    let Some(probe) = crate::decode::probe(&file, crate::thumbnails::WARM_PX).await else {
         return Enrichment::default();
     };
     let exif = probe
@@ -398,6 +397,15 @@ async fn enrich_one(path: &str) -> Enrichment {
         .map(vitrine_engine::parse_exif)
         .unwrap_or_default();
     let phash = phash_from_texture(&probe.frame);
+    // #3: warm the on-disk thumbnail cache from this decode so browsing an indexed
+    // folder needs no on-demand decode. Uses the source's mtime for cache validity.
+    let mtime = std::fs::metadata(path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    crate::thumbnails::warm_cache(&file, mtime, &probe.frame).await;
     Enrichment {
         width: probe.width as i64,
         height: probe.height as i64,
