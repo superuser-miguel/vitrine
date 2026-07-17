@@ -768,10 +768,14 @@ impl VitrineWindow {
                         0
                     };
                     let queued = window.imp().pending.borrow().len();
+                    let (cache_mb, cache_n) = {
+                        let cache = window.imp().thumb_cache.borrow();
+                        (cache.used_bytes() / (1024 * 1024), cache.len())
+                    };
                     eprintln!(
                         "VDBG fps={fps} frame_max={fmax_ms}ms stall={stall}ms \
                          decode[live={} done={} +{rate}/s] queued={queued} \
-                         cache_hit={hit}% rss={}MB",
+                         cache_hit={hit}% ram_cache={cache_mb}MB/{cache_n} rss={}MB",
                         c.inflight,
                         c.done,
                         crate::debug::rss_mb()
