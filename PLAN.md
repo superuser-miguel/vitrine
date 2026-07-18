@@ -37,10 +37,12 @@ sidecar export · background content-hash index with EXIF/pHash enrichment.
 complete + Fable's fixes, with the edit-tier experiment reverted. `git checkout
 v1.1-stable` to return here. (`v1.0-stable` still exists as the older baseline.)
 
-### Edit tier — Phase 1 (rotate/flip) ATTEMPTED & REVERTED (2026-07-18)
+### Edit tier — rotate / flip / crop (non-destructive) — SHIPPED (2026-07-18)
 
-Built in `2992695`, reverted in `4f1ab20`. Kept here as a design record; see also
-memory `vitrine-edit-tier`. **Do not re-land as-is.**
+Arc: destructive first attempt (`2992695`) **reverted** (`4f1ab20`), then
+**rebuilt non-destructively** (`1bbeed7`→`c1c7047`) as designed. Full history kept
+below as a design record; see also memory `vitrine-edit-tier`. The reverted
+in-place/glycin-`Complete` approach is documented so it is **not re-landed as-is**.
 
 *What was built:* `crate::edit` wrapping glycin 3.1 `Editor`
 (`Editor::new(file).edit().await` → `apply_sparse(&Operations)` →
@@ -100,14 +102,12 @@ jpg q90 / png — NOT glycin's broken editor); Save = tmp+rename, re-hash,
 identity, instructions cleared (they're in the pixels), caches evicted.
 Feel/UX verification is the user's (house rule 1).
 
-*Redesign decisions still open (need UI/UX + glycin research):*
-- **Model:** non-destructive (store rotation as an orientation instruction in
-  DB/XMP, apply at display/export — matches the reviewer identity, zero file
-  mutation) **vs** destructive-with-save (gThumb edit mode).
-- **True zero-loss rotate on no-EXIF files:** write only the EXIF Orientation tag
-  (insert an APP1 segment via `little_exif`/`img-parts`), NOT glycin's re-encode;
-  or a libjpeg-turbo DCT-lossless transform. glycin's own editor is not
-  acceptable for this use until the size-explosion is understood.
+*Redesign decisions — RESOLVED (shipped above):* chose **non-destructive**
+(orientation/crop instructions keyed by content hash, file never rewritten —
+matches the reviewer identity). glycin's `Editor` is abandoned for baking; Save /
+Save As bake via the engine `encode_baked` (image crate) instead. Remaining
+edit-tier ideas (resize/straighten, GPU-accelerated adjustments/filters) are
+future work, extension territory (§10.3/§10.5).
 
 
 **Hard-won process lessons (2026-07-16 — do not relearn).**

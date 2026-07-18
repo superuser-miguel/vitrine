@@ -15,8 +15,9 @@ Rust · GTK4 · gtk-rs · libadwaita · Blueprint · glycin · SQLite · Flatpak
 See [`PLAN.md`](PLAN.md) for the phased build plan.
 
 > **Status: v1 feature-complete.** Vitrine browses, views, indexes, reviews,
-> organizes, and de-duplicates — all keyed to survive renames. Builds via cargo,
-> Meson, and flatpak-builder; the engine ships 73 tests and stays UI-free.
+> organizes, edits (non-destructively), and de-duplicates — all keyed to survive
+> renames. Builds via cargo,
+> Meson, and flatpak-builder; the engine ships 83 tests and stays UI-free.
 > Distributed as a Flatpak bundle via GitHub Releases, with the project page on
 > [GitHub Pages](https://superuser-miguel.github.io/vitrine/) — **not** Flathub.
 
@@ -30,7 +31,8 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
 - **First-class AVIF / JXL / HEIF** (plus JPEG/PNG/WebP/…) via glycin — color-
   managed, EXIF-oriented, decoded in sandboxed subprocesses.
 - **Sidebar** — a gThumb-style switcher between **Places** (Nautilus-style
-  bookmarks: rename, reorder by drag, remove), a lazy **Folders** tree, and
+  bookmarks: rename, reorder by drag, remove; removable-media bookmarks show an
+  **offline state** when the drive is disconnected), a lazy **Folders** tree, and
   **Collections**. Back / Forward navigation history.
 - **Nautilus-style sorting** — Name / Size / Modified / Type with an independent
   ascending/descending toggle; instant, live, remembered across sessions.
@@ -39,6 +41,15 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
 - Single-image viewer — fit / zoom / pan / 100%, arrow-key navigation, a synced
   filmstrip, and a **properties sidebar** (dimensions, size, format, date taken,
   camera, orientation).
+
+**Edit (non-destructive)**
+- A **brush button** in the viewer opens an **edit card** (same slide-in as the
+  properties panel) with **rotate**, **flip**, and **crop** — stored as
+  instructions keyed by content hash and applied on decode, so **the original
+  file is never rewritten**. **Undo / redo** per image.
+- **Save / Save As** bakes the result to a flat file at full resolution when you
+  want one (via the `image` crate, not a lossy re-encode of the original), and
+  moves your ratings / tags / comments / collections to the baked copy's identity.
 
 **Review & organize**
 - **Ratings** (0–5 stars, keyboard in the grid, star overlays on thumbnails),
@@ -68,20 +79,21 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
 
 v1 is feature-complete. See [`PLAN.md`](PLAN.md) for full specs.
 
+Recently shipped: a non-destructive edit tier (rotate / flip / crop), the
+decode-scheduling performance sprint (viewport-ordered, cost-aware loading;
+warm-cache-during-indexing), and a first cut of offline removable-media bookmarks.
+
 **Next up**
 
-- **Viewer: click-drag pan** — grab-hand panning for zoomed-in / large images
-  (PLAN §14.1).
-- **Removable-media bookmarks** — offline / greyed state for USB drives that come
-  and go, via `GVolumeMonitor` (PLAN §14.2).
-- **Decode-scheduling performance** — viewport-ordered, cost-aware thumbnail
-  loading so folders that mix large and small images fill fast (PLAN §13).
+- **Viewer: click-drag pan** — grab-hand panning for zoomed-in / large images;
+  built once, needs a gesture-conflict fix (PLAN §14.1).
+- **Deeper editing** — resize / straighten and GPU-accelerated adjustments, on top
+  of the non-destructive rotate / flip / crop that ships today.
 
 **Later**
 
 - **Navigation** — a Nautilus-style address bar and tabs (Back/Forward shipped).
 - **Lua scripting** — custom sort orders, batch ImageMagick ops, rename rules.
-- **A non-destructive edit tier** — crop / rotate / resize (GPU-accelerated).
 - **WASM compute plugins** — local auto-tagging and embedding-based "find
   similar", plus faces / OCR / quality scoring.
 - **In-file XMP embed** — write the packet directly into JPEG/PNG containers, on
