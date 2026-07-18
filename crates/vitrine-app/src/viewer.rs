@@ -79,6 +79,10 @@ mod imp {
         #[template_child]
         pub fullscreen_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
+        pub edit_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub edit_split: TemplateChild<adw::OverlaySplitView>,
+        #[template_child]
         pub rotate_left_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub rotate_right_button: TemplateChild<gtk::Button>,
@@ -88,6 +92,8 @@ mod imp {
         pub flip_v_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub filmstrip_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub info_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub info_split: TemplateChild<adw::OverlaySplitView>,
         #[template_child]
@@ -165,11 +171,14 @@ mod imp {
                 zoom_out_button: Default::default(),
                 zoom_fit_button: Default::default(),
                 fullscreen_button: Default::default(),
+                edit_button: Default::default(),
+                edit_split: Default::default(),
                 rotate_left_button: Default::default(),
                 rotate_right_button: Default::default(),
                 flip_h_button: Default::default(),
                 flip_v_button: Default::default(),
                 filmstrip_button: Default::default(),
+                info_button: Default::default(),
                 info_split: Default::default(),
                 rating_box: Default::default(),
                 comment_row: Default::default(),
@@ -631,6 +640,27 @@ impl VitrineViewer {
 
     fn setup_controls(&self) {
         let imp = self.imp();
+
+        // The edit card is a mode: opening it closes Properties, and vice
+        // versa, so the right edge always shows exactly one card.
+        imp.edit_button.connect_toggled(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |b| {
+                if b.is_active() {
+                    v.imp().info_button.set_active(false);
+                }
+            }
+        ));
+        imp.info_button.connect_toggled(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |b| {
+                if b.is_active() {
+                    v.imp().edit_button.set_active(false);
+                }
+            }
+        ));
 
         use vitrine_engine::OrientOp;
         for (button, op) in [

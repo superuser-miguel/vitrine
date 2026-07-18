@@ -37,56 +37,9 @@ template $VitrineViewer: Adw.NavigationPage {
       // Edit entry point (PLAN edit-tier UX decision): one brush button opening
       // a card of basic tools — the viewer chrome never grows naked edit buttons.
       [end]
-      Gtk.MenuButton edit_button {
+      Gtk.ToggleButton edit_button {
         icon-name: "document-edit-symbolic";
         tooltip-text: _("Edit");
-
-        popover: Gtk.Popover {
-          child: Gtk.Box {
-            orientation: vertical;
-            spacing: 8;
-            margin-top: 10;
-            margin-bottom: 10;
-            margin-start: 10;
-            margin-end: 10;
-
-            Gtk.Box {
-              spacing: 6;
-              homogeneous: true;
-
-              Gtk.Button rotate_left_button {
-                icon-name: "object-rotate-left-symbolic";
-                tooltip-text: _("Rotate Left");
-              }
-
-              Gtk.Button rotate_right_button {
-                icon-name: "object-rotate-right-symbolic";
-                tooltip-text: _("Rotate Right");
-              }
-
-              Gtk.Button flip_h_button {
-                icon-name: "object-flip-horizontal-symbolic";
-                tooltip-text: _("Flip Horizontally");
-              }
-
-              Gtk.Button flip_v_button {
-                icon-name: "object-flip-vertical-symbolic";
-                tooltip-text: _("Flip Vertically");
-              }
-            }
-
-            Gtk.Label {
-              label: _("Applied instantly — the original file is never modified");
-              wrap: true;
-              max-width-chars: 28;
-
-              styles [
-                "dim-label",
-                "caption",
-              ]
-            }
-          };
-        };
       }
 
       [end]
@@ -114,7 +67,78 @@ template $VitrineViewer: Adw.NavigationPage {
       max-sidebar-width: 340;
       show-sidebar: bind info_button.active bidirectional;
 
-      content: Gtk.Overlay {
+      content: Adw.OverlaySplitView edit_split {
+        sidebar-position: end;
+        collapsed: true;
+        max-sidebar-width: 280;
+        show-sidebar: bind edit_button.active bidirectional;
+
+        // Edit card (PLAN edit-tier UX): presented exactly like Image
+        // Properties — a right-edge card sliding in over the image, so
+        // editing reads as a mode. Save / Save As / undo / redo join this
+        // card when baking lands.
+        sidebar: Adw.PreferencesPage {
+          width-request: 260;
+
+          Adw.PreferencesGroup {
+            title: _("Transform");
+
+            Adw.ActionRow {
+              title: _("Rotate");
+
+              [suffix]
+              Gtk.Box {
+                valign: center;
+                spacing: 6;
+
+                Gtk.Button rotate_left_button {
+                  icon-name: "object-rotate-left-symbolic";
+                  tooltip-text: _("Rotate Left");
+                }
+
+                Gtk.Button rotate_right_button {
+                  icon-name: "object-rotate-right-symbolic";
+                  tooltip-text: _("Rotate Right");
+                }
+              }
+            }
+
+            Adw.ActionRow {
+              title: _("Flip");
+
+              [suffix]
+              Gtk.Box {
+                valign: center;
+                spacing: 6;
+
+                Gtk.Button flip_h_button {
+                  icon-name: "object-flip-horizontal-symbolic";
+                  tooltip-text: _("Flip Horizontally");
+                }
+
+                Gtk.Button flip_v_button {
+                  icon-name: "object-flip-vertical-symbolic";
+                  tooltip-text: _("Flip Vertically");
+                }
+              }
+            }
+          }
+
+          Adw.PreferencesGroup {
+            Gtk.Label {
+              label: _("Applied instantly — the original file is never modified");
+              wrap: true;
+              max-width-chars: 30;
+
+              styles [
+                "dim-label",
+                "caption",
+              ]
+            }
+          }
+        };
+
+        content: Gtk.Overlay {
         child: Gtk.ScrolledWindow picture_scroller {
           hexpand: true;
           vexpand: true;
@@ -142,6 +166,7 @@ template $VitrineViewer: Adw.NavigationPage {
             "circular",
           ]
         }
+        };
       };
 
       sidebar: Adw.PreferencesPage {
