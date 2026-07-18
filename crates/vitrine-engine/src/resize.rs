@@ -203,3 +203,83 @@ mod orient_tests {
         assert_eq!(c(1, RotateCcw), 8);
     }
 }
+
+/// Extract a normalized-rect crop from tight/padded RGBA8. `rect` is
+/// `(x, y, w, h)` in [0,1] of the input image (display space — callers apply
+/// orientation first). Returns tight RGBA plus pixel dims; `None` for a
+/// malformed input or a degenerate (< 1px) result.
+pub fn crop_rgba(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    rect: (f64, f64, f64, f64),
+) -> Option<(Vec<u8>, u32, u32)> {
+    let (w, h, stride) = (width as usize, height as usize, stride as usize);
+    if stride < w * 4 || src.len() < stride * h {
+        return None;
+    }
+    let (rx, ry, rw, rh) = rect;
+    let x0 = ((rx.clamp(0.0, 1.0)) * w as f64).round() as usize;
+    let y0 = ((ry.clamp(0.0, 1.0)) * h as f64).round() as usize;
+    let cw = ((rw.clamp(0.0, 1.0)) * w as f64).round() as usize;
+    let ch = ((rh.clamp(0.0, 1.0)) * h as f64).round() as usize;
+    let cw = cw.min(w.saturating_sub(x0));
+    let ch = ch.min(h.saturating_sub(y0));
+    if cw == 0 || ch == 0 {
+        return None;
+    }
+    let mut out = vec![0u8; cw * ch * 4];
+    for row in 0..ch {
+        let s = (y0 + row) * stride + x0 * 4;
+        let d = row * cw * 4;
+        out[d..d + cw * 4].copy_from_slice(&src[s..s + cw * 4]);
+    }
+    Some((out, cw as u32, ch as u32))
+}
+
+/// Encode tight RGBA8 for the bake path (Save / Save As). `format` is matched
+/// on the destination file extension: `jpg`/`jpeg` → JPEG q90 (alpha dropped),
+/// anything else → PNG. Pure CPU; run on a worker.
+pub fn encode_baked(rgba: &[u8], width: u32, height: u32, format: &str) -> Option<Vec<u8>> {
+    use image::ImageEncoder;
+    let mut out = Vec::new();
+    match format.to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => {
+            let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
+                .write_image(&rgb, width, height, image::ExtendedColorType::Rgb8)
+                .ok()?;
+        }
+        _ => {
+            image::codecs::png::PngEncoder::new(&mut out)
+                .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+                .ok()?;
+        }
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod crop_tests {
+    use super::*;
+
+    #[test]
+    fn crop_extracts_the_right_pixels() {
+        // 2x2: A B / C D — crop right half → B / D
+        let px = |v: u8| [v, v, v, 255];
+        let src: Vec<u8> = [px(1), px(2), px(3), px(4)].concat();
+        let (out, w, h) = crop_rgba(&src, 2, 2, 8, (0.5, 0.0, 0.5, 1.0)).unwrap();
+        assert_eq!((w, h, out[0], out[4]), (1, 2, 2, 4));
+        assert!(crop_rgba(&src, 2, 2, 8, (1.0, 0.0, 0.0, 1.0)).is_none());
+    }
+
+    #[test]
+    fn encode_baked_roundtrips_png() {
+        let src = vec![9u8; 4 * 4];
+        let png = encode_baked(&src, 2, 2, "png").unwrap();
+        let img = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(img.get_pixel(1, 1).0, [9, 9, 9, 9]);
+        assert!(encode_baked(&src, 2, 2, "jpg").is_some());
+    }
+}

@@ -52,7 +52,7 @@ pub use exif::{parse_exif, ExifData};
 pub use files::{Enrichment, FileRecord};
 pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
 pub use query::{Direction, Query, SortKey};
-pub use resize::{orient_rgba, resize_rgba};
+pub use resize::{crop_rgba, encode_baked, orient_rgba, resize_rgba};
 pub use scanner::{classify, walk_images, Change, ScannedFile};
 pub use tags::Tag;
 pub use xmp::{sidecar_path, XmpMetadata};

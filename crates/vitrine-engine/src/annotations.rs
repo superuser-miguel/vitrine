@@ -97,24 +97,73 @@ impl Db {
         Ok(())
     }
 
-    /// `(path, content_hash, rating, orientation)` for present files under
+    /// Set the non-destructive crop rect (normalized display-space [0,1]).
+    pub fn set_crop(&self, content_hash: &str, r: (f64, f64, f64, f64)) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "INSERT INTO crops(content_hash, x, y, w, h, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(content_hash) DO UPDATE SET
+               x = excluded.x, y = excluded.y, w = excluded.w, h = excluded.h,
+               updated_at = excluded.updated_at",
+            rusqlite::params![content_hash, r.0, r.1, r.2, r.3, now_secs()],
+        )?;
+        Ok(())
+    }
+
+    /// Remove the crop instruction (→ full frame).
+    pub fn clear_crop(&self, content_hash: &str) -> rusqlite::Result<()> {
+        self.conn()
+            .execute("DELETE FROM crops WHERE content_hash = ?1", [content_hash])?;
+        Ok(())
+    }
+
+    /// Move every annotation row from `old` to `new` content hash — the Save
+    /// (bake-in-place) path: the rewritten file has a new identity, and the
+    /// user's ratings/tags/comments/collections must follow it. Orientation and
+    /// crop instructions are NOT moved (they were just baked into the pixels).
+    pub fn rekey_annotations(&self, old: &str, new: &str) -> rusqlite::Result<()> {
+        let conn = self.conn();
+        for sql in [
+            "UPDATE OR REPLACE ratings SET content_hash = ?2 WHERE content_hash = ?1",
+            "UPDATE OR REPLACE comments SET content_hash = ?2 WHERE content_hash = ?1",
+            "UPDATE OR REPLACE file_tags SET content_hash = ?2 WHERE content_hash = ?1",
+            "UPDATE OR REPLACE collection_items SET content_hash = ?2 WHERE content_hash = ?1",
+            "DELETE FROM orientations WHERE content_hash = ?1",
+            "DELETE FROM crops WHERE content_hash = ?1",
+        ] {
+            conn.execute(sql, rusqlite::params![old, new])?;
+        }
+        Ok(())
+    }
+
+    /// `(path, content_hash, rating, orientation, crop)` for present files under
     /// `folder` — one query to stamp the grid's in-memory items, so cell rating
     /// overlays and rating writes need no per-cell database hit. `rating` is 0
     /// when unrated; `orientation` is 1 (identity) when never rotated.
-    pub fn ratings_under(&self, folder: &str) -> rusqlite::Result<Vec<(String, String, i64, i64)>> {
+    #[allow(clippy::type_complexity)]
+    pub fn ratings_under(
+        &self,
+        folder: &str,
+    ) -> rusqlite::Result<Vec<(String, String, i64, i64, Option<(f64, f64, f64, f64)>)>> {
         // Runs on the main thread at every folder open — the path range (vs a
         // LIKE prefix) is what lets it use the path index instead of scanning
         // the whole files table (see `subtree_range`).
         let (lo, hi) = crate::query::subtree_range(folder);
         let mut stmt = self.conn().prepare(
-            "SELECT f.path, f.content_hash, COALESCE(r.rating, 0), COALESCE(o.orientation, 1)
+            "SELECT f.path, f.content_hash, COALESCE(r.rating, 0), COALESCE(o.orientation, 1),
+                    c.x, c.y, c.w, c.h
              FROM files f
              LEFT JOIN ratings r ON r.content_hash = f.content_hash
              LEFT JOIN orientations o ON o.content_hash = f.content_hash
+             LEFT JOIN crops c ON c.content_hash = f.content_hash
              WHERE f.missing = 0 AND f.path >= ?1 AND f.path < ?2",
         )?;
         let rows = stmt.query_map([lo, hi], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            let crop = match (r.get::<_, Option<f64>>(4)?, r.get(5)?, r.get(6)?, r.get(7)?) {
+                (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
+                _ => None,
+            };
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, crop))
         })?;
         rows.collect()
     }
@@ -172,12 +221,12 @@ mod tests {
             .unwrap();
         db.set_rating("ha", 4).unwrap();
         let mut rows = db.ratings_under("/p").unwrap();
-        rows.sort();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(
             rows,
             vec![
-                ("/p/a.jpg".to_string(), "ha".to_string(), 4, 1),
-                ("/p/b.jpg".to_string(), "hb".to_string(), 0, 1), // unrated → 0, unrotated → 1
+                ("/p/a.jpg".to_string(), "ha".to_string(), 4, 1, None),
+                ("/p/b.jpg".to_string(), "hb".to_string(), 0, 1, None),
             ]
         );
     }

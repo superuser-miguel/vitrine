@@ -13,7 +13,7 @@ authors.workspace = true
 # only in plain paths, byte streams, SQLite rows, and data types.
 [dependencies]
 blake3 = "1.8.5"
-image = { version = "0.25", default-features = false }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 image_hasher = "3.1.1"
 kamadak-exif = "0.6.1"
 md-5 = "0.11.0"

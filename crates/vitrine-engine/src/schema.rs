@@ -95,6 +95,17 @@ CREATE TABLE orientations (
   updated_at   INTEGER NOT NULL
 );
 "#,
+    // v4 — non-destructive crop instruction (edit tier). Normalized [0,1]
+    // rect in DISPLAY space (i.e. after the orientation instruction is
+    // applied). Content-hash keyed; the file is never rewritten.
+    r#"
+CREATE TABLE crops (
+  content_hash TEXT PRIMARY KEY,
+  x REAL NOT NULL, y REAL NOT NULL, w REAL NOT NULL, h REAL NOT NULL,
+  sync_state   TEXT NOT NULL DEFAULT 'db-only',
+  updated_at   INTEGER NOT NULL
+);
+"#,
 ];
 
 /// The schema version this build targets (number of migrations).
