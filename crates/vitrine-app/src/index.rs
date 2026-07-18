@@ -71,6 +71,14 @@ enum Request {
         hash: String,
         orientation: i64,
     },
+    Rekey {
+        old: String,
+        new: String,
+    },
+    SetCrop {
+        hash: String,
+        rect: Option<(f64, f64, f64, f64)>,
+    },
     SetComment {
         hash: String,
         body: String,
@@ -120,6 +128,22 @@ impl Annotator {
         let _ = self.requests.try_send(Request::SetRating {
             hash: hash.to_string(),
             rating,
+        });
+    }
+
+    /// Move all annotations to a baked file's new content hash (Save path).
+    pub fn rekey(&self, old: &str, new: &str) {
+        let _ = self.requests.try_send(Request::Rekey {
+            old: old.to_string(),
+            new: new.to_string(),
+        });
+    }
+
+    /// Set (or clear with None) the non-destructive crop instruction.
+    pub fn set_crop(&self, hash: &str, rect: Option<(f64, f64, f64, f64)>) {
+        let _ = self.requests.try_send(Request::SetCrop {
+            hash: hash.to_string(),
+            rect,
         });
     }
 
@@ -287,6 +311,20 @@ fn worker(
                 };
                 if let Err(e) = r {
                     glib::g_warning!("vitrine", "set rating {hash}: {e}");
+                }
+            }
+            Request::Rekey { old, new } => {
+                if let Err(e) = db.rekey_annotations(&old, &new) {
+                    glib::g_warning!("vitrine", "rekey {old}->{new}: {e}");
+                }
+            }
+            Request::SetCrop { hash, rect } => {
+                let r = match rect {
+                    Some(rect) => db.set_crop(&hash, rect),
+                    None => db.clear_crop(&hash),
+                };
+                if let Err(e) = r {
+                    glib::g_warning!("vitrine", "set crop {hash}: {e}");
                 }
             }
             Request::SetOrientation { hash, orientation } => {

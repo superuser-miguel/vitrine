@@ -10,7 +10,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use adw::prelude::{ActionRowExt, EntryRowExt};
+use adw::prelude::{ActionRowExt, AlertDialogExt, AlertDialogExtManual, EntryRowExt};
 use adw::subclass::prelude::*;
 use gtk::gdk;
 use gtk::prelude::*;
@@ -46,10 +46,14 @@ type TextureCache = Rc<RefCell<SizedLru<String, gdk::Texture>>>;
 /// request is best-effort, so an oversized frame is CPU-downscaled on a worker
 /// thread before it ever reaches the main-thread GPU upload (an unbounded
 /// full-res upload is a visible transition stall).
-async fn decode_view(file: &gio::File, orientation: i32) -> Option<gdk::Texture> {
+async fn decode_view(
+    file: &gio::File,
+    orientation: i32,
+    crop: Option<(f64, f64, f64, f64)>,
+) -> Option<gdk::Texture> {
     let texture = crate::decode::full(file, VIEW_MAX).await.ok()?;
     let texture = crate::thumbnails::downscale_cpu(texture, VIEW_MAX).await?;
-    crate::thumbnails::orient_cpu(texture, orientation).await
+    crate::thumbnails::transform_cpu(texture, orientation, crop).await
 }
 
 mod imp {
@@ -90,6 +94,22 @@ mod imp {
         pub flip_h_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub flip_v_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub crop_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub crop_apply_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub crop_reset_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub undo_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub redo_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub save_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub save_as_row: TemplateChild<adw::ActionRow>,
+        #[template_child]
+        pub crop_area: TemplateChild<gtk::DrawingArea>,
         #[template_child]
         pub filmstrip_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
@@ -151,6 +171,15 @@ mod imp {
         /// (the same bug the grid's scheduler fixes).
         pub film_queue: RefCell<Vec<(glib::WeakRef<gtk::ListItem>, ImageObject, u32)>>,
         pub film_inflight: Cell<usize>,
+        /// Per-image session edit history for undo/redo: uri → (states, index
+        /// into states of the current one). A state is (orientation, crop).
+        #[allow(clippy::type_complexity)]
+        pub edit_history: RefCell<
+            std::collections::HashMap<String, (Vec<(i32, Option<(f64, f64, f64, f64)>)>, usize)>,
+        >,
+        /// In-progress crop selection in crop_area widget coords (x, y, w, h).
+        pub crop_sel: Cell<Option<(f64, f64, f64, f64)>>,
+        pub crop_drag_start: Cell<(f64, f64)>,
         /// Where the strip is *about* to be: `scroll_to`'s target, used as the
         /// centre until the hadjustment catches up (it updates asynchronously,
         /// and ordering/evicting by the stale value starved the very cells the
@@ -177,6 +206,14 @@ mod imp {
                 rotate_right_button: Default::default(),
                 flip_h_button: Default::default(),
                 flip_v_button: Default::default(),
+                crop_button: Default::default(),
+                crop_apply_button: Default::default(),
+                crop_reset_button: Default::default(),
+                undo_button: Default::default(),
+                redo_button: Default::default(),
+                save_row: Default::default(),
+                save_as_row: Default::default(),
+                crop_area: Default::default(),
                 filmstrip_button: Default::default(),
                 info_button: Default::default(),
                 info_split: Default::default(),
@@ -206,6 +243,9 @@ mod imp {
                 syncing: Cell::new(false),
                 film_queue: RefCell::new(Vec::new()),
                 film_inflight: Cell::new(0),
+                edit_history: Default::default(),
+                crop_sel: Cell::new(None),
+                crop_drag_start: Cell::new((0.0, 0.0)),
                 film_center_hint: Cell::new(None),
             }
         }
@@ -382,7 +422,7 @@ impl VitrineViewer {
             return;
         };
         let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE)
-            + &crate::thumbnails::orient_key(item.orientation());
+            + &crate::thumbnails::edit_key(item.orientation(), item.crop());
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             pic.set_paintable(Some(&texture));
             // Coverage metric: bind-time RAM hits paint without the queue, so a
@@ -516,8 +556,9 @@ impl VitrineViewer {
             return;
         };
         let orientation = item.orientation();
+        let crop = item.crop();
         let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE)
-            + &crate::thumbnails::orient_key(orientation);
+            + &crate::thumbnails::edit_key(orientation, crop);
         let cached = cache.borrow_mut().get(&key).cloned();
         let texture = if cached.is_some() {
             cached
@@ -532,7 +573,7 @@ impl VitrineViewer {
             )
             .await;
             let loaded = match loaded {
-                Some(t) => crate::thumbnails::orient_cpu(t, orientation).await,
+                Some(t) => crate::thumbnails::transform_cpu(t, orientation, crop).await,
                 None => None,
             };
             match &loaded {
@@ -628,11 +669,403 @@ impl VitrineViewer {
             return;
         };
         let next = vitrine_engine::compose_orientation(item.orientation() as i64, op) as i32;
-        item.set_orientation(next);
+        self.commit_edit_state(&item, next, item.crop());
+        self.show_position(pos);
+    }
+
+    /// Persist one edit state (orientation + crop) for `item`, recording it on
+    /// the per-image undo history (any redo tail is discarded).
+    fn commit_edit_state(
+        &self,
+        item: &ImageObject,
+        orientation: i32,
+        crop: Option<(f64, f64, f64, f64)>,
+    ) {
+        {
+            let mut hist = self.imp().edit_history.borrow_mut();
+            let (states, idx) = hist
+                .entry(item.file().uri().to_string())
+                .or_insert_with(|| (vec![(item.orientation(), item.crop())], 0));
+            states.truncate(*idx + 1);
+            states.push((orientation, crop));
+            *idx = states.len() - 1;
+        }
+        self.set_edit_state(item, orientation, crop);
+        self.sync_history_buttons(item);
+    }
+
+    /// Apply + persist a state without touching history (undo/redo path).
+    fn set_edit_state(
+        &self,
+        item: &ImageObject,
+        orientation: i32,
+        crop: Option<(f64, f64, f64, f64)>,
+    ) {
+        item.set_orientation(orientation);
+        item.set_crop(crop);
         let hash = item.content_hash();
         if !hash.is_empty() {
             if let Some(annotator) = self.imp().annotator.borrow().as_ref() {
-                annotator.set_orientation(&hash, next as i64);
+                annotator.set_orientation(&hash, orientation as i64);
+                annotator.set_crop(&hash, crop);
+            }
+        }
+    }
+
+    fn sync_history_buttons(&self, item: &ImageObject) {
+        let hist = self.imp().edit_history.borrow();
+        let (can_undo, can_redo) = match hist.get(&item.file().uri().to_string()) {
+            Some((states, idx)) => (*idx > 0, *idx + 1 < states.len()),
+            None => (false, false),
+        };
+        self.imp().undo_button.set_sensitive(can_undo);
+        self.imp().redo_button.set_sensitive(can_redo);
+    }
+
+    fn history_step(&self, delta: i64) {
+        let pos = self.current_position();
+        let Some(item) = self.item_at(pos) else {
+            return;
+        };
+        let state = {
+            let mut hist = self.imp().edit_history.borrow_mut();
+            let Some((states, idx)) = hist.get_mut(&item.file().uri().to_string()) else {
+                return;
+            };
+            let next = (*idx as i64 + delta).clamp(0, states.len() as i64 - 1) as usize;
+            if next == *idx {
+                return;
+            }
+            *idx = next;
+            states[next]
+        };
+        self.set_edit_state(&item, state.0, state.1);
+        self.sync_history_buttons(&item);
+        self.show_position(pos);
+    }
+
+    /// Wire the edit card's crop mode, undo/redo, and Save rows.
+    fn setup_edit_card(&self) {
+        let imp = self.imp();
+
+        // Crop mode: overlay visible + fit zoom while selecting.
+        imp.crop_button.connect_toggled(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |b| {
+                let imp = v.imp();
+                imp.crop_sel.set(None);
+                imp.crop_apply_button.set_sensitive(false);
+                imp.crop_area.set_visible(b.is_active());
+                if b.is_active() {
+                    v.zoom_fit();
+                }
+                imp.crop_area.queue_draw();
+            }
+        ));
+
+        let drag = gtk::GestureDrag::new();
+        drag.connect_drag_begin(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_, x, y| {
+                v.imp().crop_drag_start.set((x, y));
+                v.imp().crop_sel.set(None);
+                v.imp().crop_area.queue_draw();
+            }
+        ));
+        drag.connect_drag_update(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_, dx, dy| {
+                let (sx, sy) = v.imp().crop_drag_start.get();
+                let (x0, x1) = if dx < 0.0 {
+                    (sx + dx, sx)
+                } else {
+                    (sx, sx + dx)
+                };
+                let (y0, y1) = if dy < 0.0 {
+                    (sy + dy, sy)
+                } else {
+                    (sy, sy + dy)
+                };
+                v.imp().crop_sel.set(Some((x0, y0, x1 - x0, y1 - y0)));
+                v.imp()
+                    .crop_apply_button
+                    .set_sensitive((x1 - x0) > 8.0 && (y1 - y0) > 8.0);
+                v.imp().crop_area.queue_draw();
+            }
+        ));
+        imp.crop_area.add_controller(drag);
+
+        imp.crop_area.set_draw_func(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_, cr, w, h| {
+                // Dim everything outside the selection; white border around it.
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+                if let Some((x, y, sw, sh)) = v.imp().crop_sel.get() {
+                    cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                    cr.rectangle(x, y + sh, sw, -sh); // negative = punch hole
+                    cr.set_fill_rule(gtk::cairo::FillRule::EvenOdd);
+                    let _ = cr.fill();
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.9);
+                    cr.set_line_width(1.5);
+                    cr.rectangle(x, y, sw, sh);
+                    let _ = cr.stroke();
+                } else {
+                    cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                    let _ = cr.fill();
+                }
+            }
+        ));
+
+        imp.crop_apply_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.apply_crop_selection()
+        ));
+        imp.crop_reset_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| {
+                let pos = v.current_position();
+                if let Some(item) = v.item_at(pos) {
+                    if item.crop().is_some() {
+                        v.commit_edit_state(&item, item.orientation(), None);
+                        v.show_position(pos);
+                    }
+                }
+                v.imp().crop_button.set_active(false);
+            }
+        ));
+
+        imp.undo_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.history_step(-1)
+        ));
+        imp.redo_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.history_step(1)
+        ));
+
+        imp.save_as_row.connect_activated(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.save_as()
+        ));
+        imp.save_row.connect_activated(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.confirm_save()
+        ));
+    }
+
+    /// Map the widget-space selection to a normalized display-space rect,
+    /// compose it with any existing crop (a crop of a crop), and commit.
+    fn apply_crop_selection(&self) {
+        let imp = self.imp();
+        let Some((sx, sy, sw, sh)) = imp.crop_sel.get() else {
+            return;
+        };
+        let pos = self.current_position();
+        let Some(item) = self.item_at(pos) else {
+            return;
+        };
+        // Displayed image rect inside crop_area (contain-fit, centred; crop
+        // mode forces fit zoom so this geometry holds).
+        let (aw, ah) = (imp.crop_area.width() as f64, imp.crop_area.height() as f64);
+        let (nw, nh) = imp.natural.get();
+        if nw <= 0 || nh <= 0 || aw <= 0.0 || ah <= 0.0 {
+            return;
+        }
+        let scale = (aw / nw as f64).min(ah / nh as f64);
+        let (dw, dh) = (nw as f64 * scale, nh as f64 * scale);
+        let (ox, oy) = ((aw - dw) / 2.0, (ah - dh) / 2.0);
+        // Intersect selection with the displayed rect, then normalize.
+        let x0 = (sx.max(ox) - ox) / dw;
+        let y0 = (sy.max(oy) - oy) / dh;
+        let x1 = ((sx + sw).min(ox + dw) - ox) / dw;
+        let y1 = ((sy + sh).min(oy + dh) - oy) / dh;
+        if x1 - x0 <= 0.0 || y1 - y0 <= 0.0 {
+            return;
+        }
+        let sel = (x0, y0, x1 - x0, y1 - y0);
+        // Compose onto the existing crop: sel is relative to the *current*
+        // (already-cropped) display.
+        let global = match item.crop() {
+            Some((ex, ey, ew, eh)) => (ex + sel.0 * ew, ey + sel.1 * eh, sel.2 * ew, sel.3 * eh),
+            None => sel,
+        };
+        self.commit_edit_state(&item, item.orientation(), Some(global));
+        imp.crop_button.set_active(false);
+        self.show_position(pos);
+    }
+
+    /// Bake the current instructions into RGBA at full resolution and encode
+    /// for `dest`. Returns the encoded bytes off the main thread.
+    async fn bake(&self, item: &ImageObject, dest_ext: String) -> Option<Vec<u8>> {
+        let file = item.file();
+        let orientation = item.orientation();
+        let crop = item.crop();
+        let texture = crate::decode::full(&file, u32::MAX).await.ok()?;
+        gio::spawn_blocking(move || {
+            let w = texture.width() as u32;
+            let h = texture.height() as u32;
+            let (bytes, stride) = {
+                let mut d = gdk::TextureDownloader::new(&texture);
+                d.set_format(gdk::MemoryFormat::R8g8b8a8);
+                d.download_bytes()
+            };
+            drop(texture);
+            let (bytes, w, h) = match vitrine_engine::orient_rgba(
+                &bytes,
+                w,
+                h,
+                stride as u32,
+                orientation as i64,
+            ) {
+                Some((o, ow, oh)) => (o, ow, oh),
+                None => {
+                    let (t, tw, th) =
+                        vitrine_engine::resize_rgba(&bytes, w, h, stride as u32, u32::MAX)?;
+                    (t, tw, th)
+                }
+            };
+            let (bytes, w, h) = match crop {
+                Some(rect) => vitrine_engine::crop_rgba(&bytes, w, h, w * 4, rect)?,
+                None => (bytes, w, h),
+            };
+            vitrine_engine::encode_baked(&bytes, w, h, &dest_ext)
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+
+    fn save_as(&self) {
+        let pos = self.current_position();
+        let Some(item) = self.item_at(pos) else {
+            return;
+        };
+        let name = item.display_name();
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) => (s.to_string(), e.to_string()),
+            None => (name.clone(), "jpg".to_string()),
+        };
+        let dialog = gtk::FileDialog::builder()
+            .title(gettextrs::gettext("Save Edited Copy"))
+            .initial_name(format!("{stem}-edited.{ext}"))
+            .build();
+        let win = self.root().and_downcast::<gtk::Window>();
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            async move {
+                let Ok(dest) = dialog.save_future(win.as_ref()).await else {
+                    return;
+                };
+                let Some(path) = dest.path() else { return };
+                let ext = path
+                    .extension()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "jpg".into());
+                match v.bake(&item, ext).await {
+                    Some(bytes) => {
+                        let ok = gio::spawn_blocking(move || std::fs::write(&path, bytes).is_ok())
+                            .await
+                            .unwrap_or(false);
+                        if !ok {
+                            glib::g_warning!("vitrine", "save-as write failed");
+                        }
+                    }
+                    None => glib::g_warning!("vitrine", "save-as bake failed"),
+                }
+            }
+        ));
+    }
+
+    fn confirm_save(&self) {
+        let dialog = adw::AlertDialog::new(
+            Some(&gettextrs::gettext("Save Edits?")),
+            Some(&gettextrs::gettext(
+                "The edits will be baked into the original file. This cannot be undone.",
+            )),
+        );
+        dialog.add_responses(&[
+            ("cancel", &gettextrs::gettext("Cancel")),
+            ("save", &gettextrs::gettext("Save")),
+        ]);
+        dialog.set_response_appearance("save", adw::ResponseAppearance::Destructive);
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            async move {
+                if dialog.choose_future(Some(&v)).await == "save" {
+                    v.save_in_place().await;
+                }
+            }
+        ));
+    }
+
+    /// Bake into the original file: write-temp + rename, re-hash, move the
+    /// annotations to the new identity, clear the (now baked-in) instructions.
+    async fn save_in_place(&self) {
+        let pos = self.current_position();
+        let Some(item) = self.item_at(pos) else {
+            return;
+        };
+        let Some(path) = item.file().path() else {
+            return;
+        };
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "jpg".into());
+        let Some(bytes) = self.bake(&item, ext).await else {
+            glib::g_warning!("vitrine", "save bake failed");
+            return;
+        };
+        let old_hash = item.content_hash();
+        let write_path = path.clone();
+        let new_hash = gio::spawn_blocking(move || {
+            let tmp = write_path.with_extension("vitrine-tmp");
+            std::fs::write(&tmp, &bytes).ok()?;
+            std::fs::rename(&tmp, &write_path).ok()?;
+            vitrine_engine::blake3_file(&write_path).ok()
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(new_hash) = new_hash else {
+            glib::g_warning!("vitrine", "save write/rehash failed");
+            return;
+        };
+        if !old_hash.is_empty() {
+            if let Some(annotator) = self.imp().annotator.borrow().as_ref() {
+                annotator.rekey(&old_hash, &new_hash);
+            }
+        }
+        item.set_content_hash(&new_hash);
+        // Instructions are in the pixels now — identity state, fresh history.
+        item.set_orientation(1);
+        item.set_crop(None);
+        self.imp()
+            .edit_history
+            .borrow_mut()
+            .remove(&item.file().uri().to_string());
+        self.sync_history_buttons(&item);
+        // Evict RAM entries for this uri (viewer + thumbs at common buckets),
+        // then re-show; the disk cache self-invalidates via the mtime check.
+        let uri = item.file().uri().to_string();
+        self.imp().cache.borrow_mut().remove(&uri);
+        if let Some(thumbs) = self.imp().thumb_cache.borrow().as_ref() {
+            for px in [128u32, 256, 512, 1024] {
+                thumbs
+                    .borrow_mut()
+                    .remove(&crate::thumbnails::ram_key(&uri, px));
             }
         }
         self.show_position(pos);
@@ -661,6 +1094,8 @@ impl VitrineViewer {
                 }
             }
         ));
+
+        self.setup_edit_card();
 
         use vitrine_engine::OrientOp;
         for (button, op) in [
@@ -916,7 +1351,7 @@ impl VitrineViewer {
         }
 
         // Display from cache, or decode; either way reset zoom to fit.
-        let okey = crate::thumbnails::orient_key(item.orientation());
+        let okey = crate::thumbnails::edit_key(item.orientation(), item.crop());
         let uri = item.file().uri().to_string() + &okey;
         if let Some(texture) = imp.cache.borrow_mut().get(&uri).cloned() {
             self.set_texture(&texture);
@@ -949,12 +1384,13 @@ impl VitrineViewer {
     fn load_and_show(&self, item: ImageObject, pos: u32) {
         let file = item.file();
         let orientation = item.orientation();
-        let uri = file.uri().to_string() + &crate::thumbnails::orient_key(orientation);
+        let crop = item.crop();
+        let uri = file.uri().to_string() + &crate::thumbnails::edit_key(orientation, crop);
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = viewer)]
             self,
             async move {
-                if let Some(texture) = decode_view(&file, orientation).await {
+                if let Some(texture) = decode_view(&file, orientation, crop).await {
                     viewer.cache_texture(&uri, &texture);
                     if viewer.current_position() == pos {
                         viewer.set_texture(&texture);
@@ -977,7 +1413,9 @@ impl VitrineViewer {
                 continue;
             };
             let orientation = item.orientation();
-            let uri = item.file().uri().to_string() + &crate::thumbnails::orient_key(orientation);
+            let crop = item.crop();
+            let uri =
+                item.file().uri().to_string() + &crate::thumbnails::edit_key(orientation, crop);
             if self.imp().cache.borrow().contains(&uri) {
                 continue;
             }
@@ -986,7 +1424,7 @@ impl VitrineViewer {
                 #[weak(rename_to = viewer)]
                 self,
                 async move {
-                    if let Some(texture) = decode_view(&file, orientation).await {
+                    if let Some(texture) = decode_view(&file, orientation, crop).await {
                         viewer.cache_texture(&uri, &texture);
                     }
                 }

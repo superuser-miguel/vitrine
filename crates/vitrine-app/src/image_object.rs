@@ -39,6 +39,8 @@ mod imp {
         pub rating: Cell<i32>,
         /// Non-destructive user orientation (EXIF 1-8; 1 = as-decoded).
         pub orientation: Cell<i32>,
+        /// Non-destructive crop rect, normalized display space; None = full.
+        pub crop: Cell<Option<(f64, f64, f64, f64)>>,
         /// True if decoding failed — the cell shows a broken-image placeholder.
         pub failed: Cell<bool>,
     }
@@ -159,6 +161,15 @@ impl ImageObject {
     /// Set the user orientation (clamped 1–8).
     pub fn set_orientation(&self, orientation: i32) {
         self.set_property("orientation", orientation.clamp(1, 8));
+    }
+
+    /// Non-destructive crop instruction (display-space normalized), if any.
+    pub fn crop(&self) -> Option<(f64, f64, f64, f64)> {
+        self.imp().crop.get()
+    }
+
+    pub fn set_crop(&self, crop: Option<(f64, f64, f64, f64)>) {
+        self.imp().crop.set(crop);
     }
 
     pub fn mark_failed(&self) {

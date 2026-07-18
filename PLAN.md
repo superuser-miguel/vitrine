@@ -88,6 +88,18 @@ rotate / flip, with save / save-as / undo / redo — "that's it." Never naked
 edit buttons in the viewer chrome (the bad placement was the core mistake).
 Anything deeper is extension territory (Lua/WASM, §10.3/§10.5).
 
+*REBUILT (2026-07-18, Fable): the edit tier now ships as designed.* Rotate /
+flip / **crop** are non-destructive instructions (migrations v3 `orientations` +
+v4 `crops`, content-hash keyed, composed/applied on worker threads, `#o`/`#c`
+RAM-key suffixes; disk caches always hold as-decoded pixels). Edit card =
+Properties-style right slide-in with Transform, Crop (drag-select overlay with
+dim + apply/reset), **undo/redo** (per-image session history), and **Save /
+Save As**: bake at full resolution via engine `encode_baked` (image crate,
+jpg q90 / png — NOT glycin's broken editor); Save = tmp+rename, re-hash,
+`rekey_annotations` moves ratings/tags/comments/collections to the new
+identity, instructions cleared (they're in the pixels), caches evicted.
+Feel/UX verification is the user's (house rule 1).
+
 *Redesign decisions still open (need UI/UX + glycin research):*
 - **Model:** non-destructive (store rotation as an orientation instruction in
   DB/XMP, apply at display/export — matches the reviewer identity, zero file

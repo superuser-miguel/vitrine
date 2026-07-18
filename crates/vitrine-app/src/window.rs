@@ -640,8 +640,9 @@ impl VitrineWindow {
         }
         let cache = self.imp().thumb_cache.clone();
         let orientation = req.item.orientation();
+        let crop = req.item.crop();
         let key = crate::thumbnails::ram_key(&req.item.file().uri(), req.load_size)
-            + &crate::thumbnails::orient_key(orientation);
+            + &crate::thumbnails::edit_key(orientation, crop);
         let cached = cache.borrow_mut().get(&key).cloned();
         let cached_hit = cached.is_some();
         let result = if cached_hit {
@@ -657,7 +658,7 @@ impl VitrineWindow {
             )
             .await;
             let loaded = match loaded {
-                Some(tex) => crate::thumbnails::orient_cpu(tex, orientation).await,
+                Some(tex) => crate::thumbnails::transform_cpu(tex, orientation, crop).await,
                 None => None,
             };
             match &loaded {
@@ -2407,20 +2408,24 @@ impl VitrineWindow {
         self.ensure_read_db();
         let db = self.imp().read_db.borrow();
         let Some(db) = db.as_ref() else { return };
-        let map: std::collections::HashMap<String, (String, i64, i64)> = db
+        type Stamp = (String, i64, i64, Option<(f64, f64, f64, f64)>);
+        let map: std::collections::HashMap<String, Stamp> = db
             .ratings_under(&folder.to_string_lossy())
             .unwrap_or_default()
             .into_iter()
-            .map(|(path, hash, rating, orientation)| (path, (hash, rating, orientation)))
+            .map(|(path, hash, rating, orientation, crop)| {
+                (path, (hash, rating, orientation, crop))
+            })
             .collect();
         for item in items {
             if let Some(path) = item.file().path() {
-                if let Some((hash, rating, orientation)) =
+                if let Some((hash, rating, orientation, crop)) =
                     map.get(&path.to_string_lossy().into_owned())
                 {
                     item.set_content_hash(hash);
                     item.set_rating(*rating as i32);
                     item.set_orientation(*orientation as i32);
+                    item.set_crop(*crop);
                 }
             }
         }

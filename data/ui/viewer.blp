@@ -125,8 +125,74 @@ template $VitrineViewer: Adw.NavigationPage {
           }
 
           Adw.PreferencesGroup {
+            title: _("Crop");
+
+            Adw.ActionRow {
+              title: _("Select Area");
+              subtitle: _("Drag on the image");
+
+              [suffix]
+              Gtk.Box {
+                valign: center;
+                spacing: 6;
+
+                Gtk.ToggleButton crop_button {
+                  icon-name: "edit-select-all-symbolic";
+                  tooltip-text: _("Select Crop Area");
+                }
+
+                Gtk.Button crop_apply_button {
+                  label: _("Apply");
+                  sensitive: false;
+
+                  styles [
+                    "suggested-action",
+                  ]
+                }
+
+                Gtk.Button crop_reset_button {
+                  label: _("Reset");
+                }
+              }
+            }
+          }
+
+          Adw.PreferencesGroup {
+            Gtk.Box {
+              halign: center;
+              spacing: 6;
+
+              Gtk.Button undo_button {
+                icon-name: "edit-undo-symbolic";
+                tooltip-text: _("Undo");
+                sensitive: false;
+              }
+
+              Gtk.Button redo_button {
+                icon-name: "edit-redo-symbolic";
+                tooltip-text: _("Redo");
+                sensitive: false;
+              }
+            }
+          }
+
+          Adw.PreferencesGroup {
+            Adw.ActionRow save_row {
+              title: _("Save");
+              subtitle: _("Bake edits into the original file");
+              activatable: true;
+            }
+
+            Adw.ActionRow save_as_row {
+              title: _("Save As…");
+              subtitle: _("Write an edited copy");
+              activatable: true;
+            }
+          }
+
+          Adw.PreferencesGroup {
             Gtk.Label {
-              label: _("Applied instantly — the original file is never modified");
+              label: _("Rotate, flip and crop apply instantly — the original file is only changed by Save");
               wrap: true;
               max-width-chars: 30;
 
@@ -151,6 +217,12 @@ template $VitrineViewer: Adw.NavigationPage {
 
         // A visible close control for immersive fullscreen (shown only then), so
         // the image mode is always exitable without knowing Esc/F11.
+        [overlay]
+        Gtk.DrawingArea crop_area {
+          visible: false;
+          can-target: true;
+        }
+
         [overlay]
         Gtk.Button fs_close_button {
           icon-name: "window-close-symbolic";

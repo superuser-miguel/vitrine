@@ -197,12 +197,17 @@ pub(crate) async fn downscale_cpu(texture: gdk::Texture, max: u32) -> Option<gdk
     .flatten()
 }
 
-/// Apply a non-destructive user orientation (EXIF 1–8) to a texture on a worker
-/// thread. Identity (≤1) returns the input untouched. Applied *after* cache
+/// Apply the non-destructive edit instructions — orientation (EXIF 1–8) then
+/// crop (normalized display-space rect) — to a texture on a worker thread.
+/// Identity instructions return the input untouched. Applied *after* cache
 /// reads / decode+downscale, so the disk caches always hold the as-decoded
-/// pixels (the shared cache is Nautilus's view of the file — never rotate it).
-pub(crate) async fn orient_cpu(texture: gdk::Texture, orientation: i32) -> Option<gdk::Texture> {
-    if orientation <= 1 {
+/// pixels (the shared cache is Nautilus's view of the file — never edit it).
+pub(crate) async fn transform_cpu(
+    texture: gdk::Texture,
+    orientation: i32,
+    crop: Option<(f64, f64, f64, f64)>,
+) -> Option<gdk::Texture> {
+    if orientation <= 1 && crop.is_none() {
         return Some(texture);
     }
     let w = texture.width() as u32;
@@ -214,8 +219,23 @@ pub(crate) async fn orient_cpu(texture: gdk::Texture, orientation: i32) -> Optio
             downloader.download_bytes()
         };
         drop(texture);
-        let (out, nw, nh) =
-            vitrine_engine::orient_rgba(&bytes, w, h, stride as u32, orientation as i64)?;
+        // Orient first (crop rects are display-space), each step passing
+        // through untouched when it's the identity.
+        let (bytes, w, h, stride) =
+            match vitrine_engine::orient_rgba(&bytes, w, h, stride as u32, orientation as i64) {
+                Some((o, ow, oh)) => (glib::Bytes::from_owned(o), ow, oh, None),
+                None => (bytes, w, h, Some(stride as u32)),
+            };
+        let stride = stride.unwrap_or(w * 4);
+        let (out, nw, nh) = match crop {
+            Some(rect) => vitrine_engine::crop_rgba(&bytes, w, h, stride, rect)?,
+            None => {
+                if orientation <= 1 {
+                    return None; // nothing was applied (shouldn't happen)
+                }
+                (bytes.to_vec(), w, h)
+            }
+        };
         Some(
             gdk::MemoryTextureBuilder::new()
                 .set_bytes(Some(&glib::Bytes::from_owned(out)))
@@ -232,14 +252,17 @@ pub(crate) async fn orient_cpu(texture: gdk::Texture, orientation: i32) -> Optio
     .flatten()
 }
 
-/// RAM-cache key suffix for a user orientation — identity adds nothing, so
-/// unrotated items keep their existing keys.
-pub fn orient_key(orientation: i32) -> String {
-    if orientation <= 1 {
-        String::new()
-    } else {
-        format!("#o{orientation}")
+/// RAM-cache key suffix for the edit instructions — identity adds nothing, so
+/// unedited items keep their existing keys.
+pub fn edit_key(orientation: i32, crop: Option<(f64, f64, f64, f64)>) -> String {
+    let mut key = String::new();
+    if orientation > 1 {
+        key.push_str(&format!("#o{orientation}"));
     }
+    if let Some((x, y, w, h)) = crop {
+        key.push_str(&format!("#c{x:.3},{y:.3},{w:.3},{h:.3}"));
+    }
+    key
 }
 
 /// Thumbnail size the background enrichment pass warms into the disk cache — the
