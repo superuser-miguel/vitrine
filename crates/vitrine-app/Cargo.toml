@@ -25,9 +25,6 @@ vitrine-engine = { workspace = true }
 # Sandboxed subprocess-per-image decode (PLAN §3). The `gdk4` feature yields
 # `Frame::texture() -> gdk::Texture`; its gdk4 must match our gtk4 (both 0.11).
 glycin = { version = "3.1", features = ["gdk4"] }
-# Rotation/orientation types for glycin's Editor (rotate/flip), same version
-# glycin itself pulls in — see edit.rs.
-gufo-common = "1.1"
 async-lock = "3.4.2"
 async-channel = "2.5.0"
 # mallopt(M_MMAP_THRESHOLD) at startup — see main.rs; Linux-only app (GNOME).

@@ -357,7 +357,6 @@ mod imp {
             self.obj().setup_debug_hud();
             self.obj().maybe_soak();
             self.obj().maybe_openfolder_test();
-            self.obj().maybe_edittest();
             self.obj().maybe_cycle();
             self.obj().maybe_prefs();
         }
@@ -2484,29 +2483,8 @@ impl VitrineWindow {
         }
     }
 
-    pub fn toast(&self, message: &str) {
+    fn toast(&self, message: &str) {
         self.imp().toast_overlay.add_toast(adw::Toast::new(message));
-    }
-
-    /// Called after the viewer edits an image in place (lossless rotate/flip):
-    /// drop its cached thumbnails so they regenerate, and force the grid +
-    /// filmstrip cell to re-bind with a fresh decode.
-    pub fn on_image_edited(&self, item: &ImageObject) {
-        let uri = item.file().uri().to_string();
-        // Stale on-disk thumbnails → regenerate on next decode.
-        crate::thumbnails::invalidate_disk(&uri);
-        // Evict the shared RAM thumbnail cache across every size bucket.
-        {
-            let cache = self.imp().thumb_cache.clone();
-            let mut cache = cache.borrow_mut();
-            for px in [128u32, 256, 512, 1024] {
-                cache.remove(&crate::thumbnails::ram_key(&uri, px));
-            }
-        }
-        // Force the grid + filmstrip cell to re-bind (re-decode a fresh thumbnail).
-        if let Some(idx) = self.imp().store.find(item) {
-            self.imp().store.items_changed(idx, 1, 1);
-        }
     }
 
     /// Push the viewer page showing the image at `position`.
@@ -3198,57 +3176,6 @@ impl VitrineWindow {
                 if let Some(app) = win.application() {
                     app.quit();
                 }
-            }
-        ));
-    }
-
-    /// VITRINE_EDITTEST=<dir>: open dir, enter the viewer on item 0, apply a
-    /// lossless rotate-right, and log the file's size/mtime before+after (proving
-    /// the in-place write) plus the re-decoded dimensions. Then quit. Verifies the
-    /// Loupe-level edit tier end-to-end. Point it at *copies*, not originals.
-    fn maybe_edittest(&self) {
-        let Some(spec) = std::env::var_os("VITRINE_EDITTEST") else {
-            return;
-        };
-        let dir = PathBuf::from(spec.to_string_lossy().into_owned());
-        glib::spawn_future_local(glib::clone!(
-            #[weak(rename_to = win)]
-            self,
-            async move {
-                use std::time::Duration;
-                glib::timeout_future(Duration::from_millis(1500)).await;
-                win.open_location(gio::File::for_path(&dir));
-                glib::timeout_future(Duration::from_secs(2)).await;
-                let item = win
-                    .model()
-                    .and_then(|m| m.item(0))
-                    .and_downcast::<ImageObject>();
-                let Some(item) = item else {
-                    eprintln!("EDITTEST no items in {}", dir.display());
-                    win.application().inspect(|a| a.quit());
-                    return;
-                };
-                let path = item.file().path().unwrap();
-                let stat = |p: &std::path::Path| {
-                    std::fs::metadata(p)
-                        .and_then(|m| Ok((m.len(), m.modified()?)))
-                        .ok()
-                };
-                let before = stat(&path);
-                eprintln!("EDITTEST file={} before={before:?}", path.display());
-                win.open_viewer(0);
-                glib::timeout_future(Duration::from_millis(1200)).await;
-                if let Some(v) = win.imp().viewer.borrow().as_ref().cloned() {
-                    eprintln!("EDITTEST applying RotateRight");
-                    v.apply_transform(crate::edit::Transform::RotateRight);
-                }
-                glib::timeout_future(Duration::from_secs(3)).await;
-                let after = stat(&path);
-                eprintln!(
-                    "EDITTEST after={after:?} changed={}",
-                    before.is_some() && after.is_some() && before != after
-                );
-                win.application().inspect(|a| a.quit());
             }
         ));
     }

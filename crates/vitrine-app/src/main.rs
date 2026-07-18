@@ -7,7 +7,6 @@
 
 mod debug;
 mod decode;
-mod edit;
 mod grid_cell;
 mod image_object;
 mod index;

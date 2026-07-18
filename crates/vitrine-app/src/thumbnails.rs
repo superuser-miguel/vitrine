@@ -334,22 +334,6 @@ pub fn prune_private_cache() {
 /// write happen on a worker thread** (both are pure CPU/IO and were a major
 /// main-loop stall while populating). Always writes the app-private cache; also
 /// the shared cache when `shareable` (real-path files, contributing to Nautilus).
-/// Delete every on-disk thumbnail for `uri` (all buckets, shared + private) so a
-/// changed image — e.g. after a lossless rotate/flip — regenerates a fresh
-/// thumbnail on the next decode instead of serving the stale one.
-pub fn invalidate_disk(uri: &str) {
-    for root in [shared_dir(), private_dir()] {
-        for bucket in [
-            ThumbBucket::Normal,
-            ThumbBucket::Large,
-            ThumbBucket::XLarge,
-            ThumbBucket::XxLarge,
-        ] {
-            let _ = std::fs::remove_file(root.join(thumbnail_cache::relative_path(uri, bucket)));
-        }
-    }
-}
-
 /// The cache roots a thumbnail is written to: always the app-private cache, plus
 /// the shared freedesktop cache when the file is shareable (a real host path).
 fn roots_for(shareable: bool) -> Vec<PathBuf> {
