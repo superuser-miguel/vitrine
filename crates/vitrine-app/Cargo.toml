@@ -27,4 +27,6 @@ vitrine-engine = { workspace = true }
 glycin = { version = "3.1", features = ["gdk4"] }
 async-lock = "3.4.2"
 async-channel = "2.5.0"
+# mallopt(M_MMAP_THRESHOLD) at startup — see main.rs; Linux-only app (GNOME).
+libc = "0.2"
 # ashpd (XDG portals) is added when the extra-roots chooser lands.

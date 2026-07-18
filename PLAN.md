@@ -970,6 +970,21 @@ is smooth.
   viewport-priority queue drained by a fixed worker pool — cap `live` at dozens,
   not thousands.** Re-run the same SOAK/NOCACHE capture to verify `live` bounded /
   `fps` up.
+- **⭐ SOLVED (2026-07-17): #6's cold-RSS mystery was glibc malloc-arena
+  retention — fixed with one `mallopt` at startup.** A categorized-smaps soak
+  (mixed-size synthetic fixture, VITRINE_SOAK + NOCACHE) showed the retained
+  memory living in ~60 **64 MB per-thread glibc arenas** (444 MB resident after
+  decodes stopped) while the true full-res buffers were direct-mmap'd and freed
+  within seconds. Mechanism: glibc *dynamically raises* its mmap threshold (to
+  32 MB) after the first large frees, after which 15–17 MB image buffers land in
+  arenas whose freed pages persist at high-water. The earlier mimalloc
+  null-result was a **false negative**: `#[global_allocator]` swaps only *Rust*
+  allocations — these buffers are `g_malloc`'d by GDK/GLib (C); `malloc_trim`'s
+  partial reclaim (2000→1433 MB) was the true positive all along. Fix:
+  `mallopt(M_MMAP_THRESHOLD, 1 MB)` first thing in `main()` — buffers ≥1 MB are
+  always direct-mmap'd and returned to the OS on free. A/B on the same soak:
+  **end RSS 675 → 256 MB, peak 714 → 409 MB, fps unchanged.** No heaptrack pass
+  needed; the parked "#6 RSS" thread is closed.
 
 ### 13.2 What's worth doing (priority order)
 

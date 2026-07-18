@@ -29,6 +29,19 @@ use gtk::{gio, glib};
 use crate::window::VitrineWindow;
 
 fn main() -> glib::ExitCode {
+    // Pin glibc's mmap threshold so multi-MB image buffers (glycin frame
+    // downloads, downscale intermediates — g_malloc'd by GDK, so a Rust
+    // global_allocator can't reach them) are always direct-mmap'd and returned
+    // to the OS on free. Left to its default, glibc *adapts* the threshold up to
+    // 32MB after the first large frees, after which those buffers land in
+    // per-thread arenas whose freed pages persist at high-water — measured
+    // +444MB retained RSS after one cold browse (soak 2026-07-17: end RSS
+    // 675MB → 256MB with this pin, fps unchanged). Must run before any
+    // allocation that matters; first thing in main, before GTK init.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, 1024 * 1024);
+    }
+
     // i18n plumbing from commit one. No catalogs exist yet; this registers the
     // text domain so the Blueprint `_()` strings translate once po/ fills in —
     // retrofitting later is miserable.
