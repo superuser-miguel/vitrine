@@ -1017,16 +1017,19 @@ is smooth.
 
 ### 13.2 What's worth doing (priority order)
 
-1. **Enrichment yields to browsing.** Pause/throttle enrichment while thumbnail
-   loads are pending (a shared "UI busy" signal, checked **once per batch** — not
-   per item, which spawns a poller per decode and churns the main loop). Keep the
-   single-writer queue intact; throttle *admission*, not write order. Opportunistic:
-   capture pHash from the viewer's full decode to skip a separate enrichment decode.
-2. **CPU off-main downscale** (subsumes the shader problem). Replace the GSK
-   `render_texture` downscale with a CPU downscale on a worker thread (`image`
-   crate): no Vulkan pipeline compile *ever*, the per-large-image downscale moves
-   off the main thread, and the dmabuf-FD/readback dance goes away. Highest-leverage
-   single change.
+1. **Enrichment yields to browsing.** ✅ **SHIPPED (a4f5dba, re-added be9c80a).**
+   `decode::yield_to_foreground()` parks the enrichment driver once per batch
+   while interactive decodes are in flight (+150 ms grace); single-writer queue
+   intact, admission throttled, not write order. Measured 723→533 ms worst-stall
+   at the time. *Not built (low value now):* the opportunistic pHash capture from
+   the viewer's full decode — enrichment already hashes at index time, so it
+   would only help files viewed before enrichment reaches them.
+2. **CPU off-main downscale** (#6). ✅ **SHIPPED (b4d4a06 + faca9e8 copy-free;
+   RSS follow-up f67ee25).** `thumbnails::downscale_cpu`: worker-thread download
+   + engine resize + small `MemoryTexture`; no GSK `render_texture`, so no
+   ~1.7 s Vulkan pipeline compile ever, and the dmabuf-FD/readback dance is
+   gone. Cold-browse fps 0–15 → median ~71. Its cold-RSS side effect was the
+   §13.1 glibc-arena saga, closed by the mallopt pin.
 3. **Warm the cache during indexing.** ✅ **SHIPPED (d8dea14).** Enrichment now
    decodes at the grid's 256px thumbnail size (not a 64px pHash-only frame),
    computes the pHash from that, *and* writes the display thumbnail to the same
@@ -1035,11 +1038,13 @@ is smooth.
    now browses with **zero on-demand decode**. Verified on a 200-image varied
    fixture: warmed browse = 0 decodes / 100% hit / 113fps vs 212 decodes cold;
    enrichment RSS 297MB idle / 557MB peak (no regression).
-4. **Viewport-ordered decode** (the "browser trick" the user asked about — *never
-   built*). A priority queue keyed by distance from the viewport so visible
-   thumbnails decode first, then radiate outward. Do this **last** — items 1–3
-   remove most of the pressure it manages. Do NOT confuse it with the sort-model
-   `incremental` footgun (§13.4); it reorders *decode priority*, never the grid.
+4. **Viewport-ordered decode** (the "browser trick"). ✅ **SHIPPED (e433c3b, as
+   part of the bounded scheduler).** `pop_best_load` drains the capped queue
+   nearest-`visible_center`-first, so visible thumbnails decode first and
+   radiate outward, respecting the active sort. (§13.3's completion-order
+   *metric* — start order vs completion order under cost variance — remains
+   open; the ordering itself exists. Never touched the sort model — see the
+   `incremental` footgun, §13.4.)
 5. **Cost-aware / lane-separated gate.** ✅ **SHIPPED (2026-07-18).** Files ≥2 MiB
    (`VITRINE_HEAVY_BYTES`) must take a permit from a 2-wide heavy lane
    (`VITRINE_HEAVY_LIMIT`, 0 disables) *before* the shared decode gate (fixed
@@ -1059,9 +1064,13 @@ is smooth.
    47 → **1** (70 ms), smooth samples 210/233. Viewer texture LRU stays within
    its 256 MB budget (settle 456 MB total, arena retention still 0).
 
-Adjacent tunables, measure per host: velocity-adaptive prefetch margins
-(`PREFETCH_AHEAD/BEHIND`); gate size (`VITRINE_LOAD_LIMIT`); relevance-aware LRU
-eviction (protect near-viewport thumbs); cancel decodes for cells flung far past.
+**§13.2 is complete — all six items shipped (2026-07-18).** What remains below
+is deliberately parked: tunables that need *per-host measurement* first (lesson:
+no blind changes on the hot path). None currently shows a felt problem:
+velocity-adaptive prefetch margins (`PREFETCH_AHEAD/BEHIND`); gate size
+(`VITRINE_LOAD_LIMIT`); relevance-aware LRU eviction (protect near-viewport
+thumbs); cancel decodes for cells flung far past (admission already bails via
+the cell re-check; only the ≤8 in-flight glycin decodes are uncancellable).
 
 ### 13.3 Measurement we still need
 
