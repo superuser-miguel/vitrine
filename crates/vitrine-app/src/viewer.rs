@@ -80,6 +80,14 @@ mod imp {
         #[template_child]
         pub filmstrip_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
+        pub rotate_left_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub rotate_right_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub flip_horizontal_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub flip_vertical_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub info_split: TemplateChild<adw::OverlaySplitView>,
         #[template_child]
         pub rating_box: TemplateChild<gtk::Box>,
@@ -157,6 +165,10 @@ mod imp {
                 zoom_fit_button: Default::default(),
                 fullscreen_button: Default::default(),
                 filmstrip_button: Default::default(),
+                rotate_left_button: Default::default(),
+                rotate_right_button: Default::default(),
+                flip_horizontal_button: Default::default(),
+                flip_vertical_button: Default::default(),
                 info_split: Default::default(),
                 rating_box: Default::default(),
                 comment_row: Default::default(),
@@ -609,6 +621,22 @@ impl VitrineViewer {
             move |_| v.zoom_fit()
         ));
 
+        // Lossless rotate/flip (Loupe-level edit tier). Each writes the current
+        // file in place via glycin and refreshes the view + thumbnails.
+        use crate::edit::Transform;
+        for (btn, transform) in [
+            (&imp.rotate_left_button, Transform::RotateLeft),
+            (&imp.rotate_right_button, Transform::RotateRight),
+            (&imp.flip_horizontal_button, Transform::FlipHorizontal),
+            (&imp.flip_vertical_button, Transform::FlipVertical),
+        ] {
+            btn.connect_clicked(glib::clone!(
+                #[weak(rename_to = v)]
+                self,
+                move |_| v.apply_transform(transform)
+            ));
+        }
+
         // Hide/show the filmstrip (more room for the image).
         imp.filmstrip_button.connect_toggled(glib::clone!(
             #[weak(rename_to = v)]
@@ -643,6 +671,11 @@ impl VitrineViewer {
                     gdk::Key::minus | gdk::Key::KP_Subtract => v.zoom_by(1.0 / ZOOM_STEP),
                     gdk::Key::_0 | gdk::Key::KP_0 => v.zoom_fit(),
                     gdk::Key::_1 | gdk::Key::KP_1 => v.zoom_actual(),
+                    // [ / ] = lossless rotate left / right.
+                    gdk::Key::bracketleft => v.apply_transform(crate::edit::Transform::RotateLeft),
+                    gdk::Key::bracketright => {
+                        v.apply_transform(crate::edit::Transform::RotateRight)
+                    }
                     // F11 = plain whole-app fullscreen (or exit the lightbox).
                     gdk::Key::F11 => v.toggle_app_fullscreen(),
                     // Escape leaves the immersive lightbox; otherwise it propagates
@@ -922,6 +955,59 @@ impl VitrineViewer {
             .borrow()
             .as_ref()
             .map_or(gtk::INVALID_LIST_POSITION, |f| f.selected())
+    }
+
+    /// Apply a lossless rotate/flip to the current image, then refresh the view
+    /// and its thumbnails. The file is edited in place (glycin); glycin auto-
+    /// applies the new EXIF orientation on decode, so a re-decode shows the result.
+    pub fn apply_transform(&self, transform: crate::edit::Transform) {
+        let Some(item) = self.item_at(self.current_position()) else {
+            return;
+        };
+        let file = item.file();
+        let uri = file.uri().to_string();
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = viewer)]
+            self,
+            async move {
+                let window = viewer.root().and_downcast::<crate::window::VitrineWindow>();
+                match crate::edit::apply(file.clone(), transform).await {
+                    Ok(true) => {
+                        // Drop the stale view-resolution decode for this image.
+                        viewer.imp().cache.borrow_mut().remove(&uri);
+                        // Window-level: invalidate thumbnail caches + re-bind the
+                        // grid/filmstrip cell so its thumbnail regenerates.
+                        if let Some(window) = &window {
+                            window.on_image_edited(&item);
+                        }
+                        // Re-decode and redisplay, if still on this image.
+                        if let Some(texture) = decode_view(&file).await {
+                            viewer.cache_texture(&uri, &texture);
+                            let still_here = viewer
+                                .item_at(viewer.current_position())
+                                .map(|it| it.file().uri().to_string());
+                            if still_here.as_deref() == Some(uri.as_str()) {
+                                viewer.set_texture(&texture);
+                            }
+                        }
+                        if let Some(window) = &window {
+                            window.toast(transform.past_tense());
+                        }
+                    }
+                    Ok(false) => {
+                        if let Some(window) = &window {
+                            window.toast(&gettextrs::gettext("No change applied"));
+                        }
+                    }
+                    Err(msg) => {
+                        glib::g_warning!("vitrine", "edit {uri}: {msg}");
+                        if let Some(window) = &window {
+                            window.toast(&gettextrs::gettext("Couldn't edit this image"));
+                        }
+                    }
+                }
+            }
+        ));
     }
 
     // --- metadata sidebar ----------------------------------------------------

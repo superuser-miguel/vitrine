@@ -2116,6 +2116,7 @@ dependencies = [
  "gettext-rs",
  "glycin",
  "gtk4",
+ "gufo-common",
  "libadwaita",
  "libc",
  "vitrine-engine",

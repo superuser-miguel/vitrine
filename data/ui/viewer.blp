@@ -28,6 +28,32 @@ template $VitrineViewer: Adw.NavigationPage {
         active: true;
       }
 
+      [start]
+      Gtk.Box {
+        styles ["linked"]
+        margin-start: 6;
+
+        Gtk.Button rotate_left_button {
+          icon-name: "object-rotate-left-symbolic";
+          tooltip-text: _("Rotate Left ([)");
+        }
+
+        Gtk.Button rotate_right_button {
+          icon-name: "object-rotate-right-symbolic";
+          tooltip-text: _("Rotate Right (])");
+        }
+
+        Gtk.Button flip_horizontal_button {
+          icon-name: "object-flip-horizontal-symbolic";
+          tooltip-text: _("Flip Horizontal");
+        }
+
+        Gtk.Button flip_vertical_button {
+          icon-name: "object-flip-vertical-symbolic";
+          tooltip-text: _("Flip Vertical");
+        }
+      }
+
       [end]
       Gtk.ToggleButton info_button {
         icon-name: "dialog-information-symbolic";
