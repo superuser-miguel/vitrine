@@ -7,10 +7,27 @@ completion), `VITRINE_HEAVY_LIMIT/BYTES`. Fixtures: generate under
 `files` DB rows + md5(uri) cache PNGs in both thumbnail caches (see PLAN §13.1
 method note).
 
-## Missing plumbing (build first)
-1. Extend `VDBG-FILL` with `pos=` and `visible=` (position + was-it-in-viewport
-   at completion). Plumb position through the load request (window.rs
-   `LoadRequest` already carries it).
+## Plumbing (built 2026-07-18)
+1. ✅ `VDBG-GRIDFILL ms= pos= center= visible= hit=` — every grid completion,
+   position vs viewport centre, visible-cell vs prefetch, cache hit.
+   ✅ `VDBG-FILM ms= pos= center=` — every filmstrip completion.
+   (`VDBG-FILL ms= bytes=` remains the size/latency line.)
+
+## Filmstrip (bugs found + fixed 2026-07-18 — regression cases, all verified)
+F1. ✅ **Fill order**: cold 3k-item folder, open viewer mid-folder. VDBG-FILM
+    completions radiate from `center` (verified: 1500, 1501, 1505, 1504, …@
+    center=1500). Was: LIFO pop → strip filled backwards from overscan.
+F2. ✅ **No starved cells**: SOAK strip sweep over 3k items, cold. Assert cells
+    visible at every rest point paint within ~1 s (verified: open-screen 17/17
+    by +0.8 s; sweep-end 20/20). Was two bugs: cap dropped *oldest* entries
+    (could be on-screen) and dead/recycled entries counted against the cap.
+F3. ✅ **Viewport signal**: `film_center()` = hadjustment-derived centre, with a
+    `scroll_to`-target hint until the (async) hadjustment catches up — without
+    the hint, viewer-open evicted the on-screen cells using center≈0 (verified:
+    fills held center=1500 through the open; previously decayed to center=5).
+Pitfall for future assertions: "last cells bound before a rest" ≈ on-screen
+only at the strip's ends — elsewhere it's GTK's overscan tail. Assert on the
+region around the selection / known scroll target instead.
 
 ## Test cases (each: cold open via SOAK+NOCACHE, assert on VDBG-FILL)
 2. **Time-to-visible-complete** ("grid LCP"): settle → every visible cell has a

@@ -1090,10 +1090,16 @@ The real fix for "instant thumbnails" is §13.2 item 3 (warm cache during indexi
 *while* waiting.
 
 
-A minimal fill log now exists: with `VITRINE_DEBUG`, every decoded-thumbnail
-completion emits `VDBG-FILL ms=<since-start> bytes=<source-size>` — enough for
-completion-latency/size analysis (it powered the §13.2 item 5 A/B). Position /
-visible_at_completion plumbing is still unbuilt; the full metric below stands.
+The fill log now exists (2026-07-18): `VDBG-FILL ms= bytes=` (per decode),
+`VDBG-GRIDFILL ms= pos= center= visible= hit=` (per grid completion),
+`VDBG-FILM ms= pos= center=` + `VDBG-FILMBIND ms= pos= hit=` (filmstrip).
+**Grid viewport-ordered decode verified with it**: cold 220-image open — first
+40 completions all visible cells, median |pos−center| = 10, 219/219 consecutive
+decoded completions monotone-outward. **Filmstrip scheduler rewritten the same
+day** (was LIFO bind-order with oldest-dropped cap → backwards fill + starved
+visible cells; now nearest-centre pop, farthest-dropped cap, dead-entry purge,
+and a scroll_to centre hint until the async hadjustment catches up) — see
+tests/thumbnail-popin-tests.md F1–F3 for the verified regression cases.
 
 Worst-stall (LOADTEST) can't see fill *order/latency* — the thing most of §13.2
 improves, and the reason a bad change once looked "good." Build a **fill-order log**

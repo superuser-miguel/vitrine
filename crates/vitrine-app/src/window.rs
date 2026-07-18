@@ -641,7 +641,8 @@ impl VitrineWindow {
         let cache = self.imp().thumb_cache.clone();
         let key = crate::thumbnails::ram_key(&req.item.file().uri(), req.load_size);
         let cached = cache.borrow_mut().get(&key).cloned();
-        let result = if cached.is_some() {
+        let cached_hit = cached.is_some();
+        let result = if cached_hit {
             cached
         } else {
             let renderer = crate::thumbnails::renderer_source(self);
@@ -667,6 +668,19 @@ impl VitrineWindow {
             if let Some(c) = w.upgrade() {
                 c.apply(&req.item, result.as_ref());
             }
+        }
+        // Fill-order metric (§13.3): each completion's position vs the viewport
+        // centre at that moment, plus whether it was a visible cell or prefetch
+        // and whether it came from cache. Lets a test assert viewport-first fill.
+        if crate::debug::enabled() && result.is_some() {
+            eprintln!(
+                "VDBG-GRIDFILL ms={} pos={} center={} visible={} hit={}",
+                crate::debug::since_start_ms(),
+                req.position,
+                self.imp().visible_center.get(),
+                req.cell.is_some(),
+                cached_hit
+            );
         }
     }
 

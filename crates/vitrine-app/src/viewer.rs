@@ -134,8 +134,13 @@ mod imp {
         /// Bounded filmstrip loader: queued cells to thumbnail + in-flight count,
         /// so fast filmstrip scrolling can't spawn thousands of decode futures
         /// (the same bug the grid's scheduler fixes).
-        pub film_queue: RefCell<Vec<(glib::WeakRef<gtk::ListItem>, ImageObject)>>,
+        pub film_queue: RefCell<Vec<(glib::WeakRef<gtk::ListItem>, ImageObject, u32)>>,
         pub film_inflight: Cell<usize>,
+        /// Where the strip is *about* to be: `scroll_to`'s target, used as the
+        /// centre until the hadjustment catches up (it updates asynchronously,
+        /// and ordering/evicting by the stale value starved the very cells the
+        /// user was looking at on viewer open). Cleared on manual scroll.
+        pub film_center_hint: Cell<Option<u32>>,
     }
 
     impl Default for VitrineViewer {
@@ -179,6 +184,7 @@ mod imp {
                 syncing: Cell::new(false),
                 film_queue: RefCell::new(Vec::new()),
                 film_inflight: Cell::new(0),
+                film_center_hint: Cell::new(None),
             }
         }
     }
@@ -331,6 +337,8 @@ impl VitrineViewer {
                 // vertical wheel to horizontal. ~1.5 thumbnails per notch.
                 let delta = if dx != 0.0 { dx } else { dy };
                 hadj.set_value(hadj.value() + delta * 108.0);
+                // Manual scroll: the hadjustment is authoritative again.
+                viewer.imp().film_center_hint.set(None);
                 glib::Propagation::Stop
             }
         ));
@@ -354,9 +362,26 @@ impl VitrineViewer {
         let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE);
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             pic.set_paintable(Some(&texture));
+            // Coverage metric: bind-time RAM hits paint without the queue, so a
+            // test can only prove "no starved cells" by unioning these with the
+            // VDBG-FILM queue completions.
+            if crate::debug::enabled() {
+                eprintln!(
+                    "VDBG-FILMBIND ms={} pos={} hit=true",
+                    crate::debug::since_start_ms(),
+                    list_item.position()
+                );
+            }
             return;
         }
         pic.set_paintable(gtk::gdk::Paintable::NONE);
+        if crate::debug::enabled() {
+            eprintln!(
+                "VDBG-FILMBIND ms={} pos={} hit=false",
+                crate::debug::since_start_ms(),
+                list_item.position()
+            );
+        }
         if item.has_failed() {
             return;
         }
@@ -365,21 +390,75 @@ impl VitrineViewer {
         // bind (a fast filmstrip fling would otherwise pile up thousands).
         {
             let mut q = self.imp().film_queue.borrow_mut();
-            q.push((list_item.downgrade(), item.clone()));
+            q.push((list_item.downgrade(), item.clone(), list_item.position()));
             if q.len() > FILM_QUEUE_CAP {
-                let drop = q.len() - FILM_QUEUE_CAP;
-                q.drain(0..drop);
+                // First shed entries whose cell died or recycled to another item
+                // (they'd be skipped at pump time anyway, but they occupy cap
+                // space and used to push *live* requests out — blank cells).
+                q.retain(|(weak, it, _)| {
+                    weak.upgrade()
+                        .and_then(|li| li.item().and_downcast::<ImageObject>())
+                        .as_ref()
+                        == Some(it)
+                });
+            }
+            if q.len() > FILM_QUEUE_CAP {
+                // Still over: keep the requests nearest the visible strip (same
+                // policy as the grid's load queue), never the oldest-vs-newest.
+                let center = self.film_center();
+                q.sort_by_key(|(_, _, pos)| (*pos as i64 - center).unsigned_abs());
+                q.truncate(FILM_QUEUE_CAP);
             }
         }
         self.pump_filmstrip();
     }
 
-    /// Spawn filmstrip loads up to the in-flight bound, newest-bound first (the
-    /// currently-visible cells after a scroll).
+    /// The item index at the centre of the filmstrip's visible range, estimated
+    /// from the scroller's hadjustment (uniform cell widths). This is the
+    /// viewport signal the loader orders by — without it, fill order was pure
+    /// bind order (LIFO), which populated the strip backwards from offscreen
+    /// overscan cells and let visible cells starve.
+    fn film_center(&self) -> i64 {
+        let n = self.n_items() as f64;
+        let adj = self.imp().filmstrip_scroller.hadjustment();
+        let upper = adj.upper();
+        if n <= 0.0 || upper <= 0.0 {
+            let sel = self.current_position();
+            return if sel == gtk::INVALID_LIST_POSITION {
+                0
+            } else {
+                sel as i64
+            };
+        }
+        let derived = (((adj.value() + adj.page_size() / 2.0) / upper) * n) as i64;
+        // Until the hadjustment reflects a pending scroll_to, trust the target:
+        // ordering by the stale value made the cap evict the on-screen cells.
+        if let Some(hint) = self.imp().film_center_hint.get() {
+            let page_items = ((adj.page_size() / upper) * n) as i64;
+            if (derived - hint as i64).abs() <= page_items.max(4) {
+                self.imp().film_center_hint.set(None); // caught up
+            } else {
+                return hint as i64;
+            }
+        }
+        derived
+    }
+
+    /// Spawn filmstrip loads up to the in-flight bound, nearest the visible
+    /// centre first (mirrors the grid's `pop_best_load`).
     fn pump_filmstrip(&self) {
         let imp = self.imp();
         while imp.film_inflight.get() < FILM_INFLIGHT {
-            let Some((weak_li, item)) = imp.film_queue.borrow_mut().pop() else {
+            let popped = {
+                let center = self.film_center();
+                let mut q = imp.film_queue.borrow_mut();
+                q.iter()
+                    .enumerate()
+                    .min_by_key(|(_, (_, _, pos))| (*pos as i64 - center).unsigned_abs())
+                    .map(|(i, _)| i)
+                    .map(|i| q.swap_remove(i))
+            };
+            let Some((weak_li, item, pos)) = popped else {
                 break;
             };
             // Skip cells that recycled to another item before their turn.
@@ -394,7 +473,7 @@ impl VitrineViewer {
                 #[weak(rename_to = viewer)]
                 self,
                 async move {
-                    viewer.run_filmstrip_load(weak_li, item).await;
+                    viewer.run_filmstrip_load(weak_li, item, pos).await;
                     let imp = viewer.imp();
                     imp.film_inflight
                         .set(imp.film_inflight.get().saturating_sub(1));
@@ -404,7 +483,12 @@ impl VitrineViewer {
         }
     }
 
-    async fn run_filmstrip_load(&self, weak_li: glib::WeakRef<gtk::ListItem>, item: ImageObject) {
+    async fn run_filmstrip_load(
+        &self,
+        weak_li: glib::WeakRef<gtk::ListItem>,
+        item: ImageObject,
+        pos: u32,
+    ) {
         let Some(cache) = self.imp().thumb_cache.borrow().clone() else {
             return;
         };
@@ -436,6 +520,15 @@ impl VitrineViewer {
             if li.item().and_downcast::<ImageObject>().as_ref() == Some(&item) {
                 if let Some(pic) = li.child().and_downcast::<gtk::Picture>() {
                     pic.set_paintable(Some(&t));
+                    // Fill-order metric (§13.3): where this completion landed
+                    // relative to the strip's visible centre at that moment.
+                    if crate::debug::enabled() {
+                        eprintln!(
+                            "VDBG-FILM ms={} pos={pos} center={}",
+                            crate::debug::since_start_ms(),
+                            self.film_center()
+                        );
+                    }
                 }
             }
         }
@@ -492,6 +585,9 @@ impl VitrineViewer {
         let adj = self.imp().filmstrip_scroller.hadjustment();
         let span = (adj.upper() - adj.page_size() - adj.lower()).max(0.0);
         adj.set_value(adj.lower() + span * fraction.clamp(0.0, 1.0));
+        // Emulates a manual scroll — hadjustment is authoritative (see the
+        // wheel handler); a pending scroll_to hint would misorder the queue.
+        self.imp().film_center_hint.set(None);
     }
 
     fn setup_controls(&self) {
@@ -733,6 +829,7 @@ impl VitrineViewer {
         imp.syncing.set(false);
         if let Some(view) = imp.filmstrip_view.borrow().as_ref() {
             view.scroll_to(pos, gtk::ListScrollFlags::NONE, None);
+            imp.film_center_hint.set(Some(pos));
         }
 
         // Display from cache, or decode; either way reset zoom to fit.
