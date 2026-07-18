@@ -33,6 +33,57 @@ filter bar · find-duplicates (exact + scalable "Similar" BK-tree) · sidebar
 (Places/Folders/Collections switcher, Nautilus bookmarks, Back/Forward) · XMP
 sidecar export · background content-hash index with EXIF/pHash enrichment.
 
+**Landmark `v1.1-stable` (2026-07-18).** New known-good tag = §13 perf sprint
+complete + Fable's fixes, with the edit-tier experiment reverted. `git checkout
+v1.1-stable` to return here. (`v1.0-stable` still exists as the older baseline.)
+
+### Edit tier — Phase 1 (rotate/flip) ATTEMPTED & REVERTED (2026-07-18)
+
+Built in `2992695`, reverted in `4f1ab20`. Kept here as a design record; see also
+memory `vitrine-edit-tier`. **Do not re-land as-is.**
+
+*What was built:* `crate::edit` wrapping glycin 3.1 `Editor`
+(`Editor::new(file).edit().await` → `apply_sparse(&Operations)` →
+`SparseEdit::Sparse` in-place byte patch | `Complete(BinaryData)` full rewrite).
+`Operation::Rotate` is CCW (`gufo-common::orientation::Rotation`). Viewer: linked
+header button group (rotate-l/r, flip-h/v) + `[`/`]` keys → `viewer::apply_transform`
+→ edits the file **in place, immediately** → `window::on_image_edited`
+(`thumbnails::invalidate_disk` + RAM-cache evict + `store.items_changed(idx,1,1)`
+re-bind). `VITRINE_EDITTEST=<dir>` debug hook drove one RotateRight.
+
+*Why reverted (real-use problems):*
+1. **UX wrong.** Destructive edit on a single button click, no Save/Save-As, no
+   mode boundary — the viewer silently becomes a destructive editor. Wanted:
+   gThumb-style **edit mode/window** (enter-edit → preview transform → Save /
+   Save As / Discard).
+2. **glycin `Complete` re-encode is pathological for no-EXIF JPEGs** (the user's
+   web/Instagram JPEGs are `orient=Undefined`, so no EXIF to patch → `Complete`
+   path → physical re-encode). Observed **file grows ~2–3× and keeps ~doubling
+   per successive edit** (277K→664K→1279K over rotations); result is slow to
+   re-decode even in Loupe. A single rotation is directionally correct and
+   ~46 dB (visually lossless) but the size explosion is unacceptable. **Root
+   cause NOT diagnosed** (repro was interrupted). Suspects: re-encode at 4:4:4 /
+   unoptimized Huffman, or segment/thumbnail accumulation. NEEDS an
+   `exiftool -a -G1 -s` structural before/after diff, and understanding what
+   glycin's `image-rs` editor actually emits on `Complete`.
+3. **Second edit fails / file "stuck"; rotate button reported non-working while
+   flip worked.** Not root-caused. The `EDITTEST` hook's single RotateRight *did*
+   work on a fresh copy, so the failure is likely on an **already-re-encoded**
+   file, or a decode/state race after the first in-place write. (Round-trip test
+   also showed edits 3–4 not changing the file — consistent with either a real
+   second-edit failure or the hook's fixed 3 s wait timing out on the now-larger
+   file.)
+
+*Redesign decisions still open (need UI/UX + glycin research):*
+- **Model:** non-destructive (store rotation as an orientation instruction in
+  DB/XMP, apply at display/export — matches the reviewer identity, zero file
+  mutation) **vs** destructive-with-save (gThumb edit mode).
+- **True zero-loss rotate on no-EXIF files:** write only the EXIF Orientation tag
+  (insert an APP1 segment via `little_exif`/`img-parts`), NOT glycin's re-encode;
+  or a libjpeg-turbo DCT-lossless transform. glycin's own editor is not
+  acceptable for this use until the size-explosion is understood.
+
+
 **Hard-won process lessons (2026-07-16 — do not relearn).**
 1. **A metric is never the acceptance test for *feel*.** LOADTEST worst-stall
    *improved* while the UI got choppier. Engine correctness / crashes / memory are
