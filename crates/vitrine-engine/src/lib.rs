@@ -44,6 +44,7 @@ pub mod tags;
 pub mod thumbnail_cache;
 pub mod xmp;
 
+pub use annotations::{compose_orientation, OrientOp};
 pub use collections::{Collection, CollectionKind};
 pub use db::Db;
 pub use dedup::DuplicateCluster;
@@ -51,7 +52,7 @@ pub use exif::{parse_exif, ExifData};
 pub use files::{Enrichment, FileRecord};
 pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
 pub use query::{Direction, Query, SortKey};
-pub use resize::resize_rgba;
+pub use resize::{orient_rgba, resize_rgba};
 pub use scanner::{classify, walk_images, Change, ScannedFile};
 pub use tags::Tag;
 pub use xmp::{sidecar_path, XmpMetadata};

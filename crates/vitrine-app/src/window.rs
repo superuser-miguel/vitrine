@@ -639,7 +639,9 @@ impl VitrineWindow {
             }
         }
         let cache = self.imp().thumb_cache.clone();
-        let key = crate::thumbnails::ram_key(&req.item.file().uri(), req.load_size);
+        let orientation = req.item.orientation();
+        let key = crate::thumbnails::ram_key(&req.item.file().uri(), req.load_size)
+            + &crate::thumbnails::orient_key(orientation);
         let cached = cache.borrow_mut().get(&key).cloned();
         let cached_hit = cached.is_some();
         let result = if cached_hit {
@@ -654,6 +656,10 @@ impl VitrineWindow {
                 renderer,
             )
             .await;
+            let loaded = match loaded {
+                Some(tex) => crate::thumbnails::orient_cpu(tex, orientation).await,
+                None => None,
+            };
             match &loaded {
                 Some(tex) => {
                     cache
@@ -2401,17 +2407,20 @@ impl VitrineWindow {
         self.ensure_read_db();
         let db = self.imp().read_db.borrow();
         let Some(db) = db.as_ref() else { return };
-        let map: std::collections::HashMap<String, (String, i64)> = db
+        let map: std::collections::HashMap<String, (String, i64, i64)> = db
             .ratings_under(&folder.to_string_lossy())
             .unwrap_or_default()
             .into_iter()
-            .map(|(path, hash, rating)| (path, (hash, rating)))
+            .map(|(path, hash, rating, orientation)| (path, (hash, rating, orientation)))
             .collect();
         for item in items {
             if let Some(path) = item.file().path() {
-                if let Some((hash, rating)) = map.get(&path.to_string_lossy().into_owned()) {
+                if let Some((hash, rating, orientation)) =
+                    map.get(&path.to_string_lossy().into_owned())
+                {
                     item.set_content_hash(hash);
                     item.set_rating(*rating as i32);
+                    item.set_orientation(*orientation as i32);
                 }
             }
         }

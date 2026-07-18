@@ -116,3 +116,90 @@ mod tests {
         assert!(resize_rgba(&[0u8; 4], 100, 100, 400, 10).is_none()); // too small
     }
 }
+
+/// Apply an EXIF orientation code (1–8) to tightly-or-padded RGBA8 pixels,
+/// returning `(tight RGBA8 bytes, out_width, out_height)` — dims swap for
+/// codes 5–8. Pure per-pixel remap (inverse mapping, no interpolation), so it
+/// belongs on a worker thread next to `resize_rgba`. `None` on malformed input
+/// or the identity code (callers skip work).
+pub fn orient_rgba(
+    src: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    orientation: i64,
+) -> Option<(Vec<u8>, u32, u32)> {
+    if !(2..=8).contains(&orientation) || width == 0 || height == 0 {
+        return None;
+    }
+    let (w, h, stride) = (width as usize, height as usize, stride as usize);
+    if stride < w * 4 || src.len() < stride * h {
+        return None;
+    }
+    let swap = orientation >= 5;
+    let (ow, oh) = if swap { (h, w) } else { (w, h) };
+    let mut out = vec![0u8; ow * oh * 4];
+    for oy in 0..oh {
+        for ox in 0..ow {
+            let (sx, sy) = match orientation {
+                2 => (w - 1 - ox, oy),
+                3 => (w - 1 - ox, h - 1 - oy),
+                4 => (ox, h - 1 - oy),
+                5 => (oy, ox),
+                6 => (oy, h - 1 - ox),
+                7 => (w - 1 - oy, h - 1 - ox),
+                _ => (w - 1 - oy, ox), // 8
+            };
+            let s = sy * stride + sx * 4;
+            let d = (oy * ow + ox) * 4;
+            out[d..d + 4].copy_from_slice(&src[s..s + 4]);
+        }
+    }
+    Some((out, ow as u32, oh as u32))
+}
+
+#[cfg(test)]
+mod orient_tests {
+    use super::orient_rgba;
+
+    // 2x1 image: pixel A then B (RGBA singles for brevity).
+    const AB: [u8; 8] = [1, 1, 1, 1, 2, 2, 2, 2];
+
+    fn px(bytes: &[u8], i: usize) -> u8 {
+        bytes[i * 4]
+    }
+
+    #[test]
+    fn rotations_and_flips_move_pixels_correctly() {
+        // flipH: B A
+        let (o, w, h) = orient_rgba(&AB, 2, 1, 8, 2).unwrap();
+        assert_eq!((w, h, px(&o, 0), px(&o, 1)), (2, 1, 2, 1));
+        // rot180 == flipH for a 2x1
+        let (o, ..) = orient_rgba(&AB, 2, 1, 8, 3).unwrap();
+        assert_eq!((px(&o, 0), px(&o, 1)), (2, 1));
+        // rot90CW: A on top, B below (dims swap)
+        let (o, w, h) = orient_rgba(&AB, 2, 1, 8, 6).unwrap();
+        assert_eq!((w, h, px(&o, 0), px(&o, 1)), (1, 2, 1, 2));
+        // rot270CW: B on top
+        let (o, w, h) = orient_rgba(&AB, 2, 1, 8, 8).unwrap();
+        assert_eq!((w, h, px(&o, 0), px(&o, 1)), (1, 2, 2, 1));
+        // identity and bad codes are None
+        assert!(orient_rgba(&AB, 2, 1, 8, 1).is_none());
+        assert!(orient_rgba(&AB, 2, 1, 8, 9).is_none());
+    }
+
+    #[test]
+    fn compose_tables_are_group_consistent() {
+        use crate::annotations::{compose_orientation as c, OrientOp::*};
+        for s in 1..=8 {
+            assert_eq!(c(c(c(c(s, RotateCw), RotateCw), RotateCw), RotateCw), s);
+            assert_eq!(c(c(s, FlipH), FlipH), s);
+            assert_eq!(c(c(s, FlipV), FlipV), s);
+            assert_eq!(c(c(s, RotateCw), RotateCcw), s);
+            // flipH then flipV == rot180
+            assert_eq!(c(c(s, FlipH), FlipV), c(c(s, RotateCw), RotateCw));
+        }
+        assert_eq!(c(1, RotateCw), 6);
+        assert_eq!(c(1, RotateCcw), 8);
+    }
+}

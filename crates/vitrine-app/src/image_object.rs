@@ -37,6 +37,8 @@ mod imp {
         pub content_hash: RefCell<String>,
         /// Star rating 0–5 (the `rating` property; notifies on change).
         pub rating: Cell<i32>,
+        /// Non-destructive user orientation (EXIF 1-8; 1 = as-decoded).
+        pub orientation: Cell<i32>,
         /// True if decoding failed — the cell shows a broken-image placeholder.
         pub failed: Cell<bool>,
     }
@@ -51,16 +53,24 @@ mod imp {
         fn properties() -> &'static [glib::ParamSpec] {
             static PROPS: OnceLock<Vec<glib::ParamSpec>> = OnceLock::new();
             PROPS.get_or_init(|| {
-                vec![glib::ParamSpecInt::builder("rating")
-                    .minimum(0)
-                    .maximum(5)
-                    .build()]
+                vec![
+                    glib::ParamSpecInt::builder("rating")
+                        .minimum(0)
+                        .maximum(5)
+                        .build(),
+                    glib::ParamSpecInt::builder("orientation")
+                        .minimum(1)
+                        .maximum(8)
+                        .default_value(1)
+                        .build(),
+                ]
             })
         }
 
         fn set_property(&self, _id: usize, value: &glib::Value, pspec: &glib::ParamSpec) {
             match pspec.name() {
                 "rating" => self.rating.set(value.get().unwrap_or(0)),
+                "orientation" => self.orientation.set(value.get().unwrap_or(1)),
                 other => unimplemented!("set unknown property {other}"),
             }
         }
@@ -68,6 +78,7 @@ mod imp {
         fn property(&self, _id: usize, pspec: &glib::ParamSpec) -> glib::Value {
             match pspec.name() {
                 "rating" => self.rating.get().to_value(),
+                "orientation" => self.orientation.get().to_value(),
                 other => unimplemented!("get unknown property {other}"),
             }
         }
@@ -137,6 +148,17 @@ impl ImageObject {
     /// Set the rating (clamped 0–5). Emits `notify::rating`, so bound cells repaint.
     pub fn set_rating(&self, rating: i32) {
         self.set_property("rating", rating.clamp(0, 5));
+    }
+
+    /// Non-destructive user orientation (EXIF 1–8; 1 = identity). The `Cell`
+    /// default is 0, so unstamped items read as identity via the `max(1)`.
+    pub fn orientation(&self) -> i32 {
+        self.property::<i32>("orientation").max(1)
+    }
+
+    /// Set the user orientation (clamped 1–8).
+    pub fn set_orientation(&self, orientation: i32) {
+        self.set_property("orientation", orientation.clamp(1, 8));
     }
 
     pub fn mark_failed(&self) {

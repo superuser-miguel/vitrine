@@ -46,9 +46,10 @@ type TextureCache = Rc<RefCell<SizedLru<String, gdk::Texture>>>;
 /// request is best-effort, so an oversized frame is CPU-downscaled on a worker
 /// thread before it ever reaches the main-thread GPU upload (an unbounded
 /// full-res upload is a visible transition stall).
-async fn decode_view(file: &gio::File) -> Option<gdk::Texture> {
+async fn decode_view(file: &gio::File, orientation: i32) -> Option<gdk::Texture> {
     let texture = crate::decode::full(file, VIEW_MAX).await.ok()?;
-    crate::thumbnails::downscale_cpu(texture, VIEW_MAX).await
+    let texture = crate::thumbnails::downscale_cpu(texture, VIEW_MAX).await?;
+    crate::thumbnails::orient_cpu(texture, orientation).await
 }
 
 mod imp {
@@ -77,6 +78,14 @@ mod imp {
         pub zoom_fit_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub fullscreen_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub rotate_left_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub rotate_right_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub flip_h_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub flip_v_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub filmstrip_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
@@ -156,6 +165,10 @@ mod imp {
                 zoom_out_button: Default::default(),
                 zoom_fit_button: Default::default(),
                 fullscreen_button: Default::default(),
+                rotate_left_button: Default::default(),
+                rotate_right_button: Default::default(),
+                flip_h_button: Default::default(),
+                flip_v_button: Default::default(),
                 filmstrip_button: Default::default(),
                 info_split: Default::default(),
                 rating_box: Default::default(),
@@ -359,7 +372,8 @@ impl VitrineViewer {
         let Some(cache) = self.imp().thumb_cache.borrow().clone() else {
             return;
         };
-        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE);
+        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE)
+            + &crate::thumbnails::orient_key(item.orientation());
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             pic.set_paintable(Some(&texture));
             // Coverage metric: bind-time RAM hits paint without the queue, so a
@@ -492,7 +506,9 @@ impl VitrineViewer {
         let Some(cache) = self.imp().thumb_cache.borrow().clone() else {
             return;
         };
-        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE);
+        let orientation = item.orientation();
+        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE)
+            + &crate::thumbnails::orient_key(orientation);
         let cached = cache.borrow_mut().get(&key).cloned();
         let texture = if cached.is_some() {
             cached
@@ -506,6 +522,10 @@ impl VitrineViewer {
                 renderer,
             )
             .await;
+            let loaded = match loaded {
+                Some(t) => crate::thumbnails::orient_cpu(t, orientation).await,
+                None => None,
+            };
             match &loaded {
                 Some(t) => {
                     cache
@@ -590,8 +610,41 @@ impl VitrineViewer {
         self.imp().film_center_hint.set(None);
     }
 
+    /// Apply one edit-card transform to the current image: compose onto the
+    /// stored orientation, persist (content-hash keyed, file untouched), and
+    /// re-show — the new cache key misses, so the oriented texture is derived.
+    fn apply_orient(&self, op: vitrine_engine::OrientOp) {
+        let pos = self.current_position();
+        let Some(item) = self.item_at(pos) else {
+            return;
+        };
+        let next = vitrine_engine::compose_orientation(item.orientation() as i64, op) as i32;
+        item.set_orientation(next);
+        let hash = item.content_hash();
+        if !hash.is_empty() {
+            if let Some(annotator) = self.imp().annotator.borrow().as_ref() {
+                annotator.set_orientation(&hash, next as i64);
+            }
+        }
+        self.show_position(pos);
+    }
+
     fn setup_controls(&self) {
         let imp = self.imp();
+
+        use vitrine_engine::OrientOp;
+        for (button, op) in [
+            (&imp.rotate_left_button, OrientOp::RotateCcw),
+            (&imp.rotate_right_button, OrientOp::RotateCw),
+            (&imp.flip_h_button, OrientOp::FlipH),
+            (&imp.flip_v_button, OrientOp::FlipV),
+        ] {
+            button.connect_clicked(glib::clone!(
+                #[weak(rename_to = v)]
+                self,
+                move |_| v.apply_orient(op)
+            ));
+        }
 
         imp.zoom_in_button.connect_clicked(glib::clone!(
             #[weak(rename_to = v)]
@@ -833,7 +886,8 @@ impl VitrineViewer {
         }
 
         // Display from cache, or decode; either way reset zoom to fit.
-        let uri = item.file().uri().to_string();
+        let okey = crate::thumbnails::orient_key(item.orientation());
+        let uri = item.file().uri().to_string() + &okey;
         if let Some(texture) = imp.cache.borrow_mut().get(&uri).cloned() {
             self.set_texture(&texture);
         } else {
@@ -842,7 +896,7 @@ impl VitrineViewer {
             // full texture replaces it in place — same aspect, so the image
             // sharpens without jumping.
             let placeholder = imp.thumb_cache.borrow().clone().and_then(|cache| {
-                let key = crate::thumbnails::ram_key(&uri, THUMB_SIZE);
+                let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE) + &okey;
                 cache.borrow_mut().get(&key).cloned()
             });
             if crate::debug::enabled() {
@@ -864,12 +918,13 @@ impl VitrineViewer {
     /// is still on `pos` when it arrives.
     fn load_and_show(&self, item: ImageObject, pos: u32) {
         let file = item.file();
-        let uri = file.uri().to_string();
+        let orientation = item.orientation();
+        let uri = file.uri().to_string() + &crate::thumbnails::orient_key(orientation);
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = viewer)]
             self,
             async move {
-                if let Some(texture) = decode_view(&file).await {
+                if let Some(texture) = decode_view(&file, orientation).await {
                     viewer.cache_texture(&uri, &texture);
                     if viewer.current_position() == pos {
                         viewer.set_texture(&texture);
@@ -891,7 +946,8 @@ impl VitrineViewer {
             let Some(item) = self.item_at(p) else {
                 continue;
             };
-            let uri = item.file().uri().to_string();
+            let orientation = item.orientation();
+            let uri = item.file().uri().to_string() + &crate::thumbnails::orient_key(orientation);
             if self.imp().cache.borrow().contains(&uri) {
                 continue;
             }
@@ -900,7 +956,7 @@ impl VitrineViewer {
                 #[weak(rename_to = viewer)]
                 self,
                 async move {
-                    if let Some(texture) = decode_view(&file).await {
+                    if let Some(texture) = decode_view(&file, orientation).await {
                         viewer.cache_texture(&uri, &texture);
                     }
                 }

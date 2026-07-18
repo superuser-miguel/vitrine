@@ -197,6 +197,51 @@ pub(crate) async fn downscale_cpu(texture: gdk::Texture, max: u32) -> Option<gdk
     .flatten()
 }
 
+/// Apply a non-destructive user orientation (EXIF 1–8) to a texture on a worker
+/// thread. Identity (≤1) returns the input untouched. Applied *after* cache
+/// reads / decode+downscale, so the disk caches always hold the as-decoded
+/// pixels (the shared cache is Nautilus's view of the file — never rotate it).
+pub(crate) async fn orient_cpu(texture: gdk::Texture, orientation: i32) -> Option<gdk::Texture> {
+    if orientation <= 1 {
+        return Some(texture);
+    }
+    let w = texture.width() as u32;
+    let h = texture.height() as u32;
+    gio::spawn_blocking(move || {
+        let (bytes, stride) = {
+            let mut downloader = gdk::TextureDownloader::new(&texture);
+            downloader.set_format(gdk::MemoryFormat::R8g8b8a8);
+            downloader.download_bytes()
+        };
+        drop(texture);
+        let (out, nw, nh) =
+            vitrine_engine::orient_rgba(&bytes, w, h, stride as u32, orientation as i64)?;
+        Some(
+            gdk::MemoryTextureBuilder::new()
+                .set_bytes(Some(&glib::Bytes::from_owned(out)))
+                .set_width(nw as i32)
+                .set_height(nh as i32)
+                .set_stride((nw as usize) * 4)
+                .set_format(gdk::MemoryFormat::R8g8b8a8)
+                .build()
+                .upcast::<gdk::Texture>(),
+        )
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// RAM-cache key suffix for a user orientation — identity adds nothing, so
+/// unrotated items keep their existing keys.
+pub fn orient_key(orientation: i32) -> String {
+    if orientation <= 1 {
+        String::new()
+    } else {
+        format!("#o{orientation}")
+    }
+}
+
 /// Thumbnail size the background enrichment pass warms into the disk cache — the
 /// grid's default load size — so an indexed folder opens with no on-demand decode.
 pub const WARM_PX: u32 = 256;

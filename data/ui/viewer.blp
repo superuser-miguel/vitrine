@@ -34,6 +34,61 @@ template $VitrineViewer: Adw.NavigationPage {
         tooltip-text: _("Image Properties");
       }
 
+      // Edit entry point (PLAN edit-tier UX decision): one brush button opening
+      // a card of basic tools — the viewer chrome never grows naked edit buttons.
+      [end]
+      Gtk.MenuButton edit_button {
+        icon-name: "document-edit-symbolic";
+        tooltip-text: _("Edit");
+
+        popover: Gtk.Popover {
+          child: Gtk.Box {
+            orientation: vertical;
+            spacing: 8;
+            margin-top: 10;
+            margin-bottom: 10;
+            margin-start: 10;
+            margin-end: 10;
+
+            Gtk.Box {
+              spacing: 6;
+              homogeneous: true;
+
+              Gtk.Button rotate_left_button {
+                icon-name: "object-rotate-left-symbolic";
+                tooltip-text: _("Rotate Left");
+              }
+
+              Gtk.Button rotate_right_button {
+                icon-name: "object-rotate-right-symbolic";
+                tooltip-text: _("Rotate Right");
+              }
+
+              Gtk.Button flip_h_button {
+                icon-name: "object-flip-horizontal-symbolic";
+                tooltip-text: _("Flip Horizontally");
+              }
+
+              Gtk.Button flip_v_button {
+                icon-name: "object-flip-vertical-symbolic";
+                tooltip-text: _("Flip Vertically");
+              }
+            }
+
+            Gtk.Label {
+              label: _("Applied instantly — the original file is never modified");
+              wrap: true;
+              max-width-chars: 28;
+
+              styles [
+                "dim-label",
+                "caption",
+              ]
+            }
+          };
+        };
+      }
+
       [end]
       Gtk.Button zoom_in_button {
         icon-name: "zoom-in-symbolic";

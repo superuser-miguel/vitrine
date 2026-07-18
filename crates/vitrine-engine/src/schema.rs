@@ -83,6 +83,18 @@ CREATE TABLE comments (
   updated_at   INTEGER NOT NULL
 );
 "#,
+    // v3 — non-destructive user orientation (edit tier, PLAN edit-tier record).
+    // EXIF 1–8 semantics composed ON TOP of the file's own EXIF orientation
+    // (which glycin already applies at decode). Content-hash keyed like
+    // ratings; the file is never rewritten, so the hash stays stable.
+    r#"
+CREATE TABLE orientations (
+  content_hash TEXT PRIMARY KEY,
+  orientation  INTEGER NOT NULL CHECK (orientation BETWEEN 1 AND 8),
+  sync_state   TEXT NOT NULL DEFAULT 'db-only',
+  updated_at   INTEGER NOT NULL
+);
+"#,
 ];
 
 /// The schema version this build targets (number of migrations).

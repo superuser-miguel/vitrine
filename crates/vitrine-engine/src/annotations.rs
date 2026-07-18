@@ -78,22 +78,68 @@ impl Db {
         Ok(())
     }
 
-    /// `(path, content_hash, rating)` for present files under `folder` — one
-    /// query to stamp the grid's in-memory items, so cell rating overlays and
-    /// rating writes need no per-cell database hit. `rating` is 0 when unrated.
-    pub fn ratings_under(&self, folder: &str) -> rusqlite::Result<Vec<(String, String, i64)>> {
+    /// Set the user's non-destructive orientation (EXIF 1–8); 1 clears the row.
+    pub fn set_orientation(&self, content_hash: &str, orientation: i64) -> rusqlite::Result<()> {
+        if orientation <= 1 {
+            self.conn().execute(
+                "DELETE FROM orientations WHERE content_hash = ?1",
+                [content_hash],
+            )?;
+            return Ok(());
+        }
+        self.conn().execute(
+            "INSERT INTO orientations(content_hash, orientation, updated_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(content_hash) DO UPDATE
+             SET orientation = excluded.orientation, updated_at = excluded.updated_at",
+            rusqlite::params![content_hash, orientation.clamp(1, 8)],
+        )?;
+        Ok(())
+    }
+
+    /// `(path, content_hash, rating, orientation)` for present files under
+    /// `folder` — one query to stamp the grid's in-memory items, so cell rating
+    /// overlays and rating writes need no per-cell database hit. `rating` is 0
+    /// when unrated; `orientation` is 1 (identity) when never rotated.
+    pub fn ratings_under(&self, folder: &str) -> rusqlite::Result<Vec<(String, String, i64, i64)>> {
         // Runs on the main thread at every folder open — the path range (vs a
         // LIKE prefix) is what lets it use the path index instead of scanning
         // the whole files table (see `subtree_range`).
         let (lo, hi) = crate::query::subtree_range(folder);
         let mut stmt = self.conn().prepare(
-            "SELECT f.path, f.content_hash, COALESCE(r.rating, 0)
-             FROM files f LEFT JOIN ratings r ON r.content_hash = f.content_hash
+            "SELECT f.path, f.content_hash, COALESCE(r.rating, 0), COALESCE(o.orientation, 1)
+             FROM files f
+             LEFT JOIN ratings r ON r.content_hash = f.content_hash
+             LEFT JOIN orientations o ON o.content_hash = f.content_hash
              WHERE f.missing = 0 AND f.path >= ?1 AND f.path < ?2",
         )?;
-        let rows = stmt.query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let rows = stmt.query_map([lo, hi], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?;
         rows.collect()
     }
+}
+
+/// A user transform op from the edit card, composed onto an EXIF 1–8 state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OrientOp {
+    RotateCw,
+    RotateCcw,
+    FlipH,
+    FlipV,
+}
+
+/// Compose `op` onto EXIF orientation `state` (1–8), returning the new state.
+/// Lookup tables for the dihedral group D4 — indexed by `state - 1`.
+pub fn compose_orientation(state: i64, op: OrientOp) -> i64 {
+    let i = (state.clamp(1, 8) - 1) as usize;
+    let table: [i64; 8] = match op {
+        OrientOp::RotateCw => [6, 7, 8, 5, 2, 3, 4, 1],
+        OrientOp::RotateCcw => [8, 5, 6, 7, 4, 1, 2, 3],
+        OrientOp::FlipH => [2, 1, 4, 3, 6, 5, 8, 7],
+        OrientOp::FlipV => [4, 3, 2, 1, 8, 7, 6, 5],
+    };
+    table[i]
 }
 
 #[cfg(test)]
@@ -130,8 +176,8 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("/p/a.jpg".to_string(), "ha".to_string(), 4),
-                ("/p/b.jpg".to_string(), "hb".to_string(), 0), // unrated → 0
+                ("/p/a.jpg".to_string(), "ha".to_string(), 4, 1),
+                ("/p/b.jpg".to_string(), "hb".to_string(), 0, 1), // unrated → 0, unrotated → 1
             ]
         );
     }

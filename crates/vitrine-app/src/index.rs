@@ -67,6 +67,10 @@ enum Request {
         rating: Option<i64>,
     },
     /// Set (or, with empty body, clear) a comment.
+    SetOrientation {
+        hash: String,
+        orientation: i64,
+    },
     SetComment {
         hash: String,
         body: String,
@@ -116,6 +120,14 @@ impl Annotator {
         let _ = self.requests.try_send(Request::SetRating {
             hash: hash.to_string(),
             rating,
+        });
+    }
+
+    /// Set the non-destructive user orientation (EXIF 1-8; 1 clears).
+    pub fn set_orientation(&self, hash: &str, orientation: i64) {
+        let _ = self.requests.try_send(Request::SetOrientation {
+            hash: hash.to_string(),
+            orientation,
         });
     }
 
@@ -275,6 +287,11 @@ fn worker(
                 };
                 if let Err(e) = r {
                     glib::g_warning!("vitrine", "set rating {hash}: {e}");
+                }
+            }
+            Request::SetOrientation { hash, orientation } => {
+                if let Err(e) = db.set_orientation(&hash, orientation) {
+                    glib::g_warning!("vitrine", "set orientation {hash}: {e}");
                 }
             }
             Request::SetComment { hash, body } => {
