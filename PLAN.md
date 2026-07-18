@@ -985,6 +985,25 @@ is smooth.
   always direct-mmap'd and returned to the OS on free. A/B on the same soak:
   **end RSS 675 → 256 MB, peak 714 → 409 MB, fps unchanged.** No heaptrack pass
   needed; the parked "#6 RSS" thread is closed.
+  **Verified on real data (2026-07-18, 15 real dirs / ~840 cold decodes, caches
+  wiped):** cold peak 747 MB → settles 380 MB; warm run peaks 388 MB; smaps shows
+  **arena-resident RSS = 0** at settle in both runs. Two follow-on findings from
+  the same soak pair:
+  - **Scroll-time disk-cache warming works (correcting a 2026-07-18 report that
+    it didn't):** 809 thumbnails landed on disk during the cold scroll (~96% of
+    decodes — `store()`'s MAX_PENDING=16 cap dropped almost nothing at real
+    decode rates), and a fresh-process re-run served **100% from disk, 0
+    decodes**. The earlier "nothing durable landed" read came from
+    `cache_hit=0%` on lap-2 revisits — but those are served from the RAM cache
+    *upstream* of `load()`, so the hit counter never sees them; it says nothing
+    about disk writes.
+  - **The remaining ≥50 ms hitches are NOT cold decode.** The warm run (zero
+    decodes) shows the *identical* stall profile to cold (47 samples ≥50 ms,
+    30 of them within 2.5 s of a folder-open, worst ~150 ms). They're
+    folder-open populate + view transitions — the §13.1 populate spike, much
+    reduced but still the top smoothness item. Cold decode itself is smooth
+    (that's #6 doing its job); its remaining cost is pop-in *latency*, which #3
+    already removes for indexed folders.
 
 ### 13.2 What's worth doing (priority order)
 
