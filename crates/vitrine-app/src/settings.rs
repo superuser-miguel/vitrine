@@ -23,7 +23,7 @@ const KEY_SORT_DESC: &str = "descending";
 const GROUP_BOOKMARKS: &str = "Bookmarks";
 
 /// Default thumbnail-cache budget (MB) — matches the historical prune default.
-pub const DEFAULT_CACHE_MB: u64 = 2048;
+pub const DEFAULT_CACHE_MB: u64 = 8192;
 
 /// A sidebar bookmark: a user-editable display name and its target folder.
 #[derive(Debug, Clone, PartialEq, Eq)]

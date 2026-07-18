@@ -1402,6 +1402,22 @@ impl VitrineWindow {
 
         self.refresh_bookmarks();
         self.setup_folder_tree();
+
+        // Live offline/online bookmark state: any mount change re-evaluates the
+        // rows, so an unplugged USB greys out and auto-revives on reconnect
+        // (§14.2 first cut — the VolumeMonitor is a process-lifetime singleton,
+        // so the handlers stay connected without storing it).
+        let monitor = gio::VolumeMonitor::get();
+        monitor.connect_mount_added(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| window.refresh_bookmarks()
+        ));
+        monitor.connect_mount_removed(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _| window.refresh_bookmarks()
+        ));
     }
 
     /// Move to `new`, pushing the current location onto the Back history (unless
@@ -1495,7 +1511,20 @@ impl VitrineWindow {
             row.set_margin_end(6);
             row.set_margin_top(6);
             row.set_margin_bottom(6);
-            row.append(&gtk::Image::from_icon_name("folder-symbolic"));
+            // §14.2 (first cut): a bookmark whose folder is gone renders greyed
+            // instead of opening a broken grid. Removable-media paths get the
+            // drive icon so "offline USB" reads differently from "deleted".
+            let available = bookmark.path.exists();
+            let removable =
+                bookmark.path.starts_with("/run/media") || bookmark.path.starts_with("/media");
+            let icon = if available {
+                "folder-symbolic"
+            } else if removable {
+                "drive-removable-media-symbolic"
+            } else {
+                "folder-symbolic"
+            };
+            row.append(&gtk::Image::from_icon_name(icon));
             row.append(
                 &gtk::Label::builder()
                     .label(&bookmark.name)
@@ -1504,6 +1533,14 @@ impl VitrineWindow {
                     .ellipsize(gtk::pango::EllipsizeMode::End)
                     .build(),
             );
+            if !available {
+                row.set_sensitive(false);
+                row.set_tooltip_text(Some(&if removable {
+                    gettextrs::gettext("Drive not connected")
+                } else {
+                    gettextrs::gettext("Folder not found")
+                }));
+            }
 
             // Right-click → context menu (rename / remove / move), Nautilus-style.
             let menu = gtk::GestureClick::new();
