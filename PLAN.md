@@ -61,11 +61,18 @@ re-bind). `VITRINE_EDITTEST=<dir>` debug hook drove one RotateRight.
    path → physical re-encode). Observed **file grows ~2–3× and keeps ~doubling
    per successive edit** (277K→664K→1279K over rotations); result is slow to
    re-decode even in Loupe. A single rotation is directionally correct and
-   ~46 dB (visually lossless) but the size explosion is unacceptable. **Root
-   cause NOT diagnosed** (repro was interrupted). Suspects: re-encode at 4:4:4 /
-   unoptimized Huffman, or segment/thumbnail accumulation. NEEDS an
-   `exiftool -a -G1 -s` structural before/after diff, and understanding what
-   glycin's `image-rs` editor actually emits on `Complete`.
+   ~46 dB (visually lossless) but the size explosion is unacceptable.
+   **Root cause DIAGNOSED (2026-07-18, standalone host probe, glycin 3.1 crate /
+   glycin-loaders 2.1.5):** two distinct defects in the `Complete` re-encode —
+   (a) **chroma subsampling upgraded 4:2:0 → 4:4:4** (the bulk: +51% on a q85
+   fixture; worse on heavily-optimized web JPEGs), and (b) **one duplicate JFIF
+   APP0 segment appended per edit** (1→4 headers after 3 edits, never stripped)
+   — unbounded per-edit growth; with fat APP segments (EXIF thumbnails/XMP) this
+   is the plausible "keeps doubling" mechanism. Size stabilized (~549K) across
+   3 successive edits on host and rounds 2–3 *worked*, so the second-edit
+   failure may be flatpak/runtime-specific or file-specific. Both defects are
+   upstream glycin/image-rs editor bugs (worth reporting); either alone
+   disqualifies the `Complete` path for rotation.
 3. **Second edit fails / file "stuck"; rotate button reported non-working while
    flip worked.** Not root-caused. The `EDITTEST` hook's single RotateRight *did*
    work on a fresh copy, so the failure is likely on an **already-re-encoded**
@@ -73,6 +80,13 @@ re-bind). `VITRINE_EDITTEST=<dir>` debug hook drove one RotateRight.
    also showed edits 3–4 not changing the file — consistent with either a real
    second-edit failure or the hook's fixed 3 s wait timing out on the now-larger
    file.)
+
+*UX decision (user, 2026-07-18 — settled):* **Viewer first, not editor first.**
+Edit entry is a **brush button** (gThumb/Loupe pattern) that opens a **card**
+(same presentation as Image Properties) holding the basic tools only: crop /
+rotate / flip, with save / save-as / undo / redo — "that's it." Never naked
+edit buttons in the viewer chrome (the bad placement was the core mistake).
+Anything deeper is extension territory (Lua/WASM, §10.3/§10.5).
 
 *Redesign decisions still open (need UI/UX + glycin research):*
 - **Model:** non-destructive (store rotation as an orientation instruction in
