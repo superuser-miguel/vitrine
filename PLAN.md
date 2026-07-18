@@ -1040,10 +1040,24 @@ is smooth.
    thumbnails decode first, then radiate outward. Do this **last** — items 1–3
    remove most of the pressure it manages. Do NOT confuse it with the sort-model
    `incremental` footgun (§13.4); it reorders *decode priority*, never the grid.
-5. **Cost-aware / lane-separated gate.** Estimate decode cost (file bytes cold →
-   pixel area once enriched; `texture_cost` already computes w·h·4) and give large
-   decodes a separate low-concurrency lane + an in-flight-bytes memory budget, so
-   they can't starve small visible ones.
+5. **Cost-aware / lane-separated gate.** ✅ **SHIPPED (2026-07-18).** Files ≥2 MiB
+   (`VITRINE_HEAVY_BYTES`) must take a permit from a 2-wide heavy lane
+   (`VITRINE_HEAVY_LIMIT`, 0 disables) *before* the shared decode gate (fixed
+   acquire order — no deadlock), so large decodes can never occupy more than 2 of
+   the gate's ~8 slots. A/B on an adversarial cold fixture (twenty 18 MB 24 MP
+   files sorted to the top of the viewport + 142 small): small-file fill
+   unchanged (viewport priority already had that), but **worst main-loop stall
+   1957 ms → 72 ms** — the 8-wide burst of ~96 MB decode buffers was the freeze.
+   Trade accepted: background *huge* thumbnails complete later (3.2 s → 6.1 s).
+6. **Viewer-open polish.** ✅ **SHIPPED (2026-07-18).** (a) On a cache-miss open,
+   the viewer instantly shows the grid's RAM-cached thumbnail (same aspect —
+   image sharpens in place when the full decode lands) instead of a blank pane;
+   (b) `decode_view` now *enforces* the 4096 `VIEW_MAX` cap via the worker-thread
+   CPU downscale (glycin's scale request is best-effort), bounding the
+   main-thread GPU upload. Verified (15-real-dir warm soak): placeholder shown
+   on 30/30 opens, stalls ≥50 ms near open-viewer 2 → 0, whole-journey stalls
+   47 → **1** (70 ms), smooth samples 210/233. Viewer texture LRU stays within
+   its 256 MB budget (settle 456 MB total, arena retention still 0).
 
 Adjacent tunables, measure per host: velocity-adaptive prefetch margins
 (`PREFETCH_AHEAD/BEHIND`); gate size (`VITRINE_LOAD_LIMIT`); relevance-aware LRU
@@ -1066,6 +1080,11 @@ The real fix for "instant thumbnails" is §13.2 item 3 (warm cache during indexi
 — it removes the decode wait entirely for indexed folders; ordering only matters
 *while* waiting.
 
+
+A minimal fill log now exists: with `VITRINE_DEBUG`, every decoded-thumbnail
+completion emits `VDBG-FILL ms=<since-start> bytes=<source-size>` — enough for
+completion-latency/size analysis (it powered the §13.2 item 5 A/B). Position /
+visible_at_completion plumbing is still unbuilt; the full metric below stands.
 
 Worst-stall (LOADTEST) can't see fill *order/latency* — the thing most of §13.2
 improves, and the reason a bad change once looked "good." Build a **fill-order log**

@@ -101,6 +101,7 @@ pub async fn load(
     file: gio::File,
     source_mtime: i64,
     target_px: u32,
+    byte_size: i64,
     _renderer_widget: glib::WeakRef<gtk::Widget>,
 ) -> Option<gdk::Texture> {
     let bucket = ThumbBucket::for_target(target_px);
@@ -122,7 +123,7 @@ pub async fn load(
 
     crate::debug::cache_miss();
     crate::debug::decode_begin();
-    let decoded = crate::decode::thumbnail(&file, bucket.pixels()).await;
+    let decoded = crate::decode::thumbnail(&file, bucket.pixels(), byte_size).await;
     crate::debug::decode_end();
     let texture = match decoded {
         Ok(texture) => texture,
@@ -138,6 +139,14 @@ pub async fn load(
     // actually shrank (never a multi-MB "thumbnail").
     match downscale_cpu(texture, bucket.pixels()).await {
         Some(thumb) => {
+            // Fill metric (§13.3): when each *decoded* thumbnail completed, and
+            // how big its source was — aggregate-only, for cold pop-in analysis.
+            if crate::debug::enabled() {
+                eprintln!(
+                    "VDBG-FILL ms={} bytes={byte_size}",
+                    crate::debug::since_start_ms()
+                );
+            }
             store(&uri, source_mtime, bucket, &thumb, is_shareable(&file));
             Some(thumb)
         }
@@ -149,7 +158,9 @@ pub async fn load(
 /// engine (pure pixel math), and rebuild a small `MemoryTexture` (which holds no
 /// dmabuf FD). Returns the input unchanged if it already fits the bucket, or
 /// `None` on failure. This is what moves the downscale off the main thread.
-async fn downscale_cpu(texture: gdk::Texture, max: u32) -> Option<gdk::Texture> {
+/// Also used by the viewer to enforce its VIEW_MAX cap (glycin's scale request
+/// is best-effort) before an oversized frame reaches the GPU upload.
+pub(crate) async fn downscale_cpu(texture: gdk::Texture, max: u32) -> Option<gdk::Texture> {
     let w = texture.width() as u32;
     let h = texture.height() as u32;
     if w == 0 || h == 0 {

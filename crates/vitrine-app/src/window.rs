@@ -645,9 +645,14 @@ impl VitrineWindow {
             cached
         } else {
             let renderer = crate::thumbnails::renderer_source(self);
-            let loaded =
-                crate::thumbnails::load(req.item.file(), req.item.mtime(), req.load_size, renderer)
-                    .await;
+            let loaded = crate::thumbnails::load(
+                req.item.file(),
+                req.item.mtime(),
+                req.load_size,
+                req.item.size(),
+                renderer,
+            )
+            .await;
             match &loaded {
                 Some(tex) => {
                     cache
@@ -2038,7 +2043,7 @@ impl VitrineWindow {
         let weak = picture.downgrade();
         glib::spawn_future_local(async move {
             let _permit = crate::thumbnails::load_gate().acquire().await;
-            if let Some(texture) = crate::thumbnails::load(file, mtime, 128, renderer).await {
+            if let Some(texture) = crate::thumbnails::load(file, mtime, 128, 0, renderer).await {
                 cache.borrow_mut().put(
                     key,
                     texture.clone(),

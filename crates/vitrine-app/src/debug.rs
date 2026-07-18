@@ -66,6 +66,15 @@ pub fn snapshot() -> Counters {
     }
 }
 
+/// Milliseconds since process start (monotonic) — timestamps for VDBG-* lines.
+pub fn since_start_ms() -> u64 {
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis() as u64
+}
+
 /// Resident set size in MB (Linux `/proc/self/statm`; field 2 = resident pages).
 pub fn rss_mb() -> u64 {
     let Ok(s) = std::fs::read_to_string("/proc/self/statm") else {

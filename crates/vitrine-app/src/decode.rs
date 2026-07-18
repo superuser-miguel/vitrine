@@ -102,10 +102,52 @@ fn decode_gate() -> &'static async_lock::Semaphore {
     })
 }
 
+/// Extra low-concurrency lane for decodes of *large* source files (§13.2 item 5).
+/// The shared decode gate is a flat count — a 24 MP file holds a slot far longer
+/// than a 250 KB one, so a burst of large decodes head-of-line-blocks the small
+/// *visible* thumbnails behind them. Large files must take a permit here **before**
+/// the decode gate (fixed acquire order — no deadlock), capping how many of the
+/// gate's ~8 slots large decodes can ever occupy; small files always find a slot.
+/// `VITRINE_HEAVY_LIMIT` overrides the lane width (0 disables the lane);
+/// `VITRINE_HEAVY_BYTES` overrides the size threshold.
+fn heavy_gate() -> Option<&'static async_lock::Semaphore> {
+    static GATE: OnceLock<Option<async_lock::Semaphore>> = OnceLock::new();
+    GATE.get_or_init(|| {
+        let limit = std::env::var("VITRINE_HEAVY_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2);
+        (limit > 0).then(|| async_lock::Semaphore::new(limit))
+    })
+    .as_ref()
+}
+
+/// File byte size at and above which a decode counts as "heavy" (default 2 MiB —
+/// the user's folders sit around p50 ≈ 250 KB with 8 MB+ outliers mixed in).
+fn heavy_bytes() -> i64 {
+    static BYTES: OnceLock<i64> = OnceLock::new();
+    *BYTES.get_or_init(|| {
+        std::env::var("VITRINE_HEAVY_BYTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(2 * 1024 * 1024)
+    })
+}
+
 /// Decode `file` at thumbnail resolution: a frame scaled to fit within
 /// `size`×`size` (aspect preserved by the loader). EXIF orientation is applied.
-pub async fn thumbnail(file: &gio::File, size: u32) -> Result<gdk::Texture, glycin::ErrorCtx> {
+/// `byte_size` is the source file's size, used to route large files through the
+/// low-concurrency heavy lane (pass 0 when unknown — treated as small).
+pub async fn thumbnail(
+    file: &gio::File,
+    size: u32,
+    byte_size: i64,
+) -> Result<gdk::Texture, glycin::ErrorCtx> {
     let _foreground = InteractiveGuard::new();
+    let _heavy = match heavy_gate() {
+        Some(gate) if byte_size >= heavy_bytes() => Some(gate.acquire().await),
+        _ => None,
+    };
     let _permit = decode_gate().acquire().await;
     let image = Loader::new(file.clone()).load().await?;
     let frame = image

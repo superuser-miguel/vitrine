@@ -42,6 +42,15 @@ const FILM_QUEUE_CAP: usize = 96;
 
 type TextureCache = Rc<RefCell<SizedLru<String, gdk::Texture>>>;
 
+/// Decode for the viewer with the `VIEW_MAX` cap *enforced*: glycin's scale
+/// request is best-effort, so an oversized frame is CPU-downscaled on a worker
+/// thread before it ever reaches the main-thread GPU upload (an unbounded
+/// full-res upload is a visible transition stall).
+async fn decode_view(file: &gio::File) -> Option<gdk::Texture> {
+    let texture = crate::decode::full(file, VIEW_MAX).await.ok()?;
+    crate::thumbnails::downscale_cpu(texture, VIEW_MAX).await
+}
+
 mod imp {
     use super::*;
 
@@ -405,8 +414,14 @@ impl VitrineViewer {
             cached
         } else {
             let renderer = crate::thumbnails::renderer_source(self);
-            let loaded =
-                crate::thumbnails::load(item.file(), item.mtime(), THUMB_SIZE, renderer).await;
+            let loaded = crate::thumbnails::load(
+                item.file(),
+                item.mtime(),
+                THUMB_SIZE,
+                item.size(),
+                renderer,
+            )
+            .await;
             match &loaded {
                 Some(t) => {
                     cache
@@ -725,6 +740,24 @@ impl VitrineViewer {
         if let Some(texture) = imp.cache.borrow_mut().get(&uri).cloned() {
             self.set_texture(&texture);
         } else {
+            // Instant preview: show the grid's RAM-cached thumbnail (upscaled,
+            // soft) while the full decode runs, instead of a blank pane. The
+            // full texture replaces it in place — same aspect, so the image
+            // sharpens without jumping.
+            let placeholder = imp.thumb_cache.borrow().clone().and_then(|cache| {
+                let key = crate::thumbnails::ram_key(&uri, THUMB_SIZE);
+                cache.borrow_mut().get(&key).cloned()
+            });
+            if crate::debug::enabled() {
+                eprintln!(
+                    "VDBG-VIEWER ms={} placeholder={}",
+                    crate::debug::since_start_ms(),
+                    placeholder.is_some()
+                );
+            }
+            if let Some(thumb) = placeholder {
+                self.set_texture(&thumb);
+            }
             self.load_and_show(item.clone(), pos);
         }
         self.prefetch(pos);
@@ -739,7 +772,7 @@ impl VitrineViewer {
             #[weak(rename_to = viewer)]
             self,
             async move {
-                if let Ok(texture) = crate::decode::full(&file, VIEW_MAX).await {
+                if let Some(texture) = decode_view(&file).await {
                     viewer.cache_texture(&uri, &texture);
                     if viewer.current_position() == pos {
                         viewer.set_texture(&texture);
@@ -770,7 +803,7 @@ impl VitrineViewer {
                 #[weak(rename_to = viewer)]
                 self,
                 async move {
-                    if let Ok(texture) = crate::decode::full(&file, VIEW_MAX).await {
+                    if let Some(texture) = decode_view(&file).await {
                         viewer.cache_texture(&uri, &texture);
                     }
                 }
