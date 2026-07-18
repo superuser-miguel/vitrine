@@ -70,7 +70,7 @@ template $VitrineViewer: Adw.NavigationPage {
       content: Adw.OverlaySplitView edit_split {
         sidebar-position: end;
         collapsed: true;
-        max-sidebar-width: 280;
+        max-sidebar-width: 380;
         show-sidebar: bind edit_button.active bidirectional;
 
         // Edit card (PLAN edit-tier UX): presented exactly like Image
@@ -78,7 +78,7 @@ template $VitrineViewer: Adw.NavigationPage {
         // editing reads as a mode. Save / Save As / undo / redo join this
         // card when baking lands.
         sidebar: Adw.PreferencesPage {
-          width-request: 260;
+          width-request: 340;
 
           Adw.PreferencesGroup {
             title: _("Transform");
@@ -221,6 +221,38 @@ template $VitrineViewer: Adw.NavigationPage {
         Gtk.DrawingArea crop_area {
           visible: false;
           can-target: true;
+        }
+
+        [overlay]
+        Gtk.Box crop_confirm_box {
+          visible: false;
+          halign: end;
+          valign: end;
+          margin-bottom: 18;
+          margin-end: 18;
+          spacing: 8;
+
+          Gtk.Button crop_cancel_button {
+            icon-name: "window-close-symbolic";
+            tooltip-text: _("Cancel Crop");
+
+            styles [
+              "osd",
+              "circular",
+            ]
+          }
+
+          Gtk.Button crop_confirm_button {
+            icon-name: "object-select-symbolic";
+            tooltip-text: _("Apply Crop");
+            sensitive: false;
+
+            styles [
+              "osd",
+              "circular",
+              "suggested-action",
+            ]
+          }
         }
 
         [overlay]

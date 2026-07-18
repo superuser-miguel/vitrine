@@ -111,6 +111,12 @@ mod imp {
         #[template_child]
         pub crop_area: TemplateChild<gtk::DrawingArea>,
         #[template_child]
+        pub crop_confirm_box: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub crop_confirm_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub crop_cancel_button: TemplateChild<gtk::Button>,
+        #[template_child]
         pub filmstrip_button: TemplateChild<gtk::ToggleButton>,
         #[template_child]
         pub info_button: TemplateChild<gtk::ToggleButton>,
@@ -180,6 +186,10 @@ mod imp {
         /// In-progress crop selection in crop_area widget coords (x, y, w, h).
         pub crop_sel: Cell<Option<(f64, f64, f64, f64)>>,
         pub crop_drag_start: Cell<(f64, f64)>,
+        /// What this drag is doing: fresh rect, moving, or pulling corner i.
+        pub crop_drag_mode: Cell<u8>,
+        /// The selection as it was when the drag began (for move/resize).
+        pub crop_orig: Cell<(f64, f64, f64, f64)>,
         /// Where the strip is *about* to be: `scroll_to`'s target, used as the
         /// centre until the hadjustment catches up (it updates asynchronously,
         /// and ordering/evicting by the stale value starved the very cells the
@@ -214,6 +224,9 @@ mod imp {
                 save_row: Default::default(),
                 save_as_row: Default::default(),
                 crop_area: Default::default(),
+                crop_confirm_box: Default::default(),
+                crop_confirm_button: Default::default(),
+                crop_cancel_button: Default::default(),
                 filmstrip_button: Default::default(),
                 info_button: Default::default(),
                 info_split: Default::default(),
@@ -246,6 +259,8 @@ mod imp {
                 edit_history: Default::default(),
                 crop_sel: Cell::new(None),
                 crop_drag_start: Cell::new((0.0, 0.0)),
+                crop_drag_mode: Cell::new(0),
+                crop_orig: Cell::new((0.0, 0.0, 0.0, 0.0)),
                 film_center_hint: Cell::new(None),
             }
         }
@@ -756,7 +771,9 @@ impl VitrineViewer {
                 let imp = v.imp();
                 imp.crop_sel.set(None);
                 imp.crop_apply_button.set_sensitive(false);
+                imp.crop_confirm_button.set_sensitive(false);
                 imp.crop_area.set_visible(b.is_active());
+                imp.crop_confirm_box.set_visible(b.is_active());
                 if b.is_active() {
                     v.zoom_fit();
                 }
@@ -813,6 +830,12 @@ impl VitrineViewer {
                     cr.set_line_width(1.5);
                     cr.rectangle(x, y, sw, sh);
                     let _ = cr.stroke();
+                    // Corner handles (Loupe-style): filled squares to grab.
+                    const HS: f64 = 5.0;
+                    for (cx, cy) in [(x, y), (x + sw, y), (x, y + sh), (x + sw, y + sh)] {
+                        cr.rectangle(cx - HS, cy - HS, HS * 2.0, HS * 2.0);
+                        let _ = cr.fill();
+                    }
                 } else {
                     cr.rectangle(0.0, 0.0, w as f64, h as f64);
                     let _ = cr.fill();
@@ -838,6 +861,17 @@ impl VitrineViewer {
                 }
                 v.imp().crop_button.set_active(false);
             }
+        ));
+
+        imp.crop_confirm_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.apply_crop_selection()
+        ));
+        imp.crop_cancel_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| v.imp().crop_button.set_active(false)
         ));
 
         imp.undo_button.connect_clicked(glib::clone!(
