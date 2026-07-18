@@ -786,34 +786,118 @@ impl VitrineViewer {
             #[weak(rename_to = v)]
             self,
             move |_, x, y| {
-                v.imp().crop_drag_start.set((x, y));
-                v.imp().crop_sel.set(None);
-                v.imp().crop_area.queue_draw();
+                let imp = v.imp();
+                imp.crop_drag_start.set((x, y));
+                // Loupe behaviour: every handle stays adjustable until confirm.
+                // Decide from where the press lands — a corner handle resizes,
+                // inside the rect moves, anywhere else starts a fresh rect.
+                let mode = match imp.crop_sel.get() {
+                    Some(r @ (rx, ry, rw, rh)) => {
+                        const GRAB: f64 = 22.0;
+                        let corners = [(rx, ry), (rx + rw, ry), (rx, ry + rh), (rx + rw, ry + rh)];
+                        let hit = corners
+                            .iter()
+                            .position(|(cx, cy)| (x - cx).abs() < GRAB && (y - cy).abs() < GRAB);
+                        match hit {
+                            Some(i) => {
+                                imp.crop_orig.set(r);
+                                2 + i as u8
+                            }
+                            None if x > rx && x < rx + rw && y > ry && y < ry + rh => {
+                                imp.crop_orig.set(r);
+                                1
+                            }
+                            None => 0,
+                        }
+                    }
+                    None => 0,
+                };
+                imp.crop_drag_mode.set(mode);
+                if mode == 0 {
+                    imp.crop_sel.set(None);
+                }
+                imp.crop_area.queue_draw();
             }
         ));
         drag.connect_drag_update(glib::clone!(
             #[weak(rename_to = v)]
             self,
             move |_, dx, dy| {
-                let (sx, sy) = v.imp().crop_drag_start.get();
-                let (x0, x1) = if dx < 0.0 {
-                    (sx + dx, sx)
-                } else {
-                    (sx, sx + dx)
+                let imp = v.imp();
+                let (sx, sy) = imp.crop_drag_start.get();
+                let sel = match imp.crop_drag_mode.get() {
+                    0 => {
+                        let (x0, x1) = if dx < 0.0 {
+                            (sx + dx, sx)
+                        } else {
+                            (sx, sx + dx)
+                        };
+                        let (y0, y1) = if dy < 0.0 {
+                            (sy + dy, sy)
+                        } else {
+                            (sy, sy + dy)
+                        };
+                        (x0, y0, x1 - x0, y1 - y0)
+                    }
+                    1 => {
+                        let (ox, oy, ow, oh) = imp.crop_orig.get();
+                        (ox + dx, oy + dy, ow, oh)
+                    }
+                    m => {
+                        // Pull one corner; the opposite corner stays anchored.
+                        let (ox, oy, ow, oh) = imp.crop_orig.get();
+                        let (ax, ay) = match m - 2 {
+                            0 => (ox + ow, oy + oh), // dragging top-left
+                            1 => (ox, oy + oh),      // top-right
+                            2 => (ox + ow, oy),      // bottom-left
+                            _ => (ox, oy),           // bottom-right
+                        };
+                        let (px, py) = (sx + dx, sy + dy);
+                        (px.min(ax), py.min(ay), (px - ax).abs(), (py - ay).abs())
+                    }
                 };
-                let (y0, y1) = if dy < 0.0 {
-                    (sy + dy, sy)
-                } else {
-                    (sy, sy + dy)
-                };
-                v.imp().crop_sel.set(Some((x0, y0, x1 - x0, y1 - y0)));
-                v.imp()
-                    .crop_apply_button
-                    .set_sensitive((x1 - x0) > 8.0 && (y1 - y0) > 8.0);
-                v.imp().crop_area.queue_draw();
+                imp.crop_sel.set(Some(sel));
+                let valid = sel.2 > 8.0 && sel.3 > 8.0;
+                imp.crop_apply_button.set_sensitive(valid);
+                imp.crop_confirm_button.set_sensitive(valid);
+                imp.crop_area.queue_draw();
             }
         ));
         imp.crop_area.add_controller(drag);
+
+        // Live resize cursors over the handles (Loupe's affordance): motion
+        // updates the cursor to the matching resize/move shape.
+        let motion = gtk::EventControllerMotion::new();
+        motion.connect_motion(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_, x, y| {
+                let imp = v.imp();
+                let name = match imp.crop_sel.get() {
+                    Some((rx, ry, rw, rh)) => {
+                        const GRAB: f64 = 22.0;
+                        let corners = [
+                            (rx, ry, "nw-resize"),
+                            (rx + rw, ry, "ne-resize"),
+                            (rx, ry + rh, "sw-resize"),
+                            (rx + rw, ry + rh, "se-resize"),
+                        ];
+                        corners
+                            .iter()
+                            .find(|(cx, cy, _)| (x - cx).abs() < GRAB && (y - cy).abs() < GRAB)
+                            .map(|(_, _, n)| *n)
+                            .unwrap_or(if x > rx && x < rx + rw && y > ry && y < ry + rh {
+                                "move"
+                            } else {
+                                "crosshair"
+                            })
+                    }
+                    None => "crosshair",
+                };
+                imp.crop_area.set_cursor_from_name(Some(name));
+            }
+        ));
+        imp.crop_area.add_controller(motion);
 
         imp.crop_area.set_draw_func(glib::clone!(
             #[weak(rename_to = v)]
