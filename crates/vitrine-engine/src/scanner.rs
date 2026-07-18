@@ -82,11 +82,11 @@ pub fn classify(existing: Option<&FileRecord>, size: i64, mtime: i64) -> Change 
 impl Db {
     /// Paths of non-missing files whose path begins with `root` + separator.
     pub fn paths_under(&self, root: &str) -> rusqlite::Result<Vec<String>> {
-        let prefix = format!("{}/%", root.trim_end_matches('/'));
+        let (lo, hi) = crate::query::subtree_range(root);
         let mut stmt = self
             .conn()
-            .prepare("SELECT path FROM files WHERE missing = 0 AND path LIKE ?1")?;
-        let rows = stmt.query_map([prefix], |r| r.get::<_, String>(0))?;
+            .prepare("SELECT path FROM files WHERE missing = 0 AND path >= ?1 AND path < ?2")?;
+        let rows = stmt.query_map([lo, hi], |r| r.get::<_, String>(0))?;
         rows.collect()
     }
 

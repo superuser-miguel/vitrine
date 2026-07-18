@@ -1004,6 +1004,16 @@ is smooth.
     reduced but still the top smoothness item. Cold decode itself is smooth
     (that's #6 doing its job); its remaining cost is pop-in *latency*, which #3
     already removes for indexed folders.
+    **→ SOLVED same day:** the per-open stall was `ratings_under`'s
+    `LIKE 'folder/%'` — default case-insensitive LIKE can't use the BINARY
+    `path` index, so every folder open full-scanned all 143k rows (+ LEFT JOIN)
+    on the main thread (~36 ms in the CLI, 50–150 ms in-app). Replaced the
+    LIKE-prefix with an index-friendly half-open path range
+    (`query::subtree_range`: `[root/, root0)`) in `ratings_under`,
+    `paths_under`, and the query builder's `under` scope (2 ms; no wildcard
+    escaping needed — `escape_like` deleted). Verified on the same warm
+    15-dir soak: **stalls ≥50 ms near folder-open 30 → 0** (total 47 → 3,
+    smooth samples 176 → 204/234).
 
 ### 13.2 What's worth doing (priority order)
 

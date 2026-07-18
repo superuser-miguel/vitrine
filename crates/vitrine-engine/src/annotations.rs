@@ -82,16 +82,16 @@ impl Db {
     /// query to stamp the grid's in-memory items, so cell rating overlays and
     /// rating writes need no per-cell database hit. `rating` is 0 when unrated.
     pub fn ratings_under(&self, folder: &str) -> rusqlite::Result<Vec<(String, String, i64)>> {
-        let prefix = format!(
-            "{}/%",
-            crate::query::escape_like(folder.trim_end_matches('/'))
-        );
+        // Runs on the main thread at every folder open — the path range (vs a
+        // LIKE prefix) is what lets it use the path index instead of scanning
+        // the whole files table (see `subtree_range`).
+        let (lo, hi) = crate::query::subtree_range(folder);
         let mut stmt = self.conn().prepare(
             "SELECT f.path, f.content_hash, COALESCE(r.rating, 0)
              FROM files f LEFT JOIN ratings r ON r.content_hash = f.content_hash
-             WHERE f.missing = 0 AND f.path LIKE ?1 ESCAPE '\\'",
+             WHERE f.missing = 0 AND f.path >= ?1 AND f.path < ?2",
         )?;
-        let rows = stmt.query_map([prefix], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        let rows = stmt.query_map([lo, hi], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
         rows.collect()
     }
 }
