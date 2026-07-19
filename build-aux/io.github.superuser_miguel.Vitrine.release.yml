@@ -66,4 +66,5 @@ modules:
       - type: git
         url: https://github.com/superuser-miguel/vitrine.git
         tag: v0.1.0
+        commit: edf0d3064a08075a204cb339857fd4fe600d7696
       - cargo-sources.json
