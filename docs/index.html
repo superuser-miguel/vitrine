@@ -78,6 +78,14 @@
   code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px; border-radius: 6px; }
   pre code { background: none; padding: 0; }
 
+  .shot { display: block; width: 100%; max-width: 860px; margin: 34px auto 0;
+          border-radius: 14px; border: 1px solid var(--border);
+          box-shadow: 0 18px 44px rgba(0,0,0,.22); }
+  .shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; }
+  .shots figure { margin: 0; }
+  .shots img { width: 100%; border-radius: 12px; border: 1px solid var(--border); display: block; }
+  .shots figcaption { color: var(--muted); font-size: .88rem; padding: 8px 4px 0; }
+
   footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; }
   footer p { margin: 6px 0; }
 </style>
@@ -108,9 +116,11 @@
     grid and selection model, and a tag/catalog layer keyed to survive gallery-dl renames.
     Rate, comment, tag, collect, and de-duplicate; nothing gets lost when files move.</p>
   <div class="btns">
-    <a class="btn primary" href="https://github.com/superuser-miguel/vitrine">View on GitHub</a>
+    <a class="btn primary" href="https://github.com/superuser-miguel/vitrine/releases/latest">Download (.flatpak)</a>
+    <a class="btn" href="https://github.com/superuser-miguel/vitrine">View on GitHub</a>
     <a class="btn" href="https://github.com/superuser-miguel/vitrine#build--run">Build it</a>
   </div>
+  <img class="shot" src="screenshots/browser-grid.png" alt="Vitrine browsing a folder of images in its virtualized thumbnail grid, with the Places / Folders / Collections sidebar">
 </header>
 
 <section class="wrap">
@@ -148,6 +158,19 @@
 </section>
 
 <section class="wrap">
+  <h2>Screenshots</h2>
+  <p class="sub">The viewer, the review layer, and the edit card — all in one window.</p>
+  <div class="shots">
+    <figure><img src="screenshots/viewer-filmstrip.png" alt="Single-image viewer with synced filmstrip"><figcaption>The viewer — fit / zoom / pan / 100%, with a synced filmstrip.</figcaption></figure>
+    <figure><img src="screenshots/review-properties.png" alt="Review and properties sidebar with rating stars, comment, and EXIF fields"><figcaption>Review &amp; properties — stars, comments, and EXIF at a glance.</figcaption></figure>
+    <figure><img src="screenshots/edit-card.png" alt="Non-destructive edit card with rotate, flip, crop, undo/redo, and Save / Save As"><figcaption>Non-destructive edits — rotate / flip / crop; Save bakes only when you say so.</figcaption></figure>
+    <figure><img src="screenshots/drag-to-bookmark.png" alt="Dragging a folder from GNOME Files into Vitrine's Places sidebar"><figcaption>Drag a folder from Files straight into Places to bookmark it.</figcaption></figure>
+    <figure><img src="screenshots/filter-bar.png" alt="Filter bar narrowing the grid by rating and tag"><figcaption>Filter live by rating or tag — save it as a smart collection.</figcaption></figure>
+    <figure><img src="screenshots/folders-and-tags.png" alt="Folder tree sidebar and the tag entry popover"><figcaption>The lazy folder tree and the tag popover.</figcaption></figure>
+  </div>
+</section>
+
+<section class="wrap">
   <h2>Roadmap</h2>
   <p class="sub">v1 shipped. Next up:</p>
   <ul class="road">
@@ -156,20 +179,29 @@
     <li class="done"><b>Find duplicates</b> — exact and perceptual-hash clustering.</li>
     <li class="done"><b>Navigation</b> — switchable sidebar, bookmarks, folder tree, Back/Forward.</li>
     <li class="done"><b>XMP sidecar export</b> — ratings/comments/tags out to <code>.xmp</code> for other tools.</li>
+    <li class="done"><b>Edit tier</b> — non-destructive rotate / flip / crop with undo/redo and Save / Save As.</li>
+    <li class="done"><b>Decode-scheduling performance</b> — viewport-ordered, cost-aware thumbnail loading.</li>
+    <li class="done"><b>Removable-media bookmarks</b> — offline state for USB drives that come and go.</li>
     <li><b>Viewer pan</b> — grab-hand click-drag panning for zoomed-in / large images.</li>
-    <li><b>Removable-media bookmarks</b> — offline / greyed state for USB drives that come and go.</li>
-    <li><b>Decode-scheduling performance</b> — viewport-ordered, cost-aware thumbnail loading for mixed-size folders.</li>
+    <li><b>Deeper editing</b> — resize / straighten and GPU-accelerated adjustments.</li>
     <li><b>More navigation</b> — address bar and tabs.</li>
     <li><b>Lua scripting</b> — custom sort orders, batch ImageMagick, rename rules.</li>
-    <li><b>Edit tier</b> — non-destructive crop / rotate / resize.</li>
     <li><b>WASM plugins</b> — local auto-tagging and embedding-based "find similar".</li>
     <li><b>In-file XMP embed</b> — write the packet directly into JPEG/PNG containers.</li>
   </ul>
 </section>
 
 <section class="wrap">
+  <h2>Install</h2>
+  <p class="sub">A Flatpak bundle on GitHub Releases — not Flathub. The GNOME runtime comes from Flathub automatically.</p>
+  <pre><code># Download Vitrine.flatpak from the latest release, then:
+flatpak install --user ./Vitrine.flatpak
+flatpak run io.github.superuser_miguel.Vitrine</code></pre>
+</section>
+
+<section class="wrap">
   <h2>Build &amp; run</h2>
-  <p class="sub">GNOME 48+ · a Rust toolchain · <code>blueprint-compiler</code>. Released as a Flatpak bundle on GitHub — not Flathub.</p>
+  <p class="sub">GNOME 48+ · a Rust toolchain · <code>blueprint-compiler</code>.</p>
   <pre><code># Flatpak (recommended)
 flatpak-builder --user --install --force-clean build-dir \
   build-aux/io.github.superuser_miguel.Vitrine.yml

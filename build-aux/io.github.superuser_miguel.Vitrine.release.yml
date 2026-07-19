@@ -1,0 +1,69 @@
+# Flatpak RELEASE manifest — Vitrine. Builds fully OFFLINE from the pinned
+# release tag + the vendored crate graph (cargo-sources.json), for the
+# `.flatpak` bundle published on GitHub Releases:
+#
+#   flatpak-builder --user --force-clean --repo=repo-release build-dir-release \
+#     build-aux/io.github.superuser_miguel.Vitrine.release.yml
+#   flatpak build-bundle repo-release Vitrine.flatpak \
+#     io.github.superuser_miguel.Vitrine \
+#     --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
+#
+# Regenerate cargo-sources.json whenever Cargo.lock changes:
+#   python3 flatpak-cargo-generator.py Cargo.lock -o build-aux/cargo-sources.json
+# (flatpak-builder-tools; needs a venv with tomlkit + aiohttp.)
+#
+# Local dev iteration uses io.github.superuser_miguel.Vitrine.yml instead
+# (dir source, build-time network, no vendoring).
+
+id: io.github.superuser_miguel.Vitrine
+runtime: org.gnome.Platform
+runtime-version: '50'
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: vitrine
+
+finish-args:
+  # -- display / input ------------------------------------------------------
+  - --share=ipc
+  - --socket=fallback-x11
+  - --socket=wayland
+  - --device=dri                       # GPU rendering for GTK4/GSK + glycin
+
+  # -- filesystem (PLAN §4) -------------------------------------------------
+  - --filesystem=xdg-pictures          # the one deliberate static root
+  - --filesystem=xdg-cache/thumbnails:create   # shared freedesktop thumb cache
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+
+modules:
+  # ---------------------------------------------------------------- blueprint
+  # Compiles .blp UI files at build time; not needed at runtime.
+  - name: blueprint-compiler
+    buildsystem: meson
+    cleanup: ['*']
+    sources:
+      - type: git
+        url: https://gitlab.gnome.org/GNOME/blueprint-compiler.git
+        tag: v0.18.0
+
+  # ---------------------------------------------------------------- the app
+  - name: vitrine
+    buildsystem: meson
+    config-opts:
+      - -Dprofile=default
+      - -Doffline=true
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/vitrine/cargo
+    sources:
+      # Release source: the tagged release, pinned by tag (+ commit once
+      # tagged). Local testing can swap in {type: dir, path: ..}.
+      - type: git
+        url: https://github.com/superuser-miguel/vitrine.git
+        tag: v0.1.0
+      - cargo-sources.json

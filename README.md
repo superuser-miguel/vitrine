@@ -6,6 +6,10 @@
 
 <p align="center"><strong>Browse images that happen to be files — with a review layer that survives every rename.</strong></p>
 
+<p align="center">
+  <img src="docs/screenshots/browser-grid.png" alt="Vitrine browsing a folder of images in its virtualized thumbnail grid, with the Places / Folders / Collections sidebar" width="800">
+</p>
+
 Vitrine is a fast, focused, **catalog-aware image browser + reviewer** for
 GNOME: Loupe's viewer architecture + Nautilus's grid and selection model + a
 catalog/tag layer keyed by content hash so ratings, tags, comments, and
@@ -75,6 +79,23 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
   Non-destructive: originals are never rewritten.
 - **Preferences** for library roots and the thumbnail-cache budget.
 
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/viewer-filmstrip.png" alt="Single-image viewer with synced filmstrip"><br><em>The viewer — fit / zoom / pan / 100%, with a synced filmstrip.</em></td>
+<td width="50%"><img src="docs/screenshots/review-properties.png" alt="Review and properties sidebar with star rating, comment, and EXIF fields"><br><em>Review &amp; properties — stars, comments, and EXIF at a glance.</em></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/edit-card.png" alt="Non-destructive edit card with rotate, flip, crop, undo/redo, and Save / Save As"><br><em>Non-destructive edits — rotate / flip / crop, undone or baked at will.</em></td>
+<td width="50%"><img src="docs/screenshots/drag-to-bookmark.png" alt="Dragging a folder from Nautilus into Vitrine's Places sidebar"><br><em>Drag a folder straight from Files into Places to bookmark it.</em></td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/screenshots/filter-bar.png" alt="Filter bar narrowing the grid by rating and tag"><br><em>Filter live by rating or tag — and save it as a smart collection.</em></td>
+<td width="50%"><img src="docs/screenshots/primary-menu.png" alt="Primary menu with Find Duplicates and Write Metadata Sidecars"><br><em>Find Duplicates and XMP sidecar export live in the primary menu.</em></td>
+</tr>
+</table>
+
 ## Roadmap
 
 v1 is feature-complete. See [`PLAN.md`](PLAN.md) for full specs.
@@ -104,7 +125,18 @@ warm-cache-during-indexing), and a first cut of offline removable-media bookmark
 **Not on Flathub** — Vitrine is distributed as a Flatpak **bundle via
 [GitHub Releases](https://github.com/superuser-miguel/vitrine/releases)**, with
 the project page on [GitHub Pages](https://superuser-miguel.github.io/vitrine/).
-Grab a release `.flatpak` and `flatpak install` it, or build it locally (below).
+
+Download `Vitrine.flatpak` from the
+[latest release](https://github.com/superuser-miguel/vitrine/releases/latest), then:
+
+```sh
+flatpak install --user ./Vitrine.flatpak
+flatpak run io.github.superuser_miguel.Vitrine
+```
+
+The bundle references (does not include) the `org.gnome.Platform//50` runtime;
+`flatpak install` fetches it from Flathub if you don't have it. Bundles don't
+auto-update — grab a newer release and reinstall over it. Or build locally (below).
 
 ## Layout
 
@@ -152,12 +184,20 @@ flatpak-builder --user --install --force-clean build-dir \
 flatpak run io.github.superuser_miguel.Vitrine
 ```
 
-The manifest currently allows build-time network for local iteration. For a
-reproducible **release bundle** (`flatpak build-bundle`) to publish on GitHub
-Releases, vendor the crate graph
-(`python3 flatpak-cargo-generator.py Cargo.lock -o build-aux/cargo-sources.json`),
-add it to the app module, remove the `--share=network` **build-arg**, and build
-with `-Doffline=true`.
+That manifest allows build-time network for local iteration. The **release
+bundle** published on GitHub Releases is built fully offline from the production
+manifest (`build-aux/io.github.superuser_miguel.Vitrine.release.yml`), which
+pins the release tag and vendors the crate graph
+(`build-aux/cargo-sources.json`, regenerated from `Cargo.lock` with
+flatpak-builder-tools' `flatpak-cargo-generator.py` whenever the lockfile
+changes):
+
+```sh
+flatpak-builder --user --force-clean --repo=repo-release build-dir-release \
+  build-aux/io.github.superuser_miguel.Vitrine.release.yml
+flatpak build-bundle repo-release Vitrine.flatpak io.github.superuser_miguel.Vitrine \
+  --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
+```
 
 ## Test fixtures
 

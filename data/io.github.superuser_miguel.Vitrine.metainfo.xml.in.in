@@ -29,10 +29,32 @@
     <name>Miguel Almanzar</name>
   </developer>
   <content_rating type="oars-1.1"/>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://superuser-miguel.github.io/vitrine/screenshots/browser-grid.png</image>
+      <caption>Browsing a folder in the virtualized thumbnail grid</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://superuser-miguel.github.io/vitrine/screenshots/viewer-filmstrip.png</image>
+      <caption>The single-image viewer with its synced filmstrip</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://superuser-miguel.github.io/vitrine/screenshots/review-properties.png</image>
+      <caption>Review and properties sidebar: ratings, comments, EXIF</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://superuser-miguel.github.io/vitrine/screenshots/edit-card.png</image>
+      <caption>Non-destructive edit card: rotate, flip, crop, undo/redo</caption>
+    </screenshot>
+  </screenshots>
   <releases>
-    <release version="0.1.0" date="2026-07-13">
+    <release version="0.1.0" date="2026-07-18">
       <description>
-        <p>Initial scaffold.</p>
+        <p>
+          First release. Browse, view, index, review, organize, edit
+          (non-destructively) and de-duplicate an image library — all keyed by
+          content hash so annotations survive renames and moves.
+        </p>
       </description>
     </release>
   </releases>
