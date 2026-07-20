@@ -272,6 +272,23 @@ plus a migration collapsing the existing 17,050 pairs. `path` keeps its current
 meaning — the path the sandbox can actually open — so nothing breaks. Bonus: the
 Properties card could show a real folder instead of `/run/user/1000/doc/…`.
 
+### V-21 · Grid selection is louder than the images · `CONFIRMED` · **FIXED (untested)**
+
+There was no selection styling at all, so Adwaita's default applied: a selected
+`gridview > child` gets the **solid** accent background. Across a multi-selection
+adjacent cells abut and merge into one saturated slab with the thumbnails sitting
+inside it.
+
+> **Fixed 2026-07-20.** A file-manager-weight wash instead: `alpha(@accent_bg_color,
+> 0.25)`, `border-radius: 9px` (clears the cell's own 4px margin so the tint hugs
+> the thumbnail rather than the grid track — this is what stops cells merging),
+> and `color: inherit` so filenames keep their normal label colour. Focus keeps a
+> distinct ring, since it must stay findable inside a selection. Hover left to
+> Adwaita.
+>
+> CSS cannot be verified headlessly — GTK parses it at runtime and skips
+> malformed rules with a `Gtk-WARNING`. If the slab persists, check the log for one.
+
 ### V-20 · A collection view doesn't refresh when it gains members · `CONFIRMED` · **FIXED (untested)**
 
 Dropping onto the catalog you are currently viewing wrote to the index but left
