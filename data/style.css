@@ -14,29 +14,29 @@
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
-/* Grid selection, Nautilus-weight.
+/* Grid selection.
 
-   Adwaita fills a selected gridview child with the solid accent background. On
-   a single row that reads fine; across a multi-selection the cells abut and it
-   becomes one saturated slab with the thumbnails sitting in it — the selection
-   ends up louder than the images it is selecting. A file manager tints instead:
-   a soft, rounded wash per item.
+   Adwaita does NOT paint a solid fill here — it already tints a selected
+   gridview child at 25% accent with a 9px radius and 3px padding
+   (libadwaita styles/gtk.css: `gridview > child:selected`). An earlier pass
+   here "softened" it to 25% with a 9px radius, i.e. changed nothing.
 
-   Radius clears the cell's own 4px margin so the wash hugs the thumbnail rather
-   than the grid track. `color: inherit` keeps the filename at its normal label
-   colour instead of being flipped to the accent's foreground. */
-gridview > child:selected {
-  background-color: alpha(@accent_bg_color, 0.25);
-  border-radius: 9px;
-  color: inherit;
+   The heaviness is coverage, not opacity. A grid cell is much larger than the
+   thumbnail inside it, so a 25% wash over the whole cell rect leaves adjacent
+   tiles almost touching and a multi-selection reads as one block. Two changes:
+   a lighter tint, and a margin so each tile is visibly its own.
+
+   Both numbers are taste — this is the place to tune them. */
+gridview > child {
+  margin: 2px;
 }
 
-/* Keyboard focus still needs to be findable inside a selection, so it stays a
-   distinct ring rather than a heavier fill. Hover is left to Adwaita. */
-gridview > child:focus-visible {
-  outline: 2px solid alpha(@accent_bg_color, 0.8);
-  outline-offset: -2px;
-  border-radius: 9px;
+gridview > child:selected {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 13%, transparent);
+}
+
+gridview > child.activatable:selected:hover {
+  background-color: color-mix(in srgb, var(--accent-bg-color) 19%, transparent);
 }
 
 /* Duplicates page: mark the copy that will be kept. */
