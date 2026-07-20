@@ -1,0 +1,466 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Six bugs in an image browser — Vitrine</title>
+<meta name="description" content="A debugging session on a GTK4/Rust image browser: instrumentation that couldn't see its own bugs, a tag menu that got slower the more you used it, Flatpak portal paths that aren't paths, and the mistakes made along the way.">
+<style>
+  :root {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf;
+    --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+      --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6;
+      --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf; --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+    --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6; --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.68 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 40px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: 0; }
+
+  .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
+  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
+  .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
+  .meta { color: var(--muted); font-size: .88rem; margin: 0; }
+
+  h2 { font-size: 1.42rem; letter-spacing: -.01em; margin: 0 0 6px; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5em; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .98rem; }
+  h3 { font-size: 1.02rem; margin: 26px 0 6px; }
+  p { margin: 0 0 15px; }
+
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+        padding: 14px 16px; overflow-x: auto; font-size: .87rem; line-height: 1.5; }
+  code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px;
+         border-radius: 6px; font-size: .92em; }
+  pre code { background: none; padding: 0; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; margin: 0 0 16px; }
+  table { width: 100%; border-collapse: collapse; min-width: 420px; background: var(--surface); }
+  th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  thead th { font-size: .78rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  blockquote { margin: 0 0 15px; padding: 12px 18px; border-left: 3px solid var(--accent);
+               background: color-mix(in srgb, var(--accent) 7%, transparent);
+               border-radius: 0 10px 10px 0; color: var(--text); }
+  blockquote p:last-child { margin: 0; }
+
+  .lesson { background: var(--surface); border: 1px solid var(--border);
+            border-left: 3px solid var(--ok); border-radius: 0 12px 12px 0;
+            padding: 14px 18px; margin: 20px 0 0; }
+  .lesson b { display: block; font-size: .78rem; text-transform: uppercase;
+              letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+  .lesson p { margin: 0; }
+
+  .mine { border-left-color: var(--warn); }
+  ul { padding-left: 22px; margin: 0 0 15px; }
+  li { margin: 0 0 7px; }
+  .toc { list-style: none; padding: 0; margin: 0; }
+  .toc li { margin: 0; border-bottom: 1px solid var(--border); }
+  .toc li:last-child { border: 0; }
+  .toc a { display: block; padding: 10px 0; text-decoration: none; color: var(--text); }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .7em; }
+
+  footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; padding: 26px 0 46px; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <a class="back" href="./">&larr; Vitrine</a>
+  <h1>Six bugs in an image browser</h1>
+  <p class="lede">A day of debugging <a href="./">Vitrine</a> — a GTK4/Rust image browser with
+    a SQLite catalog — and what each bug turned out to be hiding. Including the ones
+    where the diagnosis was confidently wrong.</p>
+  <p class="meta">July 2026 · GNOME · Rust · GTK4 · SQLite · Flatpak</p>
+</header>
+
+<section class="wrap">
+  <p>Vitrine indexes images into SQLite and keys everything — tags, ratings, crops — to a
+    BLAKE3 content hash, so annotations survive renames. The library under test held about
+    <strong>193,000 files</strong>.</p>
+  <p>The reported symptoms were vague in the way real symptoms usually are: <em>drag-and-drop
+    is very bad, tagging is slow, and sometimes it stops working even though it says it
+    worked.</em> Every one of those turned out to be a different bug, and the most useful
+    thing we found wasn't a bug at all.</p>
+  <ol class="toc" start="0">
+    <li><a href="#instrumentation"><span class="n">1</span>Instrumentation that couldn't see its own bugs</a></li>
+    <li><a href="#tags"><span class="n">2</span>A tag menu that got slower the more you used it</a></li>
+    <li><a href="#portal"><span class="n">3</span>Portal paths aren't paths</a></li>
+    <li><a href="#toast"><span class="n">4</span>A UI reporting success it couldn't know</a></li>
+    <li><a href="#delete"><span class="n">5</span>Delete meaning two different things</a></li>
+    <li><a href="#wrong"><span class="n">6</span>What the debugging got wrong</a></li>
+  </ol>
+</section>
+
+<section class="wrap" id="instrumentation">
+  <h2><span class="num">1</span>Instrumentation that couldn't see its own bugs</h2>
+  <p class="sub">A 92,000-line debug log in which none of the bugs appear.</p>
+
+  <p>Vitrine has a decent debug HUD: a stats line every second, plus per-item probes,
+    all written to a log. The log from the problem session was 92,375 lines. Here is
+    everything in it:</p>
+
+  <pre><code>63065  VDBG-FILMBIND     2296  VDBG-FILM
+11767  VDBG-FILL         2038  VDBG-VIEWER
+ 9648  VDBG-GRIDFILL
+ 3552  VDBG            (the once-a-second stats line)</code></pre>
+
+  <p>Every probe is frame-shaped or decode-shaped. Grepping that log for
+    <code>tag</code>, <code>drag</code> or <code>drop</code> returns <strong>zero
+    matches</strong>. The instrumentation had been built while chasing scroll performance,
+    and it measured scroll performance beautifully.</p>
+
+  <p>So when the UI froze for two and a half seconds, the log recorded this:</p>
+
+  <pre><code>stall=2514ms  decode[live=0 done=3894 +0/s]  queued=0  rss=768MB
+stall=2541ms  decode[live=0 done=3894 +0/s]  queued=0  rss=768MB
+stall=2525ms  decode[live=0 done=3894 +0/s]  queued=0  rss=768MB</code></pre>
+
+  <p>Nothing decoding, nothing queued, memory flat, and — critically — <em>not one
+    per-item probe firing</em> during the freeze. The main thread was blocked doing
+    something the log had no vocabulary for. The freezes were recorded as silence.</p>
+
+  <p>Two smaller traps in the same log. A <code>frame_max</code> of 22,490ms looked
+    alarming until we noticed it came with <code>stall=3ms</code> — it was the idle gap
+    between redraws, not a hang. And <code>cache_hit=0%</code> throughout looked like a
+    broken cache until we checked the run flags: the session used <code>--cold</code>,
+    which skips cache reads deliberately.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>Instrumentation records the bugs you had when you wrote it. A log that looks
+      healthy during a reproducible failure is itself the finding — and the first fix,
+      because everything downstream depends on it. Adding four probes
+      (<code>VDBG-TAG</code>, <code>VDBG-DRAG</code>, <code>VDBG-DROP</code>,
+      <code>VDBG-WRITE</code>) went on to disprove two of our leading theories in a single run.</p>
+  </div>
+</section>
+
+<section class="wrap" id="tags">
+  <h2><span class="num">2</span>A tag menu that got slower the more you used it</h2>
+  <p class="sub">Cost proportional to tags × files, on the UI thread.</p>
+
+  <p>Opening the tag menu froze the app for 2.5 seconds, then 3.4 seconds later the same
+    day. The query behind it counts how many images carry each tag:</p>
+
+  <pre><code>SELECT t.id, t.name,
+       (SELECT count(*) FROM file_tags ft
+        JOIN files f ON f.content_hash = ft.content_hash AND f.missing = 0
+        WHERE ft.tag_id = t.id)
+FROM tags t ORDER BY t.name COLLATE NOCASE</code></pre>
+
+  <p>That reads like an indexed lookup. <code>EXPLAIN QUERY PLAN</code> disagreed:</p>
+
+  <pre><code>SCAN t USING COVERING INDEX sqlite_autoindex_tags_1
+`--CORRELATED SCALAR SUBQUERY 1
+   |--SCAN f                     &larr; full scan, 192,861 rows
+   `--SEARCH ft USING ... (content_hash=? AND tag_id=?)</code></pre>
+
+  <p>The <code>file_tags</code> table is keyed <code>PRIMARY KEY (content_hash, tag_id)</code>.
+    Filtering on <code>tag_id</code> alone can't use that index — it's the <em>second</em>
+    column. With no usable index, SQLite inverted the loop and drove the subquery from a
+    full scan of every file in the library. Once per tag.</p>
+
+  <p>Which makes the cost <strong>tags × files</strong>. Every tag the user created made
+    the menu slower for the entire library — a performance bug that degrades as the
+    feature succeeds. We confirmed the model by predicting the cost at 9 tags from the
+    measurement at 7:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Tags</th><th>Predicted</th><th>Measured</th><th>In-app freeze</th></tr></thead>
+    <tbody>
+      <tr><td>7</td><td>—</td><td>0.41s</td><td>~2.5s</td></tr>
+      <tr><td>9</td><td>0.53s</td><td>0.54s</td><td>~3.4s</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The fix was one index:</p>
+
+  <pre><code>CREATE INDEX idx_file_tags_tag ON file_tags(tag_id);</code></pre>
+
+  <p>The plan flips from <code>SCAN files</code> to <code>SEARCH file_tags</code>, and the
+    query drops from 0.54s to under 10ms. Worst main-loop stall across a session went from
+    <strong>3387ms to 125ms</strong>.</p>
+
+  <p>There was a second, sillier half. The tag <em>filter dropdown</em> called the same
+    function, then discarded every count and used only the names — paying the full cost
+    for data it threw away.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>A composite primary key is not an index on each of its columns. And when a
+      slowdown scales with how much the user has invested in a feature, that's worth
+      catching early — the people hurt most are the ones using it most. The regression
+      test asserts the <em>query plan</em>, not the timing, so it fails loudly rather
+      than getting slowly slower.</p>
+  </div>
+</section>
+
+<section class="wrap" id="portal">
+  <h2><span class="num">3</span>Portal paths aren't paths</h2>
+  <p class="sub">The bug that turned out to be four bugs.</p>
+
+  <p>Vitrine ships as a Flatpak with a deliberately narrow sandbox — read access to
+    <code>~/Pictures</code> and nothing else. Everything beyond that arrives through the
+    XDG file chooser portal, which hands the app a path like:</p>
+
+  <pre><code>/run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg/Ashley Trevort/utHPx4N.jpg</code></pre>
+
+  <p>That is not where the file lives. It's an opaque per-document handle on a FUSE
+    mount, valid while the grant lasts. Vitrine stored it in the <code>path</code> column
+    as though it were an address. So the index ended up with two unrelated families:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Path family</th><th>Rows</th></tr></thead>
+    <tbody>
+      <tr><td><code>/home/&hellip;/Pictures/&hellip;</code></td><td>79,020</td></tr>
+      <tr><td><code>/run/user/1000/doc/&hellip;</code></td><td>114,048</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>10,534 content hashes appeared under <em>both</em> — the same bytes, indexed twice,
+    under two names. That single modelling error produced four separate symptoms, none of
+    which looked related when reported:</p>
+
+  <h3>Tag counts were wrong</h3>
+  <p><code>files.path</code> is <code>UNIQUE</code>, so <code>files</code> is keyed by
+    path. One image reached two ways is two rows, and the tag count counted rows. A tag on
+    7 images displayed as <strong>15</strong>.</p>
+
+  <h3>Duplicate detection was 90% noise</h3>
+  <p>"Find duplicates" groups present files by content hash. Portal/real pairs match
+    perfectly, so the feature reported each of them as a duplicate of itself:
+    <strong>41,729</strong> clusters, of which <strong>4,022</strong> were real. The other
+    <strong>90%</strong> were one file listed against itself.</p>
+
+  <h3>And that was nearly destructive</h3>
+  <p>The duplicates card offered <em>"Trash the other copy (keep largest)"</em> — one
+    click, no confirmation. On a portal/real pair, "the other copy" is the same bytes the
+    keeper points at.</p>
+
+  <h3>Images silently failed to load</h3>
+  <p>The last symptom is the one that makes the model concrete. Grants lapse. When one
+    does, the handle stops resolving while the file itself is perfectly fine:</p>
+
+  <pre><code>thumbnail file:///run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg/Ashley Trevort/utHPx4N.jpg
+  Failed to load: No such file or directory</code></pre>
+
+  <p>The project owner put it better than the analysis had:</p>
+  <blockquote><p>Portal paths should not be treated as a path where files live.
+    It's a symlink.</p></blockquote>
+
+  <p>Exactly right, and it points straight at the fix. Where the same content exists under
+    both a portal handle and a real path, prefer the real one — for display, and for
+    duplicate detection:</p>
+
+  <pre><code>pub fn prefer_durable_paths(files: Vec&lt;FileRecord&gt;) -&gt; Vec&lt;FileRecord&gt;</code></pre>
+
+  <p>Two constraints make it correct rather than merely effective. It groups <strong>by
+    content hash</strong> — a near-duplicate cluster mixes different hashes, so dropping
+    portal rows across a whole cluster could discard a genuinely distinct image. And
+    content reachable <em>only</em> through a portal keeps its row, because nothing else
+    represents it.</p>
+
+  <p>That's a presentation-layer fix, and it's honest about its limits: it rescues files
+    that have a durable path <em>somewhere</em>. Anything indexed solely through the portal
+    is still one lapsed grant from being unreachable. The real fix — resolving handles to
+    host paths via the Documents portal and storing both — is still on the list.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>One wrong assumption in the data model surfaced as four unrelated-looking bug
+      reports: a wrong number, a noisy feature, a dangerous button, and a rendering
+      failure. When several symptoms resist a common explanation, the shared cause is
+      often a level below all of them. And the sandbox you chose is part of your data
+      model whether you modelled it or not.</p>
+  </div>
+</section>
+
+<section class="wrap" id="toast">
+  <h2><span class="num">4</span>A UI reporting success it couldn't know</h2>
+  <p class="sub">"It says it tagged them, but it didn't."</p>
+
+  <p>Annotation writes go to a single writer thread over a channel. Every one of the
+    twelve send sites looked like this:</p>
+
+  <pre><code>pub fn tag(&amp;self, name: &amp;str, hashes: &amp;[String], add: bool) {
+    let _ = self.requests.try_send(Request::Tag { /* … */ });
+}</code></pre>
+
+  <p>And the calling UI code like this:</p>
+
+  <pre><code>if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
+    indexer.annotator().tag(name, &amp;hashes, true);
+}
+self.toast("Tagged {n} images");        // ← outside the guard, always runs</code></pre>
+
+  <p>Three layers of silence with a success message on top. The write could fail, the
+    guard could skip, and the toast fired regardless.</p>
+
+  <p>The interesting part was in the channel's type. It's <strong>unbounded</strong> —
+    which means <code>try_send</code> cannot fail from backpressure. The only way it fails
+    is a dropped receiver, i.e. the writer thread is gone. That made the discarded
+    <code>Result</code> an exact, zero-cost liveness detector, thrown away twelve times.</p>
+
+  <p>Wiring it up, plus a queue-depth reading, distinguished two failure modes that had
+    been indistinguishable from the UI: a <em>dead</em> writer (send fails) versus a
+    <em>blocked</em> one (queue grows behind a long scan). They need different fixes.</p>
+
+  <p>Then the instrumented run said this:</p>
+
+  <pre><code>VDBG-WRITE op=tag_add rows=7 queued=0 accepted=true</code></pre>
+
+  <p>Every write accepted, queue never above zero — and the tags were confirmed present in
+    the database. <strong>Both theories were wrong.</strong> The writes had always worked.
+    "Tagging says it worked but didn't" was the 3-second freeze from §2 making a successful
+    action feel like a failed one.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>The most valuable instrumentation isn't the kind that confirms your theory — it's
+      the kind that can <em>refute</em> it. Here the refutation was already in the type
+      system: an unbounded channel's send failure has exactly one meaning, and the code
+      discarded it. Also worth stating plainly: never report success above the layer that
+      could fail. If the UI can't know, it shouldn't claim.</p>
+  </div>
+</section>
+
+<section class="wrap" id="delete">
+  <h2><span class="num">5</span>Delete meaning two different things</h2>
+  <p class="sub">The engine already had the fix.</p>
+
+  <p>In a collection view — a curated set spanning folders — pressing <kbd>Delete</kbd>
+    moved the underlying files to the trash. The keybinding had no idea what it was
+    looking at:</p>
+
+  <pre><code>(_, Key::Delete) =&gt; window.trash_selected(),</code></pre>
+
+  <p>Meanwhile the collection's context menu offered "Delete", which deleted the
+    <em>entire collection</em>. So there was no gesture that removed one image from a
+    collection, and the obvious one destroyed originals.</p>
+
+  <p>The engine had solved this already:</p>
+
+  <pre><code>collections.rs:162  pub fn remove_from_catalog(&amp;self, id: i64, hashes: &amp;[String])
+collections.rs:281  (unit test — passing)</code></pre>
+
+  <p>Implemented, tested, and reachable from nothing. No request variant, no handle
+    method, no UI. The same pattern showed up twice more: <code>set_catalog_order</code>
+    (unwired) and the tag API, whose <code>add: bool</code> parameter meant it had always
+    supported removal — the UI just passed <code>true</code> everywhere.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>A passing unit test proves the function works, not that anything calls it. In a
+      layered codebase, "implemented" and "reachable" are different states, and the gap
+      between them is invisible to both the test suite and the type checker. Worth a
+      periodic grep for public engine functions with no callers outside their own tests.</p>
+  </div>
+</section>
+
+<section class="wrap" id="wrong">
+  <h2><span class="num">6</span>What the debugging got wrong</h2>
+  <p class="sub">This session was done with an AI assistant. Here is where it was confidently wrong.</p>
+
+  <p>The write-ups above are tidied. The session wasn't. Three failures are worth
+    recording, because they share one shape.</p>
+
+  <h3>A fix that was a no-op</h3>
+  <p>When file drops intermittently resolved nothing, the theory was SQLite lock
+    contention: the default <code>busy_timeout</code> is zero, so a reader opened at the
+    wrong moment fails outright. A timeout was added, with a confident comment explaining
+    the bug it fixed.</p>
+  <p>Then a test was written to prove it. The test passed <em>without</em> the fix. A
+    second, sharper test also passed without it. Finally, the obvious check:</p>
+  <pre><code>rusqlite default busy_timeout = 5000 ms</code></pre>
+  <p>rusqlite already sets it. The change did nothing, and the comment asserted a cause
+    that had been ruled out. It was reverted. The real cause is still unknown — but the
+    diagnostics added alongside it will name it next time.</p>
+
+  <h3>A second no-op, in CSS</h3>
+  <p>Multi-selection in the grid rendered as one saturated slab. Diagnosis: "Adwaita fills
+    a selected item with the solid accent colour; soften it to a 25% tint with a 9px
+    radius." Shipped, described as fixed.</p>
+  <p>It changed nothing, because Adwaita's own stylesheet already says:</p>
+  <pre><code>gridview &gt; child          { padding: 3px; border-radius: 9px; }
+gridview &gt; child:selected { background-color: color-mix(in srgb, var(--accent-bg-color) 25%, transparent); }</code></pre>
+  <p>25% softened to 25%. Extracting that stylesheet from the runtime took one command,
+    and was done <em>after</em> shipping the fix rather than before writing it.</p>
+
+  <h3>Tuning the wrong dimension, three times</h3>
+  <p>Even after that, two more attempts adjusted <em>opacity</em>. The actual cause was
+    <em>layout</em>: 7px of padding sat <em>inside</em> the tinted rectangle (4px from the
+    cell, 3px from the theme) and only 2px outside it, so selected tiles grew until they
+    touched. There were no gaps to soften. No opacity value would have produced one —
+    lowering it just made a lighter unbroken field.</p>
+  <p>The fix was moving spacing from inside the tint to outside it. The evidence had been
+    sitting in the repository the whole time: a screenshot showing, unmistakably, zero gap
+    between tiles.</p>
+
+  <div class="lesson mine">
+    <b>The shape</b>
+    <p>All three failures verified the hypotheses that felt uncertain and skipped the ones
+      that felt obvious — which is backwards. Every skipped check was one command:
+      read the theme, query the default, look at the screenshot. The expensive mistakes
+      weren't hard problems misjudged; they were easy checks not run, on claims that felt
+      too obvious to test. If a fix depends on what some other system already does — a
+      theme, a library default, a portal — read that system before writing the fix, not
+      after shipping it.</p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>Where it ended</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>Before</th><th>After</th></tr></thead>
+    <tbody>
+      <tr><td>Worst main-loop stall</td><td>3387 ms</td><td>125 ms</td></tr>
+      <tr><td>Drag operations started per session</td><td>2</td><td>18</td></tr>
+      <tr><td>Duplicate clusters reported</td><td>41,729</td><td>4,022</td></tr>
+      <tr><td>Tag count (a 7-image tag)</td><td>15</td><td>7</td></tr>
+      <tr><td>Navigation-stack criticals</td><td>clusters</td><td>0</td></tr>
+      <tr><td>Data-loss bugs</td><td>1 live</td><td>fixed</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The one that mattered least in the numbers and most in practice was the first: none
+    of the rest was findable until the app could describe what it was doing.</p>
+</section>
+
+<footer class="wrap">
+  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p><a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a>
+     · <a href="./">Project page</a></p>
+</footer>
+
+</body>
+</html>
