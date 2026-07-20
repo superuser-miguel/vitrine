@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>What the document portal actually does — Vitrine</title>
+<meta name="description" content="A hands-on tour of the XDG document portal: the FUSE mount, the D-Bus registry, directory grants, and the three states a sandboxed app has to tell apart. With numbers from a real 193,000-file library.">
+<style>
+  :root {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf;
+    --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+      --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6;
+      --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf; --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+    --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6; --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.68 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 40px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: 0; }
+
+  .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
+  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
+  .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
+  .meta { color: var(--muted); font-size: .88rem; margin: 0; }
+
+  h2 { font-size: 1.42rem; letter-spacing: -.01em; margin: 0 0 6px; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5em; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .98rem; }
+  h3 { font-size: 1.02rem; margin: 26px 0 6px; }
+  p { margin: 0 0 15px; }
+
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+        padding: 14px 16px; overflow-x: auto; font-size: .87rem; line-height: 1.5; }
+  code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px;
+         border-radius: 6px; font-size: .92em; }
+  pre code { background: none; padding: 0; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; margin: 0 0 16px; }
+  table { width: 100%; border-collapse: collapse; min-width: 460px; background: var(--surface); }
+  th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  th:last-child, td:last-child { text-align: left; }
+  thead th { font-size: .78rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  blockquote { margin: 0 0 15px; padding: 12px 18px; border-left: 3px solid var(--accent);
+               background: color-mix(in srgb, var(--accent) 7%, transparent);
+               border-radius: 0 10px 10px 0; }
+  blockquote p:last-child { margin: 0; }
+
+  .lesson { background: var(--surface); border: 1px solid var(--border);
+            border-left: 3px solid var(--ok); border-radius: 0 12px 12px 0;
+            padding: 14px 18px; margin: 20px 0 0; }
+  .lesson b { display: block; font-size: .78rem; text-transform: uppercase;
+              letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+  .lesson p { margin: 0; }
+  .warnbox { border-left-color: var(--warn); }
+
+  ul, ol { padding-left: 22px; margin: 0 0 15px; }
+  li { margin: 0 0 7px; }
+  .toc { list-style: none; padding: 0; margin: 0; }
+  .toc li { margin: 0; border-bottom: 1px solid var(--border); }
+  .toc li:last-child { border: 0; }
+  .toc a { display: block; padding: 10px 0; text-decoration: none; color: var(--text); }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .7em; }
+
+  footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; padding: 26px 0 46px; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <a class="back" href="./">&larr; Vitrine</a>
+  <h1>What the document portal actually does</h1>
+  <p class="lede">Flatpak's document portal is usually described in one line: it lets a
+    sandboxed app open a file it has no permission to see. That line is true and it hides
+    almost everything that matters. This is a hands-on tour — with numbers from a real
+    193,000-file library that the portal quietly broke.</p>
+  <p class="meta">July 2026 · Flatpak · xdg-desktop-portal · FUSE · D-Bus</p>
+</header>
+
+<section class="wrap">
+  <p>Everything below was measured on one live system, not read from a spec. If you have
+    Flatpak apps installed, every command here will work on yours, and the numbers will be
+    different in interesting ways.</p>
+  <ol class="toc">
+    <li><a href="#problem"><span class="n">1</span>The problem portals solve</a></li>
+    <li><a href="#anatomy"><span class="n">2</span>Anatomy of a document handle</a></li>
+    <li><a href="#directory"><span class="n">3</span>Directory grants: 11 picks, 114,048 paths</a></li>
+    <li><a href="#registry"><span class="n">4</span>The registry, and how to ask it things</a></li>
+    <li><a href="#states"><span class="n">5</span>Three states, not two</a></li>
+    <li><a href="#catalog"><span class="n">6</span>Why this hurts catalog apps specifically</a></li>
+    <li><a href="#rules"><span class="n">7</span>Rules of thumb</a></li>
+  </ol>
+</section>
+
+<section class="wrap" id="problem">
+  <h2><span class="num">1</span>The problem portals solve</h2>
+  <p class="sub">Least privilege collides with "let me open that file".</p>
+
+  <p>A well-behaved Flatpak declares the narrowest filesystem access it can. Vitrine
+    declares exactly one static root:</p>
+
+  <pre><code>finish-args:
+  - --filesystem=xdg-pictures
+  # deliberately absent: --filesystem=home / host</code></pre>
+
+  <p>Which raises the obvious question: what happens when the user wants to open something
+    that <em>isn't</em> in <code>~/Pictures</code>? Widening the sandbox defeats the point,
+    and matters more than it looks — an app that later ships helper binaries (ImageMagick,
+    ffmpeg) would extend that grant to them too.</p>
+
+  <p>The portal's answer is a nice inversion. The app doesn't get permission to a
+    location; the <em>user's choice</em> creates a permission. You pick a folder in the
+    file chooser — which runs outside the sandbox, in a separate process the app cannot
+    influence — and the portal hands the app a path it can open. The app never gains
+    access to anything the user didn't point at.</p>
+
+  <p>That indirection is the whole design, and it's the source of every consequence below.</p>
+</section>
+
+<section class="wrap" id="anatomy">
+  <h2><span class="num">2</span>Anatomy of a document handle</h2>
+  <p class="sub">Not a path. A handle that is shaped like a path.</p>
+
+  <p>What the app receives looks like this:</p>
+
+  <pre><code>/run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg/Ashley Trevort/utHPx4N.jpg
+└─────┬──────┘ └┬┘ └──────────┬─────────┘ └──────┬─────┘ └────┬────┘
+  per-user      │        document id        granted dir     the file
+  runtime dir   │        (opaque)           basename
+                └── FUSE mount</code></pre>
+
+  <p>The mount is real and inspectable:</p>
+
+  <pre><code>$ mount | grep /run/user/1000/doc
+portal on /run/user/1000/doc type fuse.portal (rw,nosuid,nodev,relatime,user_id=1000,…)
+
+$ ls /run/user/1000/doc | wc -l
+759</code></pre>
+
+  <p>759 documents on this system. Two things about that directory are worth noticing.</p>
+
+  <p>First, the document ID is <strong>opaque and stable</strong>. It is not derived from
+    the path, and it does not change between sessions — the grants live in a database that
+    survives reboots (<code>~/.local/share/flatpak/db/documents</code>, 176&nbsp;KB here).
+    A common assumption is that these are ephemeral per-session handles. They aren't, and
+    an app that treats them as throwaway will churn its own state for no reason.</p>
+
+  <p>Second, there is a <code>by-app</code> subdirectory:</p>
+
+  <pre><code>$ ls /run/user/1000/doc/by-app/
+app.devsuite.Ptyxis  ca.desrt.dconf-editor  com.github.flxzt.rnote  com.spotify.Client  …
+
+$ ls /run/user/1000/doc/by-app/io.github.superuser_miguel.Vitrine/ | wc -l
+19</code></pre>
+
+  <p>The FUSE filesystem is <strong>permission-aware per process</strong>. An app sees the
+    documents it has been granted and not the rest — which is why the same path can be
+    valid inside one sandbox and meaningless in another, and why debugging this from a
+    host shell can mislead you.</p>
+</section>
+
+<section class="wrap" id="directory">
+  <h2><span class="num">3</span>Directory grants: 11 picks, 114,048 paths</h2>
+  <p class="sub">One user gesture, an entire subtree.</p>
+
+  <p>The portal grants whole directories, not just single files. When it does, the handle
+    contains the granted directory's <em>basename</em>, and the real tree hangs below it:</p>
+
+  <pre><code>host   /home/definitive_group/my-progs/Image_Viewer/docs
+handle /run/user/1000/doc/niZCXQRp70wAVxqNSSlm9A/docs/index.html
+                                                 └┬─┘
+                                        basename of the granted dir</code></pre>
+
+  <p>Which means a single "open folder" can mint an unbounded number of valid paths. In
+    the library that prompted all this, the entire portal-side index —
+    <strong>114,048 rows</strong> — came from just <strong>eleven</strong> directory
+    picks:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Document</th><th>Files indexed</th><th>Points at</th></tr></thead>
+    <tbody>
+      <tr><td><code>wz5DlG7x8Fj…</code></td><td>42,589</td><td><code>~/Inkscape_Projects</code></td></tr>
+      <tr><td><code>my1ebCCAFWt…</code></td><td>27,090</td><td><code>~/Inkscape_Projects/Jav_avif</code></td></tr>
+      <tr><td><code>ZmzOt26RunV…</code></td><td>8,743</td><td>EasyStore (USB)</td></tr>
+      <tr><td><code>hB0wsj5swla…</code></td><td>7,940</td><td>EasyStore (USB)</td></tr>
+      <tr><td colspan="3" style="text-align:center;color:var(--muted)">… 7 more …</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Note the first two rows: one grant nested inside another. The portal is perfectly
+    happy to issue overlapping handles, so the same file can be reachable through more
+    than one document ID <em>as well as</em> through a directly-granted root. Nothing
+    de-duplicates that for you.</p>
+</section>
+
+<section class="wrap" id="registry">
+  <h2><span class="num">4</span>The registry, and how to ask it things</h2>
+  <p class="sub">The portal will tell you what a handle means. Ask it.</p>
+
+  <p>The FUSE mount is only half of it; the other half is a D-Bus service that knows what
+    every handle points to. Introspecting it is the single most useful thing you can do
+    when portal paths are confusing you:</p>
+
+  <pre><code>$ gdbus introspect --session \
+    --dest org.freedesktop.portal.Documents \
+    --object-path /org/freedesktop/portal/documents</code></pre>
+
+  <p>Interface version 5 here, with more than the docs led me to expect:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Method</th><th>Answers</th></tr></thead>
+    <tbody>
+      <tr><td><code>Info(doc_id)</code></td><td>host path + which apps hold what permissions</td></tr>
+      <tr><td><code>Lookup(filename)</code></td><td>host path &rarr; doc id, the reverse direction</td></tr>
+      <tr><td><code>GetHostPaths(ids)</code></td><td>batch resolution of many handles at once</td></tr>
+      <tr><td><code>List(app_id)</code></td><td>every document and its real path</td></tr>
+      <tr><td><code>Add / AddNamed / AddFull</code></td><td>mint a handle from an fd</td></tr>
+      <tr><td><code>GrantPermissions / Revoke / Delete</code></td><td>manage grants</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>A single call answers "what is this thing really?":</p>
+
+  <pre><code>$ gdbus call --session --dest org.freedesktop.portal.Documents \
+    --object-path /org/freedesktop/portal/documents \
+    --method org.freedesktop.portal.Documents.Info "ZmzOt26RunVwVA8lnYBSqg"
+
+(b'/run/media/…/EasyStore/Pictures/Instagram/Ashley Trevort',
+ {'io.github.superuser_miguel.Vitrine': ['read', 'write', 'grant-permissions']})</code></pre>
+
+  <p>Two things fall out. Handles are <strong>bidirectionally resolvable</strong>, so an
+    app that wants a stable identity for a file is not stuck with the opaque form — it can
+    store the host path alongside it. And <code>GetHostPaths</code> makes that cheap in
+    bulk, which matters if you're resolving at index time rather than per file.</p>
+
+  <div class="lesson">
+    <b>The one command worth remembering</b>
+    <p><code>Documents.Info(doc_id)</code>. When an opaque handle misbehaves, the service
+      that issued it will tell you what it points at and who may touch it. In this
+      investigation that call overturned a diagnosis that had already been written up and
+      published — the guess was "the grant lapsed", the answer was "the grant is fine, the
+      drive is unplugged".</p>
+  </div>
+</section>
+
+<section class="wrap" id="states">
+  <h2><span class="num">5</span>Three states, not two</h2>
+  <p class="sub">Present, deleted &mdash; and offline.</p>
+
+  <p>The bug that started this: images in the library silently failed to render.</p>
+
+  <pre><code>thumbnail file:///run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg/Ashley Trevort/utHPx4N.jpg
+  Failed to load: No such file or directory</code></pre>
+
+  <p>"No such file or directory" reads like a deleted file. The portal directory exists,
+    is registered, and is empty:</p>
+
+  <pre><code>$ ls -la /run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg
+total 0
+dr-x------ 2 …  .
+dr-x------ 2 …  ..</code></pre>
+
+  <p>And <code>Info</code> explains why: the handle points into
+    <code>/run/media/…/EasyStore/</code>, an external USB drive, and
+    <code>/run/media/definitive_group/</code> is currently empty. The drive is unplugged.
+    The grant never lapsed — the permissions are still listed, and they will work again the
+    moment the drive is reconnected.</p>
+
+  <p>Across this library, <strong>44,340 of 114,048</strong> portal-indexed files —
+    <strong>39%</strong> — were sitting behind that one disconnected drive.</p>
+
+  <p>So a sandboxed app needs three states where most codebases have two:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>State</th><th>Cause</th><th>Right response</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Present</strong></td><td>resolves</td><td>use it</td></tr>
+      <tr><td><strong>Offline</strong></td><td>volume unmounted, grant intact</td><td>keep the record, show it as unavailable, retry on mount</td></tr>
+      <tr><td><strong>Gone</strong></td><td>file deleted or grant revoked</td><td>mark missing</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The distinction is not pedantry. An indexer that treats offline as gone will happily
+    mark 44,340 files missing because a USB drive was unplugged, and — depending on how
+    aggressive its reconciliation is — discard the tags and ratings attached to them. The
+    kernel gives you the same <code>ENOENT</code> for all three; only the portal and the
+    mount table can tell them apart.</p>
+
+  <div class="lesson warnbox">
+    <b>Watch for</b>
+    <p>Any "reconcile deleted files" pass that runs over portal paths. If it can't
+      distinguish an unmounted volume from a deleted file, an unplugged drive looks
+      exactly like a mass deletion — and reconciliation is usually written on the
+      assumption that the filesystem is telling the truth.</p>
+  </div>
+</section>
+
+<section class="wrap" id="catalog">
+  <h2><span class="num">6</span>Why this hurts catalog apps specifically</h2>
+  <p class="sub">A viewer opens a file. A catalog remembers it.</p>
+
+  <p>If your app opens a file, does something, and forgets it, none of this matters. The
+    portal hands you a path, the path works, you're done.</p>
+
+  <p>The trouble starts when you <em>persist</em> the path — and a catalog app persists
+    everything. Vitrine stores one row per file, keyed <code>UNIQUE</code> on path, with
+    tags and ratings hanging off a content hash. Storing handles as though they were
+    locations produced four unrelated-looking bugs:</p>
+
+  <ul>
+    <li><strong>Double-counting.</strong> The same image reached through both a granted
+      root and a portal handle is two rows. A tag on 7 images displayed as 15.</li>
+    <li><strong>False duplicates.</strong> "Find duplicates" groups by content hash;
+      portal/real pairs match perfectly. 41,729 clusters reported, 4,022 real —
+      <strong>90% noise</strong>.</li>
+    <li><strong>A dangerous button.</strong> That feature offered "trash the other copy".
+      On a portal/real pair, the other copy is the same bytes.</li>
+    <li><strong>Invisible files.</strong> The unplugged-drive case above.</li>
+  </ul>
+
+  <p>Each was reported separately, none looked related, and all four were the same
+    modelling error: <em>a handle is not an address.</em></p>
+
+  <p>The eventual shape of the fix separates the two questions the path column was trying
+    to answer at once:</p>
+
+  <ul>
+    <li><strong>How do I open this?</strong> &rarr; the portal handle. It is the only
+      thing that works, and for content outside the granted roots there is no
+      alternative.</li>
+    <li><strong>Is this the same file as that?</strong> &rarr; the resolved host path,
+      from <code>Info</code> / <code>GetHostPaths</code>, stored alongside.</li>
+  </ul>
+
+  <p>Content hashing gets you part way — it is why tags survived all of this unscathed —
+    but it answers a third question, "is this the same <em>content</em>", which is not the
+    same as "is this the same file". Two genuine copies of one image share a hash and
+    should stay two rows; one file seen through two routes shares a hash and should be
+    one. Only a resolved host path separates those cases.</p>
+</section>
+
+<section class="wrap" id="rules">
+  <h2><span class="num">7</span>Rules of thumb</h2>
+
+  <ol>
+    <li><strong>Treat a portal path as a handle, not a location.</strong> Fine to open,
+      fine to store as <em>how to open</em>. Not an identity, not something to show a user,
+      not something to compare.</li>
+    <li><strong>Resolve to the host path when you persist.</strong>
+      <code>Documents.Info</code> for one, <code>GetHostPaths</code> for many. Store both:
+      the handle to open with, the real path to reason with.</li>
+    <li><strong>Model "offline" explicitly.</strong> Unmounted volume ≠ deleted file, and
+      the syscall won't tell you which. Check the mount table before concluding
+      anything.</li>
+    <li><strong>Expect overlapping grants.</strong> Nested directory grants are normal;
+      one file can be reachable several ways. De-duplicate on something durable.</li>
+    <li><strong>Don't assume handles are ephemeral.</strong> They persist across reboots in
+      a real database. Churning them on every launch is wasted work.</li>
+    <li><strong>Debug from inside the sandbox.</strong> The FUSE view is permission-aware
+      per process; a host shell sees a different world than your app does.</li>
+    <li><strong>Ask the portal before theorising.</strong> One <code>Info</code> call beats
+      an afternoon of inference, and it will occasionally tell you your whole diagnosis was
+      wrong.</li>
+  </ol>
+
+  <div class="lesson">
+    <b>The short version</b>
+    <p>The document portal is an excellent piece of design that trades one guarantee for
+      another: you give up "paths mean places" and you get "the user's choice is the only
+      permission". Apps that hold files briefly never notice the trade. Apps that
+      <em>remember</em> files pay for it in every column where they wrote a handle down and
+      called it an address.</p>
+  </div>
+</section>
+
+<footer class="wrap">
+  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p><a href="debugging-vitrine.html">Six bugs in an image browser</a>
+     · <a href="https://github.com/superuser-miguel/vitrine">GitHub</a>
+     · <a href="./">Project page</a></p>
+</footer>
+
+</body>
+</html>

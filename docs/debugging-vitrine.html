@@ -311,6 +311,10 @@ FROM tags t ORDER BY t.name COLLATE NOCASE</code></pre>
     content reachable <em>only</em> through a portal keeps its row, because nothing else
     represents it.</p>
 
+  <p>The portal has more to say about all of this than fits here — how handles are
+    minted, why one folder pick produced 114,048 paths, and how to ask it what a handle
+    really points at. That's <a href="flatpak-document-portal.html">its own article</a>.</p>
+
   <p>That's a presentation-layer fix, and it's honest about its limits: it rescues files
     that have a durable path <em>somewhere</em>. Anything indexed solely through the portal
     is still one lapsed grant from being unreachable. The real fix — resolving handles to
