@@ -41,6 +41,10 @@ mod imp {
         pub orientation: Cell<i32>,
         /// Non-destructive crop rect, normalized display space; None = full.
         pub crop: Cell<Option<(f64, f64, f64, f64)>>,
+        /// EXIF capture time (unix seconds) for the "Date Taken" sort, stamped
+        /// from the index. `None` until background enrichment has decoded the
+        /// file — the sort has to cope with that, not assume it.
+        pub date_taken: Cell<Option<i64>>,
         /// True if decoding failed — the cell shows a broken-image placeholder.
         pub failed: Cell<bool>,
     }
@@ -164,6 +168,15 @@ impl ImageObject {
     }
 
     /// Non-destructive crop instruction (display-space normalized), if any.
+    /// EXIF capture time, or `None` if not yet enriched.
+    pub fn date_taken(&self) -> Option<i64> {
+        self.imp().date_taken.get()
+    }
+
+    pub fn set_date_taken(&self, date_taken: Option<i64>) {
+        self.imp().date_taken.set(date_taken);
+    }
+
     pub fn crop(&self) -> Option<(f64, f64, f64, f64)> {
         self.imp().crop.get()
     }

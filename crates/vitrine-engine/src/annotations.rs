@@ -144,14 +144,23 @@ impl Db {
     pub fn ratings_under(
         &self,
         folder: &str,
-    ) -> rusqlite::Result<Vec<(String, String, i64, i64, Option<(f64, f64, f64, f64)>)>> {
+    ) -> rusqlite::Result<
+        Vec<(
+            String,
+            String,
+            i64,
+            i64,
+            Option<(f64, f64, f64, f64)>,
+            Option<i64>,
+        )>,
+    > {
         // Runs on the main thread at every folder open — the path range (vs a
         // LIKE prefix) is what lets it use the path index instead of scanning
         // the whole files table (see `subtree_range`).
         let (lo, hi) = crate::query::subtree_range(folder);
         let mut stmt = self.conn().prepare(
             "SELECT f.path, f.content_hash, COALESCE(r.rating, 0), COALESCE(o.orientation, 1),
-                    c.x, c.y, c.w, c.h
+                    c.x, c.y, c.w, c.h, f.date_taken
              FROM files f
              LEFT JOIN ratings r ON r.content_hash = f.content_hash
              LEFT JOIN orientations o ON o.content_hash = f.content_hash
@@ -163,7 +172,7 @@ impl Db {
                 (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
                 _ => None,
             };
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, crop))
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, crop, r.get(8)?))
         })?;
         rows.collect()
     }
@@ -225,10 +234,32 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                ("/p/a.jpg".to_string(), "ha".to_string(), 4, 1, None),
-                ("/p/b.jpg".to_string(), "hb".to_string(), 0, 1, None),
+                ("/p/a.jpg".to_string(), "ha".to_string(), 4, 1, None, None),
+                ("/p/b.jpg".to_string(), "hb".to_string(), 0, 1, None, None),
             ]
         );
+    }
+
+    #[test]
+    fn ratings_under_carries_date_taken() {
+        // The Date Taken sort reads this. It is NULL until background enrichment
+        // decodes the file, which is exactly why the sort has to handle None.
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO files(path,content_hash,size,mtime,indexed_at,missing,date_taken)
+                 VALUES ('/p/a.jpg','ha',1,1,1,0,1700000000),
+                        ('/p/b.jpg','hb',1,1,1,0,NULL);",
+            )
+            .unwrap();
+        let mut rows = db.ratings_under("/p").unwrap();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            rows[0].5,
+            Some(1700000000),
+            "enriched file carries its date"
+        );
+        assert_eq!(rows[1].5, None, "un-enriched file has no date yet");
     }
 
     #[test]

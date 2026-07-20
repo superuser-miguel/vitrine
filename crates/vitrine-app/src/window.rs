@@ -31,6 +31,7 @@ pub enum SortField {
     Modified,
     Type,
     Rating,
+    DateTaken,
 }
 
 impl SortField {
@@ -41,6 +42,7 @@ impl SortField {
             "modified" => SortField::Modified,
             "type" => SortField::Type,
             "rating" => SortField::Rating,
+            "date-taken" => SortField::DateTaken,
             _ => SortField::Name,
         }
     }
@@ -52,6 +54,7 @@ impl SortField {
             SortField::Modified => "modified",
             SortField::Type => "type",
             SortField::Rating => "rating",
+            SortField::DateTaken => "date-taken",
         }
     }
 }
@@ -2193,7 +2196,7 @@ impl VitrineWindow {
         trash.connect_clicked(glib::clone!(
             #[weak(rename_to = window)]
             self,
-            move |_| window.trash_duplicate_others(&others)
+            move |_| window.confirm_trash_duplicates(&others)
         ));
         card.append(&trash);
         card.upcast()
@@ -2227,6 +2230,55 @@ impl VitrineWindow {
 
     /// Trash the non-keeper copies of a cluster, drop them from the index, and
     /// refresh the page.
+    /// Confirm before trashing duplicate copies.
+    ///
+    /// This was a single click with no confirmation and no undo prompt, on a list
+    /// produced by heuristics — near-duplicate mode groups by perceptual hash, so
+    /// "duplicate" there is a judgement, not a fact. The dialog names the count
+    /// and lists the paths, because *which* copies are going is the part worth
+    /// checking.
+    fn confirm_trash_duplicates(&self, paths: &[String]) {
+        if paths.is_empty() {
+            return;
+        }
+        let body = {
+            let mut lines: Vec<String> = paths.iter().take(10).cloned().collect();
+            if paths.len() > 10 {
+                lines.push(format!("… and {} more", paths.len() - 10));
+            }
+            lines.join("\n")
+        };
+        let dialog = adw::AlertDialog::new(
+            Some(&match paths.len() {
+                1 => gettextrs::gettext("Move 1 copy to Trash?"),
+                n => format!("Move {n} copies to Trash?"),
+            }),
+            Some(&body),
+        );
+        dialog.add_responses(&[
+            ("cancel", &gettextrs::gettext("Cancel")),
+            ("trash", &gettextrs::gettext("Move to Trash")),
+        ]);
+        dialog.set_response_appearance("trash", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let paths = paths.to_vec();
+        dialog.connect_response(
+            None,
+            glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                move |_, response| {
+                    if response == "trash" {
+                        window.trash_duplicate_others(&paths);
+                    }
+                }
+            ),
+        );
+        dialog.present(Some(self));
+    }
+
     fn trash_duplicate_others(&self, paths: &[String]) {
         for path in paths {
             gio::File::for_path(path).trash_async(
@@ -2605,25 +2657,42 @@ impl VitrineWindow {
         self.ensure_read_db();
         let db = self.imp().read_db.borrow();
         let Some(db) = db.as_ref() else { return };
-        type Stamp = (String, i64, i64, Option<(f64, f64, f64, f64)>);
+        type Stamp = (String, i64, i64, Option<(f64, f64, f64, f64)>, Option<i64>);
         let map: std::collections::HashMap<String, Stamp> = db
             .ratings_under(&folder.to_string_lossy())
             .unwrap_or_default()
             .into_iter()
-            .map(|(path, hash, rating, orientation, crop)| {
-                (path, (hash, rating, orientation, crop))
+            .map(|(path, hash, rating, orientation, crop, date_taken)| {
+                (path, (hash, rating, orientation, crop, date_taken))
             })
             .collect();
         for item in items {
             if let Some(path) = item.file().path() {
-                if let Some((hash, rating, orientation, crop)) =
+                if let Some((hash, rating, orientation, crop, date_taken)) =
                     map.get(&path.to_string_lossy().into_owned())
                 {
                     item.set_content_hash(hash);
                     item.set_rating(*rating as i32);
                     item.set_orientation(*orientation as i32);
                     item.set_crop(*crop);
+                    item.set_date_taken(*date_taken);
                 }
+            }
+        }
+    }
+
+    /// Re-stamp once background enrichment has drained.
+    ///
+    /// `date_taken` is written by enrichment, not by the identity scan, so a
+    /// Date Taken sort set up beforehand was ordering on values that did not
+    /// exist yet. Re-stamping fills them in and re-runs the sort; for any other
+    /// sort field this is a cheap no-op refresh.
+    fn restamp_after_enrichment(&self) {
+        self.restamp_store();
+        let imp = self.imp();
+        if imp.sort_state.get().field == SortField::DateTaken {
+            if let Some(sorter) = imp.sorter.borrow().as_ref() {
+                sorter.changed(gtk::SorterChange::Different);
             }
         }
     }
@@ -3116,8 +3185,14 @@ impl VitrineWindow {
     fn setup_indexer(&self) {
         let indexer = Indexer::spawn(crate::index::index_db_path());
         let progress = indexer.progress.clone();
-        // Drain any files left un-enriched by a previous session.
-        indexer.start_enrichment(|| {});
+        // Drain any files left un-enriched by a previous session, then re-stamp:
+        // date_taken only exists after enrichment, so a Date Taken sort started
+        // before this finishes is sorting on absent data.
+        indexer.start_enrichment(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move || window.restamp_after_enrichment()
+        ));
         // Index the persistent library roots in the background at launch, so the
         // index covers them even before (or without) browsing.
         for root in crate::settings::Settings::load().roots() {
@@ -3160,7 +3235,11 @@ impl VitrineWindow {
                 // can key writes). Then backfill dimensions/EXIF/pHash.
                 self.restamp_store();
                 if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
-                    indexer.start_enrichment(|| {});
+                    indexer.start_enrichment(glib::clone!(
+                        #[weak(rename_to = window)]
+                        self,
+                        move || window.restamp_after_enrichment()
+                    ));
                 }
             }
             IndexProgress::CollectionsChanged { gained } => {
@@ -3746,6 +3825,16 @@ fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Or
         // Highest first on the *ascending* setting: "sort by rating" means the
         // best work at the top, which is the opposite of ascending by number.
         SortField::Rating => b.rating().cmp(&a.rating()),
+        // Newest first on "ascending", like Rating — and un-enriched files sort
+        // last rather than clumping at the top as a block of equal nulls, so a
+        // partially-enriched library degrades into "dated ones first, rest
+        // after" instead of looking randomly ordered.
+        SortField::DateTaken => match (a.date_taken(), b.date_taken()) {
+            (Some(x), Some(y)) => y.cmp(&x),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        },
     };
     let ord = primary.then_with(by_name);
     let ord = if state.descending { ord.reverse() } else { ord };
