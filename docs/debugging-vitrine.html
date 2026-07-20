@@ -267,11 +267,33 @@ FROM tags t ORDER BY t.name COLLATE NOCASE</code></pre>
     keeper points at.</p>
 
   <h3>Images silently failed to load</h3>
-  <p>The last symptom is the one that makes the model concrete. Grants lapse. When one
-    does, the handle stops resolving while the file itself is perfectly fine:</p>
+  <p>The last symptom is the one that makes the model concrete. Some images simply
+    failed to render:</p>
 
   <pre><code>thumbnail file:///run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg/Ashley Trevort/utHPx4N.jpg
   Failed to load: No such file or directory</code></pre>
+
+  <p>The first explanation offered here was that the grant had lapsed. It hadn't — and
+    the correction is more interesting than the guess. Asking the portal what that handle
+    actually points to:</p>
+
+  <pre><code>$ gdbus call --session --dest org.freedesktop.portal.Documents \
+    --object-path /org/freedesktop/portal/documents \
+    --method org.freedesktop.portal.Documents.Info "ZmzOt26RunVwVA8lnYBSqg"
+
+(b'/run/media/definitive_group/873d7a68-…/EasyStore/Pictures/Instagram/Ashley Trevort',
+ {'io.github.superuser_miguel.Vitrine': ['read', 'write', 'grant-permissions']})</code></pre>
+
+  <p>The grant is intact — the permissions are right there. The handle points at an
+    <strong>external USB drive that is currently unplugged</strong>. The portal directory
+    still exists and is registered; it is simply empty, because the volume behind it is
+    gone. Across this library, <strong>44,340 indexed files</strong> sit behind eleven
+    handles pointing at that one drive.</p>
+
+  <p>Which makes "missing" the wrong word for what the app was showing. A file on a
+    disconnected drive is <em>offline</em> — a third state, distinct from both present and
+    deleted, and the only one of the three that resolves itself when you plug the drive
+    back in.</p>
 
   <p>The project owner put it better than the analysis had:</p>
   <blockquote><p>Portal paths should not be treated as a path where files live.
@@ -301,6 +323,10 @@ FROM tags t ORDER BY t.name COLLATE NOCASE</code></pre>
       failure. When several symptoms resist a common explanation, the shared cause is
       often a level below all of them. And the sandbox you chose is part of your data
       model whether you modelled it or not.</p>
+    <p style="margin-top:10px">A corollary learned the hard way here: an opaque handle
+      can fail for reasons that have nothing to do with the handle. Before theorising
+      about why an indirection broke, ask the thing that issued it — the portal has an
+      <code>Info</code> call that answers in one command, and it contradicted the guess.</p>
   </div>
 </section>
 
