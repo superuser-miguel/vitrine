@@ -94,7 +94,7 @@ The channel is **unbounded**, so `try_send` can only fail when the receiver is
 dropped — i.e. the worker thread is gone. That makes these discarded `Result`s an
 exact, zero-cost liveness detector, currently thrown away.
 
-### V-17 · Rubber-band selection steals the press from item drags · `CONFIRMED` · **FIX UNTESTED**
+### V-17 · Rubber-band selection steals the press from item drags · `CONFIRMED` · **FIXED — verified in use** (drag starts 2 → 18)
 
 `window.rs:438` sets `set_enable_rubberband(true)`. The cell's `DragSource` was on
 the default bubble phase, so the two gestures raced for the press and rubber-band
@@ -336,7 +336,7 @@ drops for bookmarking.
 Not a bug — unimplemented. Needs: accept `FileList`, resolve path → `content_hash`
 via the read DB (**no such query exists yet**), then `add_to_catalog`.
 
-### V-09 · No remove-tag flow · `CONFIRMED` · **FIXED (untested)**
+### V-09 · No remove-tag flow · `CONFIRMED` · **FIXED — verified in use** (`VDBG-TAG op=remove name="crystal"`)
 
 > **2026-07-20.** Landed as a **Tags group in the viewer's properties card**
 > rather than a modifier-click in the grid popover, which draws a cleaner split:
@@ -401,7 +401,7 @@ thumbnails in the sidebar.
 
 ## Tier 4 — Open questions.
 
-### V-15 · `Adwaita-CRITICAL: Page 'Viewer' is not in the navigation stack` · `CONFIRMED` · **FIXED (untested)**
+### V-15 · `Adwaita-CRITICAL: Page 'Viewer' is not in the navigation stack` · `CONFIRMED` · **FIXED — verified in use** (0 CRITICAL across 4 runs)
 
 > **Root cause found 2026-07-20.** `window.rs:2727` branched on
 > `nav_view.find_page("viewer")`, but `find_page()` also resolves pages the view
