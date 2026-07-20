@@ -134,14 +134,24 @@ impl Query {
             sql.push_str(" AND orientation = ?");
             params.push(Value::Integer(orientation));
         }
-        // Tags — names bound as parameters (never interpolated). `tags_all`
-        // counts distinct matches against the requested count; `tags_any` is an
-        // EXISTS. Matching uses the tags.name NOCASE collation (case-insensitive).
+        // Tags — names bound as parameters (never interpolated). Matching uses the
+        // tags.name NOCASE collation (case-insensitive).
+        //
+        // Both predicates are written as `content_hash IN (…)` rather than a
+        // correlated subquery on `files`. A correlated form makes the tag the
+        // *inner* term, so SQLite scans every row of `files` and probes per row —
+        // a full-library scan to answer a question about a handful of tagged
+        // files. Driving from `file_tags` instead lets the planner start from the
+        // few matching rows and hit `idx_files_hash`, which on a 193k-file index
+        // is the difference between ~100ms and under a millisecond.
         if !self.tags_all.is_empty() {
             let names = dedup_ci(&self.tags_all);
             sql.push_str(&format!(
-                " AND (SELECT count(*) FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-                       WHERE ft.content_hash = files.content_hash AND t.name IN ({})) = ?",
+                " AND content_hash IN (SELECT ft.content_hash FROM file_tags ft
+                                       JOIN tags t ON t.id = ft.tag_id
+                                       WHERE t.name IN ({})
+                                       GROUP BY ft.content_hash
+                                       HAVING count(DISTINCT t.name) = ?)",
                 placeholders(names.len())
             ));
             params.extend(names.iter().map(|n| Value::Text(n.clone())));
@@ -149,8 +159,9 @@ impl Query {
         }
         if !self.tags_any.is_empty() {
             sql.push_str(&format!(
-                " AND EXISTS (SELECT 1 FROM file_tags ft JOIN tags t ON t.id = ft.tag_id
-                              WHERE ft.content_hash = files.content_hash AND t.name IN ({}))",
+                " AND content_hash IN (SELECT ft.content_hash FROM file_tags ft
+                                       JOIN tags t ON t.id = ft.tag_id
+                                       WHERE t.name IN ({}))",
                 placeholders(self.tags_any.len())
             ));
             params.extend(self.tags_any.iter().map(|n| Value::Text(n.clone())));
@@ -465,5 +476,39 @@ mod tests {
         assert_eq!(q.rating_min, Some(4));
         assert_eq!(q.sort, SortKey::Name); // defaulted
         assert!(q.tags_any.is_empty());
+    }
+
+    #[test]
+    fn tag_filters_do_not_scan_the_whole_library() {
+        // A correlated subquery here makes `files` the outer loop, so filtering
+        // by tag scans every row in the library to answer a question about a
+        // handful of tagged files — ~100ms on a 193k-file index, on the UI
+        // thread. Assert the planner drives from the tag side instead.
+        let db = Db::open_in_memory().unwrap();
+        for q in [
+            Query {
+                tags_any: vec!["trip".into()],
+                ..Default::default()
+            },
+            Query {
+                tags_all: vec!["trip".into()],
+                ..Default::default()
+            },
+        ] {
+            let (sql, params) = q.build();
+            let conn = db.conn();
+            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+            let plan: Vec<String> = stmt
+                .query_map(rusqlite::params_from_iter(params), |r| {
+                    r.get::<_, String>(3)
+                })
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert!(
+                !plan.iter().any(|s| s.starts_with("SCAN files")),
+                "tag filter must not scan the library, got: {plan:#?}"
+            );
+        }
     }
 }
