@@ -1395,6 +1395,51 @@ impl VitrineWindow {
         ));
         imp.places_scroller.add_controller(drop);
 
+        // Drop onto the viewport itself, not just the sidebar row.
+        //
+        // A collection row is a ~30px strip; the grid is the whole content area
+        // and is where the gesture naturally aims — you drag images *into the
+        // collection you are looking at*. Dropping a folder while no catalog is
+        // open opens it, which also gives the empty "No Folder Open" state
+        // something to accept.
+        let content_drop = gtk::DropTarget::new(glib::Type::INVALID, gtk::gdk::DragAction::COPY);
+        content_drop.set_types(&[gtk::gdk::FileList::static_type()]);
+        content_drop.connect_drop(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            false,
+            move |_, value, _, _| {
+                let Ok(list) = value.get::<gtk::gdk::FileList>() else {
+                    crate::debug::drop_event("viewport", "unhandled", 0);
+                    return false;
+                };
+                let files = list.files();
+
+                // Looking at a catalog → the drop means "add these to it".
+                if let Some(id) = window.current_catalog_id() {
+                    crate::debug::drop_event("viewport", "files", files.len());
+                    window.add_dropped_files_to_catalog(id, files);
+                    return true;
+                }
+
+                // Otherwise a dropped folder is a request to browse it.
+                if let Some(dir) = files
+                    .iter()
+                    .find(|f| f.path().map(|p| p.is_dir()).unwrap_or(false))
+                {
+                    crate::debug::drop_event("viewport", "folder", 1);
+                    window.open_location(dir.clone());
+                    return true;
+                }
+
+                crate::debug::drop_event("viewport", "no-target", files.len());
+                window.toast("Open a catalog to drop images into it");
+                false
+            }
+        ));
+        imp.content_stack.add_controller(content_drop);
+
         // Reorder bookmarks: a list-level drop target lands the dragged bookmark
         // wherever you drop it (the row under the cursor, or the end).
         let reorder = gtk::DropTarget::new(i32::static_type(), gtk::gdk::DragAction::MOVE);
