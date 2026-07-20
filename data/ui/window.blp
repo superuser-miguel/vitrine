@@ -57,6 +57,12 @@ menu sort_menu {
       action: "win.sort-field";
       target: "type";
     }
+
+    item {
+      label: _("_Rating");
+      action: "win.sort-field";
+      target: "rating";
+    }
   }
 
   section {
@@ -238,6 +244,13 @@ template $VitrineWindow: Adw.ApplicationWindow {
                   tooltip-text: _("Forward");
                   sensitive: false;
                 }
+              }
+
+              [start]
+              Gtk.Button home_button {
+                icon-name: "go-home-symbolic";
+                tooltip-text: _("Close Folder");
+                sensitive: false;
               }
 
               [start]

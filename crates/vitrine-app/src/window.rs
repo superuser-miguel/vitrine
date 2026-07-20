@@ -30,6 +30,7 @@ pub enum SortField {
     Size,
     Modified,
     Type,
+    Rating,
 }
 
 impl SortField {
@@ -39,6 +40,7 @@ impl SortField {
             "size" => SortField::Size,
             "modified" => SortField::Modified,
             "type" => SortField::Type,
+            "rating" => SortField::Rating,
             _ => SortField::Name,
         }
     }
@@ -49,6 +51,7 @@ impl SortField {
             SortField::Size => "size",
             SortField::Modified => "modified",
             SortField::Type => "type",
+            SortField::Rating => "rating",
         }
     }
 }
@@ -163,6 +166,8 @@ mod imp {
         pub back_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub forward_button: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub home_button: TemplateChild<gtk::Button>,
         /// Collection ids parallel to `collections_list` rows (by index).
         pub collection_ids: RefCell<Vec<i64>>,
         /// Bookmarks parallel to `bookmarks_list` rows (by index) — the UI's
@@ -277,6 +282,7 @@ mod imp {
                 folder_tree: Default::default(),
                 back_button: Default::default(),
                 forward_button: Default::default(),
+                home_button: Default::default(),
                 collection_ids: RefCell::new(Vec::new()),
                 bookmarks: RefCell::new(Vec::new()),
                 history: RefCell::new(Vec::new()),
@@ -1337,6 +1343,12 @@ impl VitrineWindow {
             move |_| window.go_forward()
         ));
 
+        imp.home_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| window.clear_viewport()
+        ));
+
         // Bookmarks: click to open.
         imp.bookmarks_list.connect_row_activated(glib::clone!(
             #[weak(rename_to = window)]
@@ -1512,6 +1524,29 @@ impl VitrineWindow {
             .set_sensitive(!imp.history.borrow().is_empty());
         imp.forward_button
             .set_sensitive(!imp.forward.borrow().is_empty());
+        imp.home_button
+            .set_sensitive(imp.current_location.borrow().is_some());
+    }
+
+    /// Close whatever is open and return to the launch state.
+    ///
+    /// There was no way back to "No Folder Open" short of restarting: every
+    /// gesture in the app moves *between* locations. Clears history too — it
+    /// describes a session that is over, and leaving Back armed to re-enter a
+    /// folder you just closed reads as the close not having worked.
+    fn clear_viewport(&self) {
+        let imp = self.imp();
+        if self.nav_stack_contains("viewer") {
+            imp.nav_view.pop_to_tag("browser");
+        }
+        imp.store.remove_all();
+        imp.content_stack.set_visible_child_name("empty");
+        imp.current_location.borrow_mut().take();
+        imp.current_folder.borrow_mut().take();
+        imp.history.borrow_mut().clear();
+        imp.forward.borrow_mut().clear();
+        self.clear_selection();
+        self.update_nav_sensitivity();
     }
 
     /// Bookmark the folder currently shown.
@@ -3663,6 +3698,9 @@ fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Or
             .content_type()
             .to_lowercase()
             .cmp(&b.content_type().to_lowercase()),
+        // Highest first on the *ascending* setting: "sort by rating" means the
+        // best work at the top, which is the opposite of ascending by number.
+        SortField::Rating => b.rating().cmp(&a.rating()),
     };
     let ord = primary.then_with(by_name);
     let ord = if state.descending { ord.reverse() } else { ord };

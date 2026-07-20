@@ -364,11 +364,31 @@ fix speculatively — re-test once V-03 instrumentation lands.
 Only rating + single-tag filter today. Wants filename / path / tag / comment / EXIF.
 Engine has a `Query` struct to extend. FTS5 if it needs to scale.
 
-### V-12 · Sort lacks Date Taken and Rating · `OBSERVED`
+### V-12 · Sort lacks Date Taken and Rating · `OBSERVED` · **Rating FIXED; Date Taken deferred**
+
+> **2026-07-20.** Rating sort added — `rating()` was already on `ImageObject` and
+> already stamped at folder-open, so it cost one match arm and one menu entry.
+> Note it sorts **highest-first on the Ascending setting**: "sort by rating" means
+> the best work at the top, and nobody wants unrated images first.
+>
+> **Date Taken deliberately not done.** It looks like a peer of Rating but isn't:
+> `date_taken` is populated by background *enrichment*, so on a large library the
+> column is mostly NULL until enrichment catches up and the sort would silently
+> produce near-random order. The groundwork was anticipated —
+> `Indexer::start_enrichment(on_done)` is documented as "used to refresh a
+> metadata sort once the columns it reads are populated" — and both call sites
+> currently pass `|| {}`. Doing it properly means stamping `date_taken` onto
+> `ImageObject`, extending `ratings_under`, and wiring that callback to re-sort.
 
 `date_taken` is already indexed (`idx_files_date`), so Date Taken is close to free.
 
-### V-13 · No Clear / Home button · `OBSERVED`
+### V-13 · No Clear / Home button · `OBSERVED` · **FIXED (untested)**
+
+> **2026-07-20.** `home_button` (`go-home-symbolic`) beside Back/Forward,
+> insensitive until something is open. There was no route back to "No Folder
+> Open" short of restarting — every gesture in the app moves *between* locations.
+> `clear_viewport()` also clears history: leaving Back armed to re-enter the
+> folder you just closed makes the close read as not having worked.
 
 No way back to the initial "No Folder Open" state without restarting.
 
