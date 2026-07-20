@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use crate::db::Db;
-use crate::files::FileRecord;
+use crate::files::{prefer_durable_paths, FileRecord};
 use crate::hash::phash_distance;
 use crate::query::Query;
 
@@ -170,61 +170,11 @@ impl BkNode {
     }
 }
 
-/// Whether `path` is an XDG document-portal path (`/run/user/<uid>/doc/<id>/…`).
-///
-/// The portal exposes a host file under an opaque per-document path. A folder
-/// opened through the file chooser is therefore indexed under that path, while
-/// the *same* file reached through a directly-granted root keeps its real one —
-/// so the index holds two rows with one set of bytes behind them.
-pub fn is_portal_document_path(path: &str) -> bool {
-    let rest = match path.strip_prefix("/run/user/") {
-        Some(rest) => rest,
-        None => return false,
-    };
-    // /run/user/<uid>/doc/...
-    match rest.split_once('/') {
-        Some((uid, tail)) => uid.chars().all(|c| c.is_ascii_digit()) && tail.starts_with("doc/"),
-        None => false,
-    }
-}
-
-/// Drop the portal/real pairings of one file from a cluster.
-///
-/// A group holding both a document-portal path and a non-portal path for the
-/// same content is one file seen through two routes, not two copies. Reporting
-/// it as a duplicate is wrong under any definition of "duplicate", and acting on
-/// it is worse: trashing the "other copy" targets the same bytes the keeper
-/// points at.
-///
-/// Only the portal rows are dropped, and only when a non-portal row with the
-/// **same content hash** is present to stand for the file. Two guards matter
-/// here: a near-duplicate cluster mixes differing hashes, so collapsing across
-/// the whole cluster could discard a genuinely distinct image that happens to be
-/// portal-indexed; and a file reachable *only* through a portal path keeps its
-/// row, since nothing else represents it.
-fn collapse_portal_aliases(files: Vec<FileRecord>) -> Vec<FileRecord> {
-    let mut by_hash: HashMap<String, Vec<FileRecord>> = HashMap::new();
-    for file in files {
-        by_hash
-            .entry(file.content_hash.clone())
-            .or_default()
-            .push(file);
-    }
-    let mut kept = Vec::new();
-    for (_, mut group) in by_hash {
-        if group.iter().any(|f| !is_portal_document_path(&f.path)) {
-            group.retain(|f| !is_portal_document_path(&f.path));
-        }
-        kept.append(&mut group);
-    }
-    kept
-}
-
 /// Turn groups into clusters: collapse portal aliases, drop singletons, sort each
 /// group largest-first and the clusters by descending size (biggest waste first).
 fn into_clusters(groups: impl Iterator<Item = Vec<FileRecord>>) -> Vec<DuplicateCluster> {
     let mut clusters: Vec<DuplicateCluster> = groups
-        .map(collapse_portal_aliases)
+        .map(prefer_durable_paths)
         .filter(|files| files.len() > 1)
         .map(|mut files| {
             files.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path)));
@@ -385,16 +335,6 @@ mod tests {
         assert_eq!(tree.within(0b0000, 0), vec![0b0000]);
         // The far value is reachable at a large enough radius.
         assert!(tree.within(0b0000, 8).contains(&0b1111_1111));
-    }
-
-    #[test]
-    fn portal_path_detection() {
-        assert!(is_portal_document_path("/run/user/1000/doc/abc/a.jpg"));
-        assert!(!is_portal_document_path("/home/u/Pictures/a.jpg"));
-        // Near misses that must not be treated as portal paths.
-        assert!(!is_portal_document_path("/run/user/1000/other/a.jpg"));
-        assert!(!is_portal_document_path("/run/user/notauid/doc/a.jpg"));
-        assert!(!is_portal_document_path("/run/user/"));
     }
 
     #[test]

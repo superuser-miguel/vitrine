@@ -6,6 +6,54 @@ use rusqlite::{OptionalExtension, Row};
 
 use crate::db::Db;
 
+/// Whether `path` is an XDG document-portal path (`/run/user/<uid>/doc/<id>/…`).
+///
+/// These are **handles, not locations**. The portal exposes a host file under an
+/// opaque per-document path that stops resolving once the grant lapses — so a row
+/// keyed to one can point at nothing while the real file is untouched. A folder
+/// opened through the file chooser is indexed under such a path; the same file
+/// reached through a directly-granted root keeps its real one.
+pub fn is_portal_document_path(path: &str) -> bool {
+    let rest = match path.strip_prefix("/run/user/") {
+        Some(rest) => rest,
+        None => return false,
+    };
+    match rest.split_once('/') {
+        Some((uid, tail)) => uid.chars().all(|c| c.is_ascii_digit()) && tail.starts_with("doc/"),
+        None => false,
+    }
+}
+
+/// Prefer the durable path wherever the same content is indexed more than once.
+///
+/// Drops document-portal rows when a non-portal row for the **same content hash**
+/// exists to stand for the file. Two things fall out of this: a stale portal
+/// handle no longer renders as a broken cell when the real file is right there,
+/// and duplicate detection stops reporting one file against itself.
+///
+/// Grouping by hash matters — a near-duplicate cluster mixes differing hashes, so
+/// dropping portal rows across a whole group could discard a genuinely distinct
+/// image. Content reachable *only* through a portal path keeps its row, since
+/// nothing else represents it.
+pub fn prefer_durable_paths(files: Vec<FileRecord>) -> Vec<FileRecord> {
+    let mut by_hash: std::collections::HashMap<String, Vec<FileRecord>> =
+        std::collections::HashMap::new();
+    for file in files {
+        by_hash
+            .entry(file.content_hash.clone())
+            .or_default()
+            .push(file);
+    }
+    let mut kept = Vec::new();
+    for (_, mut group) in by_hash {
+        if group.iter().any(|f| !is_portal_document_path(&f.path)) {
+            group.retain(|f| !is_portal_document_path(&f.path));
+        }
+        kept.append(&mut group);
+    }
+    kept
+}
+
 /// A row of the `files` table. `id` is `None` before insertion.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FileRecord {
@@ -319,5 +367,47 @@ mod tests {
         assert!(!moved.missing);
         assert_eq!(moved.mtime, 55);
         assert_eq!(db.file_count().unwrap(), 1);
+    }
+    #[test]
+    fn portal_path_detection() {
+        assert!(is_portal_document_path("/run/user/1000/doc/abc/a.jpg"));
+        assert!(!is_portal_document_path("/home/u/Pictures/a.jpg"));
+        // Near misses that must not be treated as portal paths.
+        assert!(!is_portal_document_path("/run/user/1000/other/a.jpg"));
+        assert!(!is_portal_document_path("/run/user/notauid/doc/a.jpg"));
+        assert!(!is_portal_document_path("/run/user/"));
+    }
+
+    #[test]
+    fn durable_paths_win_over_portal_handles() {
+        // The portal row points at a handle that stops resolving when the grant
+        // lapses; the real row points at the file. Same bytes, so keep the real.
+        let files = vec![
+            FileRecord {
+                path: "/run/user/1000/doc/xyz/a.jpg".into(),
+                content_hash: "h1".into(),
+                ..Default::default()
+            },
+            FileRecord {
+                path: "/home/u/Pictures/a.jpg".into(),
+                content_hash: "h1".into(),
+                ..Default::default()
+            },
+            // Only reachable through the portal — nothing else stands for it.
+            FileRecord {
+                path: "/run/user/1000/doc/xyz/b.jpg".into(),
+                content_hash: "h2".into(),
+                ..Default::default()
+            },
+        ];
+        let mut kept: Vec<String> = prefer_durable_paths(files)
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        kept.sort();
+        assert_eq!(
+            kept,
+            ["/home/u/Pictures/a.jpg", "/run/user/1000/doc/xyz/b.jpg"]
+        );
     }
 }

@@ -81,6 +81,8 @@ impl Default for SortState {
 pub enum Location {
     Folder(PathBuf),
     Collection(i64),
+    /// Every image carrying one tag, library-wide — not a place on disk.
+    Tag(String),
 }
 
 /// The browser filter bar's live state, read by the grid's `CustomFilter`.
@@ -1253,9 +1255,81 @@ impl VitrineWindow {
         {
             let mut state = imp.filter_state.borrow_mut();
             state.tag_hashes = hashes;
-            state.tag_name = name;
+            state.tag_name = name.clone();
+        }
+
+        // The filter narrows what is already loaded. With nothing open there is
+        // nothing to narrow, and picking a tag used to leave the empty state
+        // sitting there — so in that case fetch the tag library-wide instead.
+        // Once a tag browse *is* the open location, changing the tag re-fetches.
+        let browsing_a_tag = matches!(
+            *imp.current_location.borrow(),
+            Some(Location::Tag(_)) | None
+        );
+        if browsing_a_tag {
+            match name {
+                Some(name) => self.open_tag(&name),
+                // "All tags" → nothing to show. Empty the grid but keep history:
+                // this is a filter change, not closing a folder, so Back should
+                // still return to wherever you came from.
+                None => {
+                    imp.store.remove_all();
+                    imp.content_stack.set_visible_child_name("empty");
+                    imp.current_location.borrow_mut().take();
+                    self.update_nav_sensitivity();
+                }
+            }
+            return;
         }
         self.refilter();
+    }
+
+    /// Load every image carrying `name` into the grid — a library-wide tag browse.
+    ///
+    /// This is the fetch half of the tag filter: the filter bar can only narrow a
+    /// loaded folder, so from the launch state a tag had nothing to act on.
+    fn open_tag(&self, name: &str) {
+        self.ensure_read_db();
+        let items: Vec<ImageObject> = {
+            let db = self.imp().read_db.borrow();
+            let Some(db) = db.as_ref() else { return };
+            let query = vitrine_engine::Query {
+                tags_any: vec![name.to_string()],
+                ..Default::default()
+            };
+            // A stale document-portal handle renders as a broken cell while the
+            // real file sits right there — prefer the durable path.
+            let rows = vitrine_engine::prefer_durable_paths(db.query(&query).unwrap_or_default());
+            rows.into_iter()
+                .map(|record| {
+                    let file = gio::File::for_path(&record.path);
+                    let display = std::path::Path::new(&record.path)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| record.path.clone());
+                    let content_type = record.format.clone().unwrap_or_default();
+                    let item =
+                        ImageObject::new(file, &display, record.mtime, record.size, &content_type);
+                    item.set_content_hash(&record.content_hash);
+                    item.set_date_taken(record.date_taken);
+                    let rating = db.rating(&record.content_hash).ok().flatten().unwrap_or(0);
+                    item.set_rating(rating as i32);
+                    item
+                })
+                .collect()
+        };
+
+        self.set_location(Location::Tag(name.to_string()));
+        let imp = self.imp();
+        // Spans folders, so the folder-scoped annotation stamp does not apply.
+        *imp.current_folder.borrow_mut() = None;
+        imp.store.remove_all();
+        imp.store.extend_from_slice(&items);
+        imp.content_stack
+            .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
+        if items.is_empty() {
+            self.toast(&format!("No images tagged “{name}”"));
+        }
     }
 
     /// Re-run the grid filter (after criteria or ratings change).
@@ -1560,6 +1634,7 @@ impl VitrineWindow {
         match &target {
             Location::Folder(path) => self.load_folder(gio::File::for_path(path)),
             Location::Collection(id) => self.open_collection(*id),
+            Location::Tag(name) => self.open_tag(&name.clone()),
         }
         *self.imp().current_location.borrow_mut() = Some(target);
         self.imp().navigating_back.set(false);
@@ -2469,9 +2544,9 @@ impl VitrineWindow {
         let items: Vec<ImageObject> = {
             let db = self.imp().read_db.borrow();
             let Some(db) = db.as_ref() else { return };
-            db.collection_files(id)
-                .unwrap_or_default()
-                .into_iter()
+            let rows =
+                vitrine_engine::prefer_durable_paths(db.collection_files(id).unwrap_or_default());
+            rows.into_iter()
                 .map(|record| {
                     let file = gio::File::for_path(&record.path);
                     let name = std::path::Path::new(&record.path)

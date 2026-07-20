@@ -16,27 +16,33 @@
 
 /* Grid selection.
 
-   Adwaita does NOT paint a solid fill here — it already tints a selected
-   gridview child at 25% accent with a 9px radius and 3px padding
-   (libadwaita styles/gtk.css: `gridview > child:selected`). An earlier pass
-   here "softened" it to 25% with a 9px radius, i.e. changed nothing.
+   Adwaita already tints a selected gridview child at 25% accent with a 9px
+   radius (libadwaita styles/gtk.css). It does not paint a solid fill — an
+   earlier pass here "softened" 25% to 25% and changed nothing.
 
-   The heaviness is coverage, not opacity. A grid cell is much larger than the
-   thumbnail inside it, so a 25% wash over the whole cell rect leaves adjacent
-   tiles almost touching and a multi-selection reads as one block. Two changes:
-   a lighter tint, and a margin so each tile is visibly its own.
+   The real problem was that Adwaita gives the child `padding: 3px` and no
+   margin, and the cell carried a further 4px of its own margin. All of that sits
+   INSIDE the tint, so selected tiles swelled until they touched and a
+   multi-selection rendered as one unbroken field with the thumbnails floating in
+   it — no gaps anywhere.
 
-   Both numbers are taste — this is the place to tune them. */
+   So the spacing moved outward: the cell's margin dropped to 2px, and the gap
+   between tiles lives here as a margin on the child, outside the tint. That
+   gives discrete rounded tiles with dark between them, which is what a file
+   manager does.
+
+   Tuning knobs: `margin` widens the gaps (it is per-side, so 16px = 32px
+   between tiles), the percentage sets the intensity. */
 gridview > child {
-  margin: 2px;
+  margin: 16px;
 }
 
 gridview > child:selected {
-  background-color: color-mix(in srgb, var(--accent-bg-color) 13%, transparent);
+  background-color: color-mix(in srgb, var(--accent-bg-color) 16%, transparent);
 }
 
 gridview > child.activatable:selected:hover {
-  background-color: color-mix(in srgb, var(--accent-bg-color) 19%, transparent);
+  background-color: color-mix(in srgb, var(--accent-bg-color) 22%, transparent);
 }
 
 /* Duplicates page: mark the copy that will be kept. */
