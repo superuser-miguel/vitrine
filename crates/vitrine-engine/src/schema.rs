@@ -106,6 +106,19 @@ CREATE TABLE crops (
   updated_at   INTEGER NOT NULL
 );
 "#,
+    // v5 — index `file_tags` by tag.
+    //
+    // `file_tags` is keyed (content_hash, tag_id), so a lookup by tag_id alone
+    // could not use it — tag_id is the *second* column. SQLite therefore drove
+    // the per-tag count in `all_tags()` from a full scan of `files`, once per
+    // tag: cost grew as tags × files, so every tag a user added made the tag
+    // menu slower across the whole library. Measured on a 192k-file index:
+    // 0.41s at 7 tags, 0.54s at 9, run synchronously on the GTK main thread and
+    // showing up as 2.5–3.4s UI freezes. With this index the plan flips from
+    // SCAN files to SEARCH file_tags and the query drops under 10ms.
+    r#"
+CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag_id);
+"#,
 ];
 
 /// The schema version this build targets (number of migrations).

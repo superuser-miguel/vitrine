@@ -146,6 +146,13 @@ impl VitrineGridCell {
     pub fn add_drag_source(&self) {
         let source = gtk::DragSource::new();
         source.set_actions(gtk::gdk::DragAction::COPY);
+        // Capture phase, so the cell sees the press before the GridView's
+        // rubber-band gesture does. On bubble (the default) the two race for the
+        // sequence and rubber-band usually won — a drag off a thumbnail turned
+        // into a selection rectangle instead. A drag gesture only *claims* once
+        // the drag threshold is crossed, so plain click-to-select still falls
+        // through to the grid untouched.
+        source.set_propagation_phase(gtk::PropagationPhase::Capture);
         source.connect_prepare(glib::clone!(
             #[weak(rename_to = cell)]
             self,
@@ -153,6 +160,7 @@ impl VitrineGridCell {
             None,
             move |_, _, _| {
                 let hash = cell.item()?.content_hash();
+                crate::debug::drag_prepare(!hash.is_empty());
                 if hash.is_empty() {
                     return None;
                 }

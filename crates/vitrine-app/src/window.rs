@@ -460,7 +460,7 @@ impl VitrineWindow {
                     (true, Key::plus | Key::equal | Key::KP_Add) => window.change_icon(1),
                     (true, Key::minus | Key::KP_Subtract) => window.change_icon(-1),
                     (true, Key::_0 | Key::KP_0) => window.reset_icon(),
-                    (_, Key::Delete) => window.trash_selected(),
+                    (_, Key::Delete) => window.delete_or_remove_selection(),
                     (_, Key::space | Key::KP_Space) => window.preview_selected(),
                     // Number keys rate the selection (no zoom in the grid, so 0–5
                     // are free); 0 clears.
@@ -1107,16 +1107,22 @@ impl VitrineWindow {
             return;
         }
         let hashes = self.selected_hashes();
+        crate::debug::tag_action("add", name, hashes.len());
         if hashes.is_empty() {
             self.toast("Select one or more indexed images to tag");
             return;
         }
-        if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
-            indexer.annotator().tag(name, &hashes, true);
-        }
-        self.toast(&match hashes.len() {
-            1 => format!("Tagged 1 image “{name}”"),
-            n => format!("Tagged {n} images “{name}”"),
+        let accepted = match self.imp().indexer.borrow().as_ref() {
+            Some(indexer) => indexer.annotator().tag(name, &hashes, true),
+            None => false,
+        };
+        self.toast(&if !accepted {
+            "Couldn’t tag — the index writer isn’t running".to_string()
+        } else {
+            match hashes.len() {
+                1 => format!("Tagged 1 image “{name}”"),
+                n => format!("Tagged {n} images “{name}”"),
+            }
         });
         self.imp().tag_button.popdown();
     }
@@ -1175,12 +1181,9 @@ impl VitrineWindow {
         let tags: Vec<String> = {
             let db = imp.read_db.borrow();
             match db.as_ref() {
-                Some(db) => db
-                    .all_tags()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|t| t.name)
-                    .collect(),
+                // Names only: the dropdown shows no counts, so paying for the
+                // per-tag count subquery here would be pure waste.
+                Some(db) => db.tag_names().unwrap_or_default(),
                 None => Vec::new(),
             }
         };
@@ -2247,6 +2250,7 @@ impl VitrineWindow {
                     false,
                     move |_, value, _, _| {
                         let Ok(hash) = value.get::<String>() else {
+                            crate::debug::drop_event("catalog", "unhandled", 0);
                             return false;
                         };
                         // Dragging one of a multi-selection adds the whole
@@ -2257,14 +2261,21 @@ impl VitrineWindow {
                         } else if !hash.is_empty() {
                             vec![hash]
                         } else {
+                            crate::debug::drop_event("catalog", "hash", 0);
                             return true;
                         };
-                        if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
-                            indexer.annotator().add_to_catalog(id, &hashes);
-                        }
-                        window.toast(&match hashes.len() {
-                            1 => "Added 1 image to catalog".to_string(),
-                            n => format!("Added {n} images to catalog"),
+                        crate::debug::drop_event("catalog", "hash", hashes.len());
+                        let accepted = match window.imp().indexer.borrow().as_ref() {
+                            Some(indexer) => indexer.annotator().add_to_catalog(id, &hashes),
+                            None => false,
+                        };
+                        window.toast(&if !accepted {
+                            "Couldn’t add — the index writer isn’t running".to_string()
+                        } else {
+                            match hashes.len() {
+                                1 => "Added 1 image to catalog".to_string(),
+                                n => format!("Added {n} images to catalog"),
+                            }
                         });
                         true
                     }
@@ -2347,17 +2358,45 @@ impl VitrineWindow {
                     let hashes = window.selected_hashes();
                     if hashes.is_empty() {
                         window.toast("Select images to add");
-                    } else if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
-                        indexer.annotator().add_to_catalog(id, &hashes);
-                        window.toast(&format!("Added {} to catalog", hashes.len()));
+                    } else {
+                        let accepted = match window.imp().indexer.borrow().as_ref() {
+                            Some(indexer) => indexer.annotator().add_to_catalog(id, &hashes),
+                            None => false,
+                        };
+                        window.toast(&if accepted {
+                            format!("Added {} to catalog", hashes.len())
+                        } else {
+                            "Couldn’t add — the index writer isn’t running".to_string()
+                        });
                     }
                     popover.popdown();
                 }
             ));
             content.append(&add);
+
+            // The counterpart to Add: curation, not deletion. Without this the
+            // only removal gesture in a collection was Delete, which trashed the
+            // original file.
+            let remove = gtk::Button::builder()
+                .label(gettextrs::gettext("Remove Selection"))
+                .css_classes(["flat"])
+                .build();
+            remove.connect_clicked(glib::clone!(
+                #[weak(rename_to = window)]
+                self,
+                #[weak]
+                popover,
+                move |_| {
+                    window.remove_selection_from_catalog(id);
+                    popover.popdown();
+                }
+            ));
+            content.append(&remove);
         }
+        // Names the whole collection, not the selection — the old "Delete" label
+        // read as "delete these images" in a view full of images.
         let delete = gtk::Button::builder()
-            .label(gettextrs::gettext("Delete"))
+            .label(gettextrs::gettext("Delete Collection"))
             .css_classes(["flat"])
             .build();
         delete.connect_clicked(glib::clone!(
@@ -2485,6 +2524,70 @@ impl VitrineWindow {
                 Err(e) => glib::g_warning!("vitrine", "window read db: {e}"),
             }
         }
+    }
+
+    /// The id of the catalog currently being browsed, if any.
+    ///
+    /// Only catalogs qualify: a smart collection's membership is derived from its
+    /// query, so there is nothing to remove an item *from*.
+    fn current_catalog_id(&self) -> Option<i64> {
+        let Some(Location::Collection(id)) = self.imp().current_location.borrow().clone() else {
+            return None;
+        };
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
+        db.as_ref()?
+            .list_collections()
+            .ok()?
+            .into_iter()
+            .find(|c| c.id == id && c.kind == vitrine_engine::CollectionKind::Catalog)
+            .map(|c| c.id)
+    }
+
+    /// What Delete does depends on where you are.
+    ///
+    /// In a catalog, Delete removes the selection *from that catalog* — a
+    /// collection is curation, not storage, so Delete there must never touch the
+    /// file. Anywhere else it means the usual move-to-Trash.
+    fn delete_or_remove_selection(&self) {
+        match self.current_catalog_id() {
+            Some(id) => self.remove_selection_from_catalog(id),
+            None => self.trash_selected(),
+        }
+    }
+
+    /// Drop the selection from catalog `id`, leaving the files alone.
+    fn remove_selection_from_catalog(&self, id: i64) {
+        let model = self.model();
+        let items: Vec<ImageObject> = self
+            .selected_positions()
+            .into_iter()
+            .filter_map(|pos| model.as_ref()?.item(pos).and_downcast::<ImageObject>())
+            .filter(|item| !item.content_hash().is_empty())
+            .collect();
+        if items.is_empty() {
+            self.toast("Select one or more indexed images to remove");
+            return;
+        }
+        let hashes: Vec<String> = items.iter().map(|item| item.content_hash()).collect();
+
+        let accepted = match self.imp().indexer.borrow().as_ref() {
+            Some(indexer) => indexer.annotator().remove_from_catalog(id, &hashes),
+            None => false,
+        };
+        if !accepted {
+            self.toast("Couldn’t remove — the index writer isn’t running");
+            return;
+        }
+
+        let total = items.len();
+        for item in &items {
+            self.remove_item(item);
+        }
+        self.toast(&match total {
+            1 => "Removed 1 image from the collection".to_string(),
+            n => format!("Removed {n} images from the collection"),
+        });
     }
 
     /// Delete: move the selected images to the trash (reversible — never unlink),

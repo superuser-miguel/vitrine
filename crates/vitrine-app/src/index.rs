@@ -104,6 +104,11 @@ enum Request {
         id: i64,
         hashes: Vec<String>,
     },
+    /// Drop `hashes` from a catalog. Curation only — the files are untouched.
+    RemoveFromCatalog {
+        id: i64,
+        hashes: Vec<String>,
+    },
     /// Delete a collection.
     DeleteCollection {
         id: i64,
@@ -123,89 +128,161 @@ pub struct Annotator {
 }
 
 impl Annotator {
+    /// Hand one write to the writer thread. Returns whether it was **accepted**
+    /// — queued, not committed; the commit happens later on the writer.
+    ///
+    /// The queue is unbounded, so this can only fail when the receiver is gone,
+    /// i.e. the writer thread has exited. That is unrecoverable and permanent:
+    /// every later write fails too. Callers surface it rather than reporting a
+    /// success they cannot vouch for.
+    fn send(&self, op: &str, rows: usize, request: Request) -> bool {
+        let queued = self.requests.len();
+        let accepted = self.requests.try_send(request).is_ok();
+        if !accepted {
+            glib::g_warning!(
+                "vitrine",
+                "annotation write dropped ({op}): index writer is not running"
+            );
+        }
+        crate::debug::write(op, rows, queued, accepted);
+        accepted
+    }
+
     /// Set a 0–5 rating, or clear it with `None`.
-    pub fn set_rating(&self, hash: &str, rating: Option<i64>) {
-        let _ = self.requests.try_send(Request::SetRating {
-            hash: hash.to_string(),
-            rating,
-        });
+    pub fn set_rating(&self, hash: &str, rating: Option<i64>) -> bool {
+        self.send(
+            "set_rating",
+            1,
+            Request::SetRating {
+                hash: hash.to_string(),
+                rating,
+            },
+        )
     }
 
     /// Move all annotations to a baked file's new content hash (Save path).
-    pub fn rekey(&self, old: &str, new: &str) {
-        let _ = self.requests.try_send(Request::Rekey {
-            old: old.to_string(),
-            new: new.to_string(),
-        });
+    pub fn rekey(&self, old: &str, new: &str) -> bool {
+        self.send(
+            "rekey",
+            1,
+            Request::Rekey {
+                old: old.to_string(),
+                new: new.to_string(),
+            },
+        )
     }
 
     /// Set (or clear with None) the non-destructive crop instruction.
-    pub fn set_crop(&self, hash: &str, rect: Option<(f64, f64, f64, f64)>) {
-        let _ = self.requests.try_send(Request::SetCrop {
-            hash: hash.to_string(),
-            rect,
-        });
+    pub fn set_crop(&self, hash: &str, rect: Option<(f64, f64, f64, f64)>) -> bool {
+        self.send(
+            "set_crop",
+            1,
+            Request::SetCrop {
+                hash: hash.to_string(),
+                rect,
+            },
+        )
     }
 
     /// Set the non-destructive user orientation (EXIF 1-8; 1 clears).
-    pub fn set_orientation(&self, hash: &str, orientation: i64) {
-        let _ = self.requests.try_send(Request::SetOrientation {
-            hash: hash.to_string(),
-            orientation,
-        });
+    pub fn set_orientation(&self, hash: &str, orientation: i64) -> bool {
+        self.send(
+            "set_orientation",
+            1,
+            Request::SetOrientation {
+                hash: hash.to_string(),
+                orientation,
+            },
+        )
     }
 
     /// Set a comment (empty string clears it).
-    pub fn set_comment(&self, hash: &str, body: &str) {
-        let _ = self.requests.try_send(Request::SetComment {
-            hash: hash.to_string(),
-            body: body.to_string(),
-        });
+    pub fn set_comment(&self, hash: &str, body: &str) -> bool {
+        self.send(
+            "set_comment",
+            1,
+            Request::SetComment {
+                hash: hash.to_string(),
+                body: body.to_string(),
+            },
+        )
     }
 
     /// Apply (`add = true`) or remove a tag across `hashes`.
-    pub fn tag(&self, name: &str, hashes: &[String], add: bool) {
-        let _ = self.requests.try_send(Request::Tag {
-            name: name.to_string(),
-            hashes: hashes.to_vec(),
-            add,
-        });
+    pub fn tag(&self, name: &str, hashes: &[String], add: bool) -> bool {
+        self.send(
+            if add { "tag_add" } else { "tag_remove" },
+            hashes.len(),
+            Request::Tag {
+                name: name.to_string(),
+                hashes: hashes.to_vec(),
+                add,
+            },
+        )
     }
 
     /// Create a catalog named `name`, seeded with `hashes`.
-    pub fn create_catalog(&self, name: &str, hashes: &[String]) {
-        let _ = self.requests.try_send(Request::CreateCatalog {
-            name: name.to_string(),
-            hashes: hashes.to_vec(),
-        });
+    pub fn create_catalog(&self, name: &str, hashes: &[String]) -> bool {
+        self.send(
+            "create_catalog",
+            hashes.len(),
+            Request::CreateCatalog {
+                name: name.to_string(),
+                hashes: hashes.to_vec(),
+            },
+        )
     }
 
     /// Append `hashes` to the catalog `id`.
-    pub fn add_to_catalog(&self, id: i64, hashes: &[String]) {
-        let _ = self.requests.try_send(Request::AddToCatalog {
-            id,
-            hashes: hashes.to_vec(),
-        });
+    pub fn add_to_catalog(&self, id: i64, hashes: &[String]) -> bool {
+        self.send(
+            "add_to_catalog",
+            hashes.len(),
+            Request::AddToCatalog {
+                id,
+                hashes: hashes.to_vec(),
+            },
+        )
+    }
+
+    /// Drop `hashes` from the catalog `id`. Curation only — never touches files.
+    pub fn remove_from_catalog(&self, id: i64, hashes: &[String]) -> bool {
+        self.send(
+            "remove_from_catalog",
+            hashes.len(),
+            Request::RemoveFromCatalog {
+                id,
+                hashes: hashes.to_vec(),
+            },
+        )
     }
 
     /// Create a smart collection from a query predicate.
-    pub fn create_smart_collection(&self, name: &str, query: Query) {
-        let _ = self.requests.try_send(Request::CreateSmartCollection {
-            name: name.to_string(),
-            query: Box::new(query),
-        });
+    pub fn create_smart_collection(&self, name: &str, query: Query) -> bool {
+        self.send(
+            "create_smart_collection",
+            1,
+            Request::CreateSmartCollection {
+                name: name.to_string(),
+                query: Box::new(query),
+            },
+        )
     }
 
     /// Delete the collection `id`.
-    pub fn delete_collection(&self, id: i64) {
-        let _ = self.requests.try_send(Request::DeleteCollection { id });
+    pub fn delete_collection(&self, id: i64) -> bool {
+        self.send("delete_collection", 1, Request::DeleteCollection { id })
     }
 
     /// Mark paths missing in the index (after trashing them).
-    pub fn mark_missing(&self, paths: &[String]) {
-        let _ = self.requests.try_send(Request::MarkMissing {
-            paths: paths.to_vec(),
-        });
+    pub fn mark_missing(&self, paths: &[String]) -> bool {
+        self.send(
+            "mark_missing",
+            paths.len(),
+            Request::MarkMissing {
+                paths: paths.to_vec(),
+            },
+        )
     }
 }
 
@@ -376,6 +453,14 @@ fn worker(
                 }
                 Err(e) => glib::g_warning!("vitrine", "add to catalog {id}: {e}"),
             },
+            Request::RemoveFromCatalog { id, hashes } => {
+                match db.remove_from_catalog(id, &hashes) {
+                    Ok(()) => {
+                        let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                    }
+                    Err(e) => glib::g_warning!("vitrine", "remove from catalog {id}: {e}"),
+                }
+            }
             Request::DeleteCollection { id } => match db.delete_collection(id) {
                 Ok(()) => {
                     let _ = progress.try_send(IndexProgress::CollectionsChanged);

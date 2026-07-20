@@ -48,6 +48,59 @@ pub fn decode_end() {
     DECODES_DONE.fetch_add(1, Ordering::Relaxed);
 }
 
+/// An annotation write was handed to the writer thread: which op, how many rows
+/// it carries, how deep the writer queue already was, and whether the writer
+/// accepted it.
+///
+/// `queued` is the head-of-line signal — the writer is a single thread shared
+/// with folder scans, so a user write sitting behind a big scan shows up here as
+/// a rising queue while the UI has already claimed success.
+///
+/// `accepted=false` means the channel is closed, i.e. the writer thread is gone.
+/// The queue is unbounded, so that is the *only* way a send can fail — and every
+/// later write will fail the same way. Blocked and dead look identical in the UI;
+/// they are told apart here.
+pub fn write(op: &str, rows: usize, queued: usize, accepted: bool) {
+    if enabled() {
+        eprintln!(
+            "VDBG-WRITE ms={} op={op} rows={rows} queued={queued} accepted={accepted}",
+            since_start_ms()
+        );
+    }
+}
+
+/// A drag was prepared on a grid cell. `hash=false` means the cell had no content
+/// hash yet, so the drag is silently refused — the item is not indexed (or not
+/// stamped) rather than the drag being broken.
+pub fn drag_prepare(hash: bool) {
+    if enabled() {
+        eprintln!("VDBG-DRAG ms={} hash={hash}", since_start_ms());
+    }
+}
+
+/// Something was dropped on a drop target: which target, the payload type that
+/// actually arrived, and how many items resolved out of it. `items=0` on a
+/// well-formed drop means the payload could not be resolved to indexed images.
+pub fn drop_event(target: &str, payload: &str, items: usize) {
+    if enabled() {
+        eprintln!(
+            "VDBG-DROP ms={} target={target} payload={payload} items={items}",
+            since_start_ms()
+        );
+    }
+}
+
+/// A tag apply/remove was issued from the UI, before it reaches the writer.
+/// Pairs with the `VDBG-WRITE op=tag` line that follows it.
+pub fn tag_action(op: &str, name: &str, items: usize) {
+    if enabled() {
+        eprintln!(
+            "VDBG-TAG ms={} op={op} name={name:?} items={items}",
+            since_start_ms()
+        );
+    }
+}
+
 /// A snapshot of the counters at one instant.
 #[derive(Clone, Copy)]
 pub struct Counters {

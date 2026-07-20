@@ -47,6 +47,17 @@ impl Db {
         rows.collect()
     }
 
+    /// Just the tag names, ordered — for callers that populate a list and have
+    /// no use for the counts. Skips the per-tag count subquery in [`all_tags`],
+    /// which is the expensive half of it.
+    pub fn tag_names(&self) -> rusqlite::Result<Vec<String>> {
+        let mut stmt = self
+            .conn()
+            .prepare("SELECT name FROM tags ORDER BY name COLLATE NOCASE")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        rows.collect()
+    }
+
     /// Every content hash carrying tag `name` (case-insensitive) — for filtering
     /// the grid to a tag without a per-item query.
     pub fn hashes_with_tag(&self, name: &str) -> rusqlite::Result<Vec<String>> {
@@ -177,6 +188,49 @@ mod tests {
             db.tags_for_hash("h2").unwrap().is_empty(),
             "cascade removed file_tags"
         );
+    }
+
+    #[test]
+    fn tag_counts_are_indexed_not_a_table_scan() {
+        // `file_tags` is keyed (content_hash, tag_id), so counting by tag alone
+        // cannot use the primary key. Without idx_file_tags_tag SQLite drives the
+        // per-tag count from a full scan of `files` — once per tag — and the tag
+        // menu slows down as tags × files. Assert the planner searches instead.
+        let db = Db::open_in_memory().unwrap();
+        let plan: Vec<String> = {
+            let conn = db.conn();
+            let mut stmt = conn
+                .prepare(
+                    "EXPLAIN QUERY PLAN
+                     SELECT t.id, t.name,
+                            (SELECT count(*) FROM file_tags ft
+                             JOIN files f ON f.content_hash = ft.content_hash AND f.missing = 0
+                             WHERE ft.tag_id = t.id)
+                     FROM tags t ORDER BY t.name COLLATE NOCASE",
+                )
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(3)).unwrap();
+            rows.map(Result::unwrap).collect()
+        };
+        assert!(
+            plan.iter().any(|s| s.contains("idx_file_tags_tag")),
+            "count must be driven by the tag index, got plan: {plan:#?}"
+        );
+        assert!(
+            !plan.iter().any(|s| s.contains("SCAN f")),
+            "must not full-scan files per tag, got plan: {plan:#?}"
+        );
+    }
+
+    #[test]
+    fn tag_names_skips_the_count_subquery() {
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch("INSERT INTO files(path,content_hash,size,mtime,indexed_at,missing) VALUES ('/a','h1',1,1,1,0);")
+            .unwrap();
+        db.apply_tag("Zebra", &hashes(&["h1"])).unwrap();
+        db.apply_tag("apple", &hashes(&["h1"])).unwrap();
+        assert_eq!(db.tag_names().unwrap(), ["apple", "Zebra"], "NOCASE order");
     }
 
     #[test]

@@ -295,6 +295,42 @@ mod tests {
     }
 
     #[test]
+    fn removing_from_a_catalog_keeps_the_file_and_its_annotations() {
+        // A collection is curation, not storage: dropping a member must leave the
+        // file indexed, present, and annotated — it is still on disk, and may
+        // still be in other catalogs. The UI once had no way to reach this, so
+        // Delete in a collection view trashed the original instead.
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "/a.jpg", "ha");
+        seed(&db, "/b.jpg", "hb");
+        db.set_rating("ha", 5).unwrap();
+        db.apply_tag("keeper", &h(&["ha"])).unwrap();
+
+        let trip = db.create_catalog("Trip").unwrap();
+        let best = db.create_catalog("Best").unwrap();
+        db.add_to_catalog(trip, &h(&["ha", "hb"])).unwrap();
+        db.add_to_catalog(best, &h(&["ha"])).unwrap();
+
+        db.remove_from_catalog(trip, &h(&["ha"])).unwrap();
+
+        assert_eq!(
+            paths(db.collection_files(trip).unwrap()),
+            ["/b.jpg"],
+            "dropped from the catalog it was removed from"
+        );
+        assert_eq!(
+            paths(db.collection_files(best).unwrap()),
+            ["/a.jpg"],
+            "still a member of every other catalog"
+        );
+
+        let file = db.file_by_path("/a.jpg").unwrap().expect("still indexed");
+        assert_eq!(file.content_hash, "ha");
+        assert!(!file.missing, "removal must never mark the file missing");
+        assert_eq!(db.tags_for_hash("ha").unwrap(), ["keeper"]);
+    }
+
+    #[test]
     fn tag_rating_and_catalog_all_survive_a_move() {
         // The Phase 3 acceptance: annotations follow content across a rename.
         let db = Db::open_in_memory().unwrap();
