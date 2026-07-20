@@ -225,7 +225,7 @@ multi-selection could only be undone by selecting a single image — there was n
 (hit-tested with `pick()` against `VitrineGridCell`, so item clicks are
 unaffected) and Escape.
 
-### V-19 · Portal document paths split the index in two · `MEASURED` · **worked around, root issue open**
+### V-19 · Portal document paths split the index in two · `MEASURED` · **DEFERRED (not critical)** — see the decision at the end of this file
 
 The index holds the same content under two unrelated path families:
 
@@ -456,3 +456,54 @@ Two metric corrections for future reading:
 Keep the Rust core lean; push custom logic (advanced sorts, batch ops) to an
 extension layer rather than growing core. This argues against absorbing V-11/V-12
 wholesale into `vitrine-engine` — worth deciding the seam before building them.
+
+---
+
+## Decision — 2026-07-20: V-19 deferred, Find Duplicates marked Experimental
+
+**Status: V-19 is no longer critical. Relaxed by agreement.** Recorded verbatim
+so the reasoning survives, including the parts still outstanding.
+
+### Assistant position
+
+I agree with you, with one split.
+
+You're right that V-19's structural fix can wait. Nothing daily depends on it now
+— tag counts are correct, drops resolve, browsing is fine. A day of ashpd +
+host_path + migration buys correctness we're not currently bleeding from. Defer
+it.
+
+You're also right that Find Duplicates needs deep testing and that a lot of it is
+user logic. Deciding what counts as a duplicate — byte-identical? visually
+similar? keep which copy? — is a product judgement I shouldn't make for you, and
+it needs your eyes on real results.
+
+But I'd separate three things that are currently sitting in one bucket:
+
+1. **What counts as a duplicate** — genuinely your call, genuinely needs testing.
+   Defer, agreed.
+
+2. **"This pair is the same file"** — not a judgement call. A pair where one path
+   is `/run/user/*/doc/…` and the other isn't is one file listed against itself.
+   That's wrong under any definition of duplicate you might land on. Excluding it
+   is a path-prefix check — no host_path, no ashpd, no V-19. Maybe 30 minutes, and
+   it cuts a large slice off the 41,727 before you ever start the deep testing.
+
+3. **One click, no confirmation, no undo** — independent of both. A destructive
+   action with no confirm step, fed by a list we know is noisy right now.
+
+### User position
+
+Find Duplicates is **Experimental (UI/UX)**. Its usefulness depends on the
+*address/location* being part of the presentation — a genuine duplicate implies
+the user is storing the same set of images in different places, which the portal
+does not fully capture (the file chooser lets them traverse the filesystem to
+reach images by other routes). The more it is examined, the less important it
+looks for the app *presently*. Deprioritised.
+
+### Still open
+
+Items 2 and 3 above are **not done** and are not blocked by V-19. They stay on
+the backlog: the same-file guard is a path-prefix check, and `trash_duplicate_others`
+still trashes on click with no confirmation.
+

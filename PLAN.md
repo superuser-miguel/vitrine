@@ -1284,3 +1284,18 @@ no error spam; replug → auto-revives via VolumeMonitor; click while offline �
 mount-attempt or clear toast, never a broken empty grid; delete the folder while
 mounted → "missing" state distinct from offline; (stretch) drive remounts at a new
 path → UUID re-resolution still finds it.
+
+---
+
+## 15. Portal/host path split + Find Duplicates (2026-07-20)
+
+The index holds one file under two names — a directly-granted root path and an
+opaque `/run/user/…/doc/…` document-portal path — so counts and duplicate
+detection double-count. **Deferred, not critical**: tag counts now count distinct
+hashes and drops resolve on content, so nothing daily bleeds from it; the
+structural fix (a `host_path` column resolved via the Documents portal) waits.
+
+**Find Duplicates is Experimental (UI/UX).** Its remaining value depends on
+presenting each copy's *location* — a real duplicate means the same images stored
+in different places, which is a user-storage question the portal doesn't fully
+capture. Low priority for now. Full analysis: `Troubleshoot/ISSUES.md` V-19.
