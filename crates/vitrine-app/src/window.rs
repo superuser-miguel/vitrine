@@ -2599,8 +2599,12 @@ impl VitrineWindow {
                 let resolved = gio::spawn_blocking(move || {
                     // Own connection: this runs off the main thread, so it cannot
                     // borrow the window's read handle.
-                    let Ok(db) = Db::open(crate::index::index_db_path()) else {
-                        return (Vec::new(), 0usize);
+                    let db = match Db::open(crate::index::index_db_path()) {
+                        Ok(db) => db,
+                        // Never swallow this: "could not open the index" and
+                        // "these files are not indexed" both end in an empty
+                        // result, and only one of them is the user's fault.
+                        Err(e) => return Err(format!("index open: {e}")),
                     };
                     // Expand a dropped folder one level — dropping a folder out of
                     // a file manager is the same gesture as dropping its contents.
@@ -2617,21 +2621,39 @@ impl VitrineWindow {
                         }
                     }
 
+                    // Why each unresolved file failed, so an empty result can say
+                    // which of several very different causes it was.
                     let seen = candidates.len();
+                    let (mut by_path, mut by_hash, mut unhashable, mut unknown) = (0, 0, 0, 0);
                     let mut hashes: Vec<String> = Vec::new();
                     for path in candidates {
                         let name = path.to_string_lossy();
                         let hash = match db.file_by_path(&name) {
                             Ok(Some(record)) if !record.content_hash.is_empty() => {
+                                by_path += 1;
                                 Some(record.content_hash)
                             }
                             // Path unknown: hash the bytes and see whether the
                             // index already holds this content under another path.
-                            _ => vitrine_engine::blake3_file(&path).ok().filter(|hash| {
-                                db.files_by_hash(hash)
-                                    .map(|files| files.iter().any(|f| !f.missing))
-                                    .unwrap_or(false)
-                            }),
+                            _ => match vitrine_engine::blake3_file(&path) {
+                                Err(_) => {
+                                    unhashable += 1;
+                                    None
+                                }
+                                Ok(hash) => {
+                                    let known = db
+                                        .files_by_hash(&hash)
+                                        .map(|files| files.iter().any(|f| !f.missing))
+                                        .unwrap_or(false);
+                                    if known {
+                                        by_hash += 1;
+                                        Some(hash)
+                                    } else {
+                                        unknown += 1;
+                                        None
+                                    }
+                                }
+                            },
                         };
                         if let Some(hash) = hash {
                             if !hashes.contains(&hash) {
@@ -2639,14 +2661,31 @@ impl VitrineWindow {
                             }
                         }
                     }
-                    (hashes, seen)
+                    Ok((hashes, seen, by_path, by_hash, unhashable, unknown))
                 })
                 .await;
 
-                let (hashes, seen) = resolved.unwrap_or_default();
-                crate::debug::drop_event("catalog", "files-resolved", hashes.len());
+                // spawn_blocking itself can fail (panic in the closure).
+                let outcome = match resolved {
+                    Ok(outcome) => outcome,
+                    Err(_) => Err("resolver thread panicked".to_string()),
+                };
+                let (hashes, seen, by_path, by_hash, unhashable, unknown) = match outcome {
+                    Ok(v) => v,
+                    Err(reason) => {
+                        glib::g_warning!("vitrine", "catalog drop: {reason}");
+                        crate::debug::drop_event("catalog", "files-error", 0);
+                        window.toast("Couldn’t add — the index could not be opened");
+                        return;
+                    }
+                };
+                crate::debug::drop_resolution(hashes.len(), by_path, by_hash, unhashable, unknown);
                 if hashes.is_empty() {
-                    window.toast("Nothing added — drop images from a folder Vitrine has indexed");
+                    window.toast(if unhashable > 0 {
+                        "Nothing added — those files could not be read"
+                    } else {
+                        "Nothing added — drop images from a folder Vitrine has indexed"
+                    });
                     return;
                 }
                 let accepted = match window.imp().indexer.borrow().as_ref() {

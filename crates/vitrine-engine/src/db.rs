@@ -159,4 +159,37 @@ mod tests {
         assert_eq!(db.meta("k").unwrap().as_deref(), Some("v"));
         std::fs::remove_dir_all(&dir).ok();
     }
+
+    #[test]
+    fn a_second_writer_waits_instead_of_failing() {
+        // Concurrent writers must wait for the lock, not fail. Two connections
+        // do write here: the indexer thread, and any short-lived connection that
+        // has to run a migration at open.
+        //
+        // This currently holds for free — rusqlite defaults `busy_timeout` to
+        // 5000ms (bare SQLite defaults to zero, which would fail instantly). The
+        // test pins the behaviour so a future change to connection setup that
+        // lowers or clears it fails here rather than in the field.
+        let dir = std::env::temp_dir().join(format!("vitrine-db-busy-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.sqlite");
+
+        let holder = Db::open(&path).unwrap();
+        holder.conn().execute_batch("BEGIN IMMEDIATE").unwrap();
+        holder.set_meta("held", "1").unwrap();
+
+        // Starts while the lock is held, so it must wait for the commit below.
+        let contender = path.clone();
+        let handle = std::thread::spawn(move || Db::open(&contender)?.set_meta("k", "v"));
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        holder.conn().execute_batch("COMMIT").unwrap();
+
+        let wrote = handle.join().unwrap();
+        assert!(
+            wrote.is_ok(),
+            "a write starting under contention must wait for the lock, not fail: {wrote:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

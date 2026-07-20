@@ -90,6 +90,28 @@ pub fn drop_event(target: &str, payload: &str, items: usize) {
     }
 }
 
+/// How a file drop resolved, broken down by *why* each file did or didn't land.
+///
+/// An empty result has several unrelated causes — the files aren't indexed, they
+/// couldn't be read, or the index wouldn't open — and `items=0` alone cannot tell
+/// them apart. `by_hash` counts files matched on content after their path missed,
+/// which is the portal-path case.
+pub fn drop_resolution(
+    resolved: usize,
+    by_path: usize,
+    by_hash: usize,
+    unhashable: usize,
+    unknown: usize,
+) {
+    if enabled() {
+        eprintln!(
+            "VDBG-DROP ms={} target=catalog payload=files-resolved items={resolved} \
+             by_path={by_path} by_hash={by_hash} unreadable={unhashable} not_indexed={unknown}",
+            since_start_ms()
+        );
+    }
+}
+
 /// A tag apply/remove was issued from the UI, before it reaches the writer.
 /// Pairs with the `VDBG-WRITE op=tag` line that follows it.
 pub fn tag_action(op: &str, name: &str, items: usize) {
