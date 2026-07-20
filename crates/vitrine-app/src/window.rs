@@ -439,6 +439,33 @@ impl VitrineWindow {
         grid_view.set_vexpand(true);
         grid_view.set_factory(Some(&self.build_factory()));
 
+        // Click the empty space around the cells to drop the selection.
+        // GtkGridView only clears a selection when another item is picked, so
+        // without this a multi-selection can only be undone by selecting a single
+        // image — there is no "none" gesture at all.
+        let clear_click = gtk::GestureClick::new();
+        clear_click.set_button(gtk::gdk::BUTTON_PRIMARY);
+        clear_click.connect_pressed(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |gesture, _, x, y| {
+                let Some(view) = gesture.widget() else { return };
+                // Anything under the pointer that lives inside a cell is a normal
+                // item click; only bare grid background clears.
+                let on_cell = view
+                    .pick(x, y, gtk::PickFlags::DEFAULT)
+                    .map(|w| {
+                        w.type_() == VitrineGridCell::static_type()
+                            || w.ancestor(VitrineGridCell::static_type()).is_some()
+                    })
+                    .unwrap_or(false);
+                if !on_cell {
+                    window.clear_selection();
+                }
+            }
+        ));
+        grid_view.add_controller(clear_click);
+
         // Enter / double-click opens the viewer at that image.
         grid_view.connect_activate(glib::clone!(
             #[weak(rename_to = window)]
@@ -461,6 +488,8 @@ impl VitrineWindow {
                     (true, Key::minus | Key::KP_Subtract) => window.change_icon(-1),
                     (true, Key::_0 | Key::KP_0) => window.reset_icon(),
                     (_, Key::Delete) => window.delete_or_remove_selection(),
+                    // The keyboard route to "select nothing".
+                    (_, Key::Escape) => window.clear_selection(),
                     (_, Key::space | Key::KP_Space) => window.preview_selected(),
                     // Number keys rate the selection (no zoom in the grid, so 0–5
                     // are free); 0 clears.
@@ -1849,12 +1878,11 @@ impl VitrineWindow {
             self.build_duplicates_page();
         }
         self.refresh_duplicates();
-        if imp.nav_view.find_page("duplicates").is_none() {
-            if let Some(page) = imp.duplicates_page.borrow().as_ref() {
-                imp.nav_view.push(page);
-            }
-        } else {
+        // Same stack-vs-pool distinction as the viewer — see `nav_stack_contains`.
+        if self.nav_stack_contains("duplicates") {
             imp.nav_view.pop_to_tag("duplicates");
+        } else if let Some(page) = imp.duplicates_page.borrow().as_ref() {
+            imp.nav_view.push(page);
         }
     }
 
@@ -2240,15 +2268,28 @@ impl VitrineWindow {
             ));
             row.add_controller(menu);
 
-            // Drag an image from the grid onto a catalog to add it.
+            // Drag an image onto a catalog to add it — from the grid (which
+            // carries a content hash) or from a file manager (which carries a
+            // file list). Both are declared, or the external drop is refused on
+            // type alone and the handler never runs.
             if is_catalog {
-                let drop = gtk::DropTarget::new(String::static_type(), gtk::gdk::DragAction::COPY);
+                let drop = gtk::DropTarget::new(glib::Type::INVALID, gtk::gdk::DragAction::COPY);
+                drop.set_types(&[gtk::gdk::FileList::static_type(), String::static_type()]);
                 drop.connect_drop(glib::clone!(
                     #[weak(rename_to = window)]
                     self,
                     #[upgrade_or]
                     false,
                     move |_, value, _, _| {
+                        // External drop (Nautilus &c): resolve paths through the
+                        // index, since a catalog holds content hashes, not paths.
+                        if let Ok(list) = value.get::<gtk::gdk::FileList>() {
+                            let files = list.files();
+                            crate::debug::drop_event("catalog", "files", files.len());
+                            window.add_dropped_files_to_catalog(id, files);
+                            return true;
+                        }
+
                         let Ok(hash) = value.get::<String>() else {
                             crate::debug::drop_event("catalog", "unhandled", 0);
                             return false;
@@ -2526,6 +2567,105 @@ impl VitrineWindow {
         }
     }
 
+    /// Drop the whole selection (Escape, or a click on empty grid background).
+    fn clear_selection(&self) {
+        if let Some(selection) = self.imp().selection.borrow().as_ref() {
+            selection.unselect_all();
+        }
+    }
+
+    /// Resolve dropped files to indexed content hashes, then add them to catalog
+    /// `id`.
+    ///
+    /// Matching on path alone is not enough. A folder opened through the
+    /// file-chooser portal is indexed under an opaque `/run/user/…/doc/…` path,
+    /// while a file manager hands over the same file's *real* path — so the two
+    /// strings differ for identical bytes and a path lookup misses. Paths that
+    /// miss therefore fall back to hashing the file, which is what the index is
+    /// keyed on in the first place.
+    ///
+    /// Hashing is I/O over whole files, so the whole resolution runs off the main
+    /// thread and the catalog write follows when it lands.
+    fn add_dropped_files_to_catalog(&self, id: i64, files: Vec<gio::File>) {
+        let paths: Vec<std::path::PathBuf> = files.iter().filter_map(|file| file.path()).collect();
+        if paths.is_empty() {
+            return;
+        }
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let resolved = gio::spawn_blocking(move || {
+                    // Own connection: this runs off the main thread, so it cannot
+                    // borrow the window's read handle.
+                    let Ok(db) = Db::open(crate::index::index_db_path()) else {
+                        return (Vec::new(), 0usize);
+                    };
+                    // Expand a dropped folder one level — dropping a folder out of
+                    // a file manager is the same gesture as dropping its contents.
+                    let mut candidates = Vec::new();
+                    for path in paths {
+                        if path.is_dir() {
+                            if let Ok(entries) = std::fs::read_dir(&path) {
+                                candidates.extend(
+                                    entries.flatten().map(|e| e.path()).filter(|p| p.is_file()),
+                                );
+                            }
+                        } else {
+                            candidates.push(path);
+                        }
+                    }
+
+                    let seen = candidates.len();
+                    let mut hashes: Vec<String> = Vec::new();
+                    for path in candidates {
+                        let name = path.to_string_lossy();
+                        let hash = match db.file_by_path(&name) {
+                            Ok(Some(record)) if !record.content_hash.is_empty() => {
+                                Some(record.content_hash)
+                            }
+                            // Path unknown: hash the bytes and see whether the
+                            // index already holds this content under another path.
+                            _ => vitrine_engine::blake3_file(&path).ok().filter(|hash| {
+                                db.files_by_hash(hash)
+                                    .map(|files| files.iter().any(|f| !f.missing))
+                                    .unwrap_or(false)
+                            }),
+                        };
+                        if let Some(hash) = hash {
+                            if !hashes.contains(&hash) {
+                                hashes.push(hash);
+                            }
+                        }
+                    }
+                    (hashes, seen)
+                })
+                .await;
+
+                let (hashes, seen) = resolved.unwrap_or_default();
+                crate::debug::drop_event("catalog", "files-resolved", hashes.len());
+                if hashes.is_empty() {
+                    window.toast("Nothing added — drop images from a folder Vitrine has indexed");
+                    return;
+                }
+                let accepted = match window.imp().indexer.borrow().as_ref() {
+                    Some(indexer) => indexer.annotator().add_to_catalog(id, &hashes),
+                    None => false,
+                };
+                window.toast(&if !accepted {
+                    "Couldn’t add — the index writer isn’t running".to_string()
+                } else {
+                    let n = hashes.len();
+                    match seen.saturating_sub(n) {
+                        0 => format!("Added {n} to catalog"),
+                        skipped => format!("Added {n} to catalog ({skipped} not indexed)"),
+                    }
+                });
+            }
+        ));
+    }
+
     /// The id of the catalog currently being browsed, if any.
     ///
     /// Only catalogs qualify: a smart collection's membership is derived from its
@@ -2654,11 +2794,26 @@ impl VitrineWindow {
         }
         let Some(model) = self.model() else { return };
         viewer.open(model.upcast(), position, imp.thumb_cache.clone());
-        if imp.nav_view.find_page("viewer").is_none() {
-            imp.nav_view.push(&viewer);
-        } else {
+        if self.nav_stack_contains("viewer") {
             imp.nav_view.pop_to_tag("viewer");
+        } else {
+            imp.nav_view.push(&viewer);
         }
+    }
+
+    /// Whether a tagged page is on the navigation stack *right now*.
+    ///
+    /// `find_page()` also resolves pages the view is merely holding a reference
+    /// to, so branching on it can send `pop_to_tag()` after a page has already
+    /// been popped — which is where the recurring
+    /// `Page 'Viewer' is not in the navigation stack` CRITICAL came from. The
+    /// stack model is the only thing `pop_to_tag()` actually looks at.
+    fn nav_stack_contains(&self, tag: &str) -> bool {
+        let stack = self.imp().nav_view.navigation_stack();
+        (0..stack.n_items())
+            .filter_map(|i| stack.item(i))
+            .filter_map(|page| page.downcast::<adw::NavigationPage>().ok())
+            .any(|page| page.tag().is_some_and(|t| t == tag))
     }
 
     fn setup_actions(&self) {
@@ -2889,7 +3044,20 @@ impl VitrineWindow {
                     indexer.start_enrichment(|| {});
                 }
             }
-            IndexProgress::CollectionsChanged => self.refresh_collections(),
+            IndexProgress::CollectionsChanged { gained } => {
+                self.refresh_collections();
+                // A collection view is a snapshot taken when it was opened, so a
+                // catalog that just gained members has to be rebuilt while it is
+                // on screen — otherwise a drop lands in the index but not in the
+                // grid, and only shows up after leaving and returning.
+                if let (Some(gained), Some(Location::Collection(open))) =
+                    (gained, self.imp().current_location.borrow().clone())
+                {
+                    if gained == open {
+                        self.open_collection(open);
+                    }
+                }
+            }
         }
     }
 

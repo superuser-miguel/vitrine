@@ -217,7 +217,96 @@ twice per interaction. Needs a probe to close.
 
 ## Tier 3 — UI/UX. Observed in use.
 
-### V-08 · Nautilus → Collection never wired · `CONFIRMED`
+### V-18 · No gesture clears a selection · `CONFIRMED` · **FIXED (untested)**
+
+`GtkGridView` only clears a selection when another item is picked, so a
+multi-selection could only be undone by selecting a single image — there was no
+"select nothing" gesture at all. Added two: a click on empty grid background
+(hit-tested with `pick()` against `VitrineGridCell`, so item clicks are
+unaffected) and Escape.
+
+### V-19 · Portal document paths split the index in two · `MEASURED` · **worked around, root issue open**
+
+The index holds the same content under two unrelated path families:
+
+| path prefix | files |
+|-------------|-------|
+| `/home/definitive_group/Pictures/…` | 78,817 |
+| `/run/user/1000/doc/…` (portal documents) | ~114,000 |
+
+17,050 hashes appear under **both**. Folders opened through the file-chooser
+portal are indexed under opaque per-session document paths; the same file's real
+path is a different string, so anything matching on path misses.
+
+This is what made V-08 return `items=0`. Content-hash resolution works around it
+there, and hashing is what keeps tags stable across this split — but every future
+path-matching feature will hit it.
+
+**Why the content hash is not itself the fix.** Annotations key on
+`content_hash` and are correct already — that layer has no bug. But `files.path`
+is `UNIQUE`, so `files` is keyed by *path*: one image reached two ways is two
+rows, and anything counting rows double-counts. The hash says *the bytes are
+identical*; it cannot say whether that is one file seen twice or two real copies
+— and telling those apart is exactly what the Duplicates feature exists for. So
+`files` cannot simply be collapsed on `content_hash`. Two questions, two keys:
+`content_hash` answers "same content?", a resolved host path answers "same file?".
+
+**Partial fix 2026-07-20:** `all_tags()` now counts `DISTINCT f.content_hash`, so
+tag counts stopped double-counting (Ashley Trevort 15 → 7). Free, and no schema
+change. It does **not** touch the row duplication: 41,727 hashes still hold
+multiple present rows, so the Duplicates feature still reports them.
+
+**Do not run dedup on this library yet.** The dedup card offers "Trash the other
+copy". For a portal/real pair those may be the same bytes on disk, so trashing
+the "copy" could delete the file the kept row points at. Unverified — the FUSE
+mount is not statable from outside the sandbox — but it is the same shape as
+V-01 and should be checked before that feature is used at scale.
+
+**Open decision.** `--filesystem=home` was considered and **rejected**: portals-first
+is how a Flatpak should behave, and it matters more once helper binaries
+(ImageMagick, ffmpeg) ship as runtime extensions — a wide home grant would extend
+to them. The remaining proposal is a `host_path` column resolved via
+`org.freedesktop.portal.Documents.Info()` (`ashpd` is already earmarked in
+`vitrine-app/Cargo.toml` for the extra-roots chooser), unique so upsert dedupes,
+plus a migration collapsing the existing 17,050 pairs. `path` keeps its current
+meaning — the path the sandbox can actually open — so nothing breaks. Bonus: the
+Properties card could show a real folder instead of `/run/user/1000/doc/…`.
+
+### V-20 · A collection view doesn't refresh when it gains members · `CONFIRMED` · **FIXED (untested)**
+
+Dropping onto the catalog you are currently viewing wrote to the index but left
+the grid alone — the images only appeared after navigating away and back. A
+collection view is a snapshot built by `open_collection()`; `CollectionsChanged`
+only refreshed the **sidebar list**, never the grid.
+
+> **Fixed 2026-07-20.** `CollectionsChanged` now carries `gained: Option<i64>`,
+> set only by `AddToCatalog`. If the catalog that gained members is the one on
+> screen, the grid reloads.
+>
+> Removals deliberately do *not* set it: `remove_selection_from_catalog` already
+> drops those rows from the grid, so reloading would re-query the whole collection
+> to learn what the UI knows — and discard the scroll position doing it. Dropping
+> into catalog B while viewing catalog A correctly leaves A alone.
+
+### V-08 · Nautilus → Collection never wired · `CONFIRMED` · **FIXED**
+
+> **2026-07-20, two rounds.** First fix declared both `FileList` and `String` on
+> the catalog row, so external drops reached the handler. The probe then showed
+> `VDBG-DROP payload=files items=0` — accepted, but nothing resolved, because
+> resolution matched on **path** and the dropped real path does not match the
+> portal path the file was indexed under (see V-19).
+>
+> Second fix resolves on **content hash**: path lookup first, and any miss falls
+> back to hashing the file and checking whether the index holds that content under
+> another path. Whole-file I/O, so it runs off the main thread via
+> `spawn_blocking` — a large drop cannot freeze the UI.
+>
+> Verified against the live index on the exact failing case
+> (`~/Inkscape_Projects/Screenshot from 2024-12-20 10-39-44.svg`, indexed only
+> under `/run/user/1000/doc/…`): `path_hit=false`, hash `55ca8ba74b42…` matches
+> the portal row, `present_rows=1`. Path-only resolution returned nothing;
+> hash resolution finds it.
+
 
 `window.rs:2242`: `gtk::DropTarget::new(String::static_type(), COPY)` — accepts
 `String` only. Nautilus delivers `GdkFileList` / `text/uri-list`, so the type never
@@ -230,7 +319,19 @@ drops for bookmarking.
 Not a bug — unimplemented. Needs: accept `FileList`, resolve path → `content_hash`
 via the read DB (**no such query exists yet**), then `add_to_catalog`.
 
-### V-09 · No remove-tag flow · `CONFIRMED`
+### V-09 · No remove-tag flow · `CONFIRMED` · **FIXED (untested)**
+
+> **2026-07-20.** Landed as a **Tags group in the viewer's properties card**
+> rather than a modifier-click in the grid popover, which draws a cleaner split:
+> the popover tags a **selection** (bulk), the card shows **one image** — the
+> context where removal is the obvious affordance. An "Add a tag" entry row plus
+> a chip cloud; each chip is a pill with an × that removes that tag.
+>
+> Cheap because the viewer already held `annotator` and `read_db` for the
+> rating/comment rows. Chips update **optimistically** — writes queue on the
+> writer thread, so re-reading the index immediately would show the pre-edit
+> state and flicker. If the writer is gone the chip is not added at all.
+
 
 `Annotator::tag(name, hashes, add)` already takes an `add: bool` and the worker
 handles `false` → `db.remove_tag(...)`. The UI only ever passes `true`
@@ -263,7 +364,20 @@ thumbnails in the sidebar.
 
 ## Tier 4 — Open questions.
 
-### V-15 · `Adwaita-CRITICAL: Page 'Viewer' is not in the navigation stack` · `OBSERVED`
+### V-15 · `Adwaita-CRITICAL: Page 'Viewer' is not in the navigation stack` · `CONFIRMED` · **FIXED (untested)**
+
+> **Root cause found 2026-07-20.** `window.rs:2727` branched on
+> `nav_view.find_page("viewer")`, but `find_page()` also resolves pages the view
+> merely holds a reference to — not only those on the stack. After the viewer was
+> popped (which `load_folder` does deliberately when a folder is opened from the
+> viewer), `find_page` still found it, so the `else` branch fired `pop_to_tag()`
+> for a page that was not there. That is why the CRITICAL clustered around
+> folder switching.
+>
+> Replaced with `nav_stack_contains()`, which walks the actual navigation stack —
+> the only thing `pop_to_tag()` consults. The Duplicates page carried the
+> identical latent bug and was fixed with it.
+
 
 Recurs across several runs (23:00–23:11 cluster). Navigation state is getting out of
 sync with the nav view. Unrelated to the above as far as I can tell, but it is a

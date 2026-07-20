@@ -28,10 +28,15 @@ impl Db {
     }
 
     /// All tags with their usage counts (present files only), ordered by name.
+    ///
+    /// Counts **distinct content hashes**, not file rows. One image can hold more
+    /// than one row in `files` — the same file reached through a portal document
+    /// path and through a directly-granted root is indexed under both names — and
+    /// counting rows made a 7-image tag report 15.
     pub fn all_tags(&self) -> rusqlite::Result<Vec<Tag>> {
         let mut stmt = self.conn().prepare(
             "SELECT t.id, t.name,
-                    (SELECT count(*) FROM file_tags ft
+                    (SELECT count(DISTINCT f.content_hash) FROM file_tags ft
                      JOIN files f ON f.content_hash = ft.content_hash AND f.missing = 0
                      WHERE ft.tag_id = t.id) AS cnt
              FROM tags t
@@ -250,6 +255,32 @@ mod tests {
             .find(|t| t.name == "car")
             .unwrap();
         assert_eq!(car.count, 1, "only the present file counts");
+    }
+
+    #[test]
+    fn counts_are_images_not_file_rows() {
+        // One image can hold several rows in `files`: a folder opened through the
+        // document portal is indexed under an opaque /run/user/…/doc/… path while
+        // the same file under a directly-granted root keeps its real path. Both
+        // rows carry the same content hash, so counting rows double-counts the
+        // image — a 7-image tag reported 15 against the real library.
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "INSERT INTO files(path,content_hash,size,mtime,indexed_at,missing) VALUES
+                 ('/home/u/Pictures/a.jpg','h1',1,1,1,0),
+                 ('/run/user/1000/doc/abc/a.jpg','h1',1,1,1,0),
+                 ('/home/u/Pictures/b.jpg','h2',1,1,1,0);",
+            )
+            .unwrap();
+        db.apply_tag("trip", &hashes(&["h1", "h2"])).unwrap();
+        let trip = db
+            .all_tags()
+            .unwrap()
+            .into_iter()
+            .find(|t| t.name == "trip")
+            .unwrap();
+        assert_eq!(trip.count, 2, "two images, even though three file rows");
     }
 
     #[test]

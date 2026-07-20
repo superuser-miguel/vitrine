@@ -44,7 +44,14 @@ pub enum IndexProgress {
     /// The current scan finished; `added` new/changed rows were written.
     Finished { added: usize },
     /// A collection was created/changed — the sidebar should refresh.
-    CollectionsChanged,
+    ///
+    /// `gained` names a catalog that just took on new members. A collection view
+    /// is a snapshot built at open time, so if that catalog is the one on screen
+    /// it has to be reloaded — otherwise a drop lands in the index but not in the
+    /// grid, and the images only appear after leaving and coming back. Removals
+    /// don't set it: the UI drops those rows itself, and reloading a large
+    /// collection to learn what it already knows is wasted work.
+    CollectionsChanged { gained: Option<i64> },
 }
 
 /// Messages to the writer thread (which owns the one `Db`). Identity scans,
@@ -434,7 +441,8 @@ fn worker(
                 });
                 match r {
                     Ok(()) => {
-                        let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                        let _ =
+                            progress.try_send(IndexProgress::CollectionsChanged { gained: None });
                     }
                     Err(e) => glib::g_warning!("vitrine", "create catalog {name}: {e}"),
                 }
@@ -442,28 +450,31 @@ fn worker(
             Request::CreateSmartCollection { name, query } => {
                 match db.create_smart_collection(&name, &query) {
                     Ok(_) => {
-                        let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                        let _ =
+                            progress.try_send(IndexProgress::CollectionsChanged { gained: None });
                     }
                     Err(e) => glib::g_warning!("vitrine", "create smart collection {name}: {e}"),
                 }
             }
             Request::AddToCatalog { id, hashes } => match db.add_to_catalog(id, &hashes) {
                 Ok(()) => {
-                    let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                    let _ =
+                        progress.try_send(IndexProgress::CollectionsChanged { gained: Some(id) });
                 }
                 Err(e) => glib::g_warning!("vitrine", "add to catalog {id}: {e}"),
             },
             Request::RemoveFromCatalog { id, hashes } => {
                 match db.remove_from_catalog(id, &hashes) {
                     Ok(()) => {
-                        let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                        let _ =
+                            progress.try_send(IndexProgress::CollectionsChanged { gained: None });
                     }
                     Err(e) => glib::g_warning!("vitrine", "remove from catalog {id}: {e}"),
                 }
             }
             Request::DeleteCollection { id } => match db.delete_collection(id) {
                 Ok(()) => {
-                    let _ = progress.try_send(IndexProgress::CollectionsChanged);
+                    let _ = progress.try_send(IndexProgress::CollectionsChanged { gained: None });
                 }
                 Err(e) => glib::g_warning!("vitrine", "delete collection {id}: {e}"),
             },

@@ -295,6 +295,28 @@ template $VitrineViewer: Adw.NavigationPage {
           }
         }
 
+        // Tags for the shown image. The grid's tag popover applies a tag to a
+        // whole selection; this is the per-image view — what is on *this* file,
+        // and the only place a tag can be taken back off.
+        Adw.PreferencesGroup {
+          title: _("Tags");
+
+          Adw.EntryRow tag_add_row {
+            title: _("Add a tag");
+            show-apply-button: true;
+          }
+
+          Gtk.FlowBox tag_chips {
+            selection-mode: none;
+            column-spacing: 6;
+            row-spacing: 6;
+            margin-top: 6;
+            min-children-per-line: 1;
+            max-children-per-line: 6;
+            homogeneous: false;
+          }
+        }
+
         Adw.PreferencesGroup {
           title: _("Properties");
 

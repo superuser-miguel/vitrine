@@ -127,6 +127,10 @@ mod imp {
         #[template_child]
         pub comment_row: TemplateChild<adw::EntryRow>,
         #[template_child]
+        pub tag_add_row: TemplateChild<adw::EntryRow>,
+        #[template_child]
+        pub tag_chips: TemplateChild<gtk::FlowBox>,
+        #[template_child]
         pub meta_name_row: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub meta_folder_row: TemplateChild<adw::ActionRow>,
@@ -150,6 +154,10 @@ mod imp {
         pub annotator: RefCell<Option<Annotator>>,
         /// The shown image's content hash (annotation key), if it's indexed.
         pub current_hash: RefCell<Option<String>>,
+        /// Tags on the shown image, kept in sync optimistically: annotation
+        /// writes are queued on the writer thread, so re-reading the index right
+        /// after an edit would show the pre-edit state.
+        pub current_tags: RefCell<Vec<String>>,
         /// The five rating star buttons, built in `setup_review`.
         pub stars: RefCell<Vec<gtk::Button>>,
         /// The rating currently shown (0–5).
@@ -232,6 +240,8 @@ mod imp {
                 info_split: Default::default(),
                 rating_box: Default::default(),
                 comment_row: Default::default(),
+                tag_add_row: Default::default(),
+                tag_chips: Default::default(),
                 meta_name_row: Default::default(),
                 meta_folder_row: Default::default(),
                 meta_dimensions_row: Default::default(),
@@ -243,6 +253,7 @@ mod imp {
                 read_db: RefCell::new(None),
                 annotator: RefCell::new(None),
                 current_hash: RefCell::new(None),
+                current_tags: RefCell::new(Vec::new()),
                 stars: RefCell::new(Vec::new()),
                 rating: Cell::new(0),
                 setting_comment: Cell::new(false),
@@ -288,6 +299,7 @@ mod imp {
             obj.setup_filmstrip();
             obj.setup_controls();
             obj.setup_review();
+            obj.setup_tags();
         }
     }
 
@@ -1674,6 +1686,119 @@ impl VitrineViewer {
         ));
     }
 
+    // --- tags ----------------------------------------------------------------
+
+    /// Wire the "add a tag" row (once, at construct).
+    fn setup_tags(&self) {
+        self.imp().tag_add_row.connect_apply(glib::clone!(
+            #[weak(rename_to = viewer)]
+            self,
+            move |row| {
+                let name = row.text().trim().to_string();
+                row.set_text("");
+                if !name.is_empty() {
+                    viewer.add_tag(&name);
+                }
+            }
+        ));
+    }
+
+    /// Put `name` on the shown image.
+    fn add_tag(&self, name: &str) {
+        let imp = self.imp();
+        let Some(hash) = imp.current_hash.borrow().clone() else {
+            return;
+        };
+        // Tag names are unique case-insensitively in the index; mirror that here
+        // so re-adding an existing tag doesn't produce a duplicate chip.
+        if imp
+            .current_tags
+            .borrow()
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(name))
+        {
+            return;
+        }
+        let Some(annotator) = imp.annotator.borrow().clone() else {
+            return;
+        };
+        if !annotator.tag(name, &[hash], true) {
+            return; // writer thread gone — don't show a tag that won't persist
+        }
+        crate::debug::tag_action("add", name, 1);
+        {
+            let mut tags = imp.current_tags.borrow_mut();
+            tags.push(name.to_string());
+            tags.sort_by_key(|t| t.to_lowercase());
+        }
+        self.render_tag_chips();
+    }
+
+    /// Take `name` off the shown image — the only place a tag can be removed.
+    fn remove_tag(&self, name: &str) {
+        let imp = self.imp();
+        let Some(hash) = imp.current_hash.borrow().clone() else {
+            return;
+        };
+        let Some(annotator) = imp.annotator.borrow().clone() else {
+            return;
+        };
+        if !annotator.tag(name, &[hash], false) {
+            return;
+        }
+        crate::debug::tag_action("remove", name, 1);
+        imp.current_tags
+            .borrow_mut()
+            .retain(|t| !t.eq_ignore_ascii_case(name));
+        self.render_tag_chips();
+    }
+
+    /// Rebuild the chip cloud from `current_tags`. Each chip removes its own tag.
+    fn render_tag_chips(&self) {
+        let flowbox = &self.imp().tag_chips;
+        while let Some(child) = flowbox.first_child() {
+            flowbox.remove(&child);
+        }
+        for name in self.imp().current_tags.borrow().iter() {
+            let content = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+            content.append(&gtk::Label::new(Some(name)));
+            content.append(&gtk::Image::from_icon_name("window-close-symbolic"));
+
+            let chip = gtk::Button::builder()
+                .child(&content)
+                .css_classes(["pill"])
+                .tooltip_text(format!("{} “{name}”", gettextrs::gettext("Remove tag")))
+                .build();
+            chip.connect_clicked(glib::clone!(
+                #[weak(rename_to = viewer)]
+                self,
+                #[strong]
+                name,
+                move |_| viewer.remove_tag(&name)
+            ));
+            flowbox.insert(&chip, -1);
+        }
+    }
+
+    /// Load the shown image's tags from the index.
+    fn update_tags(&self, hash: Option<&String>) {
+        let imp = self.imp();
+        let tags = match hash {
+            Some(hash) => {
+                self.ensure_read_db();
+                let db = imp.read_db.borrow();
+                db.as_ref()
+                    .and_then(|db| db.tags_for_hash(hash).ok())
+                    .unwrap_or_default()
+            }
+            None => Vec::new(),
+        };
+        *imp.current_tags.borrow_mut() = tags;
+        self.render_tag_chips();
+        // No content hash (file not indexed yet) → nothing to key a tag to.
+        imp.tag_add_row.set_sensitive(hash.is_some());
+    }
+
     /// Load the review controls for the shown image from the index.
     fn update_review(&self, record: Option<&FileRecord>) {
         let imp = self.imp();
@@ -1694,6 +1819,8 @@ impl VitrineViewer {
         imp.setting_comment.set(true);
         imp.comment_row.set_text(&comment);
         imp.setting_comment.set(false);
+
+        self.update_tags(hash.as_ref());
 
         // No content hash (file not indexed yet) → nothing to key annotations to.
         let enabled = hash.is_some();
