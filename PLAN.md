@@ -578,6 +578,10 @@ path-based tag rules (activates `source='rule'`); Lua/Rhai scripting tier — in
 rules; batch rename/convert/rotate; "find similar" UI over the already-indexed pHash; WASM
 plugin tier with Flatpak `add-extension`; editing tools; device import; slideshow.
 
+> **2026-07-21:** the scripting/plugin/helper items above are no longer merely
+> deferred — the seam is **decided and phased in §16** (Lua via mlua; WASM
+> later; helpers as Flatpak extensions; the Magick window).
+
 ---
 
 ## 10. v2+ feature drafts (design intent — refine before building)
@@ -1299,3 +1303,147 @@ structural fix (a `host_path` column resolved via the Documents portal) waits.
 presenting each copy's *location* — a real duplicate means the same images stored
 in different places, which is a user-storage question the portal doesn't fully
 capture. Low priority for now. Full analysis: `Troubleshoot/ISSUES.md` V-19.
+
+> **2026-07-21 update:** doc-ID reuse and portal-trash behaviour both measured
+> (V-19 updates in the register); dedup is now scoped to the open folder and
+> trash reports results (V-22). The deferral of `host_path` stands, comfortably.
+
+---
+
+## 16. The extension seam — decided (2026-07-21)
+
+§10.3/§10.5 investigated the extension tiers; this section **decides** them, so
+a build session starts from a contract instead of a debate. It exists because
+the deferrals have been accumulating against it by name: advanced sorts
+(§10.3.1), batch ops (§10.3.2), volume-aware dedup scope (ISSUES decision,
+2026-07-20), custom similarity metrics (§10.5.1). House rules apply throughout —
+especially 2 (engine stays UI-free), 3 (never link C++ — helpers are
+subprocesses), 4 (portals-first) and 6 (nothing blocks the main loop).
+
+### 16.1 Decisions (locked)
+
+1. **Scripting engine: Lua via `mlua` (Lua 5.4, vendored).** Rhai is dropped:
+   smaller user ecosystem, and its one advantage (pure Rust) is neutralised by
+   mlua's vendored build (house rule 5 unaffected). Lua is what ImageMagick
+   users already know, which matters because Magick recipes are a first-class
+   use case (§16.4).
+2. **Plugin engine: WASM via `wasmtime`, deferred** until a compute use case is
+   scheduled (auto-tagging or embeddings, §10.5.1). Nothing in the seam may
+   preclude it: the host API is defined engine-agnostically so a WASM plugin
+   sees the same contract a Lua script does.
+3. **Helper binaries ship as Flatpak extensions, never sandbox widenings.** An
+   `add-extensions` point `io.github.superuser_miguel.Vitrine.Helper`
+   (`subdirectories: true`, no-autodownload), mounted under `/app/helpers/<id>/`.
+   ImageMagick is the first helper package (`…Vitrine.Helper.magick` — we build
+   it; no freedesktop extension exists for it). ffmpeg later can follow the
+   established `org.freedesktop.Platform.ffmpeg-full` pattern instead. Core
+   detects presence at startup and lights features up; absence degrades to the
+   feature not appearing, never to an error dialog.
+4. **Scripts are data, not packages.** Lua scripts live in the app's data dir
+   (`~/.var/app/…/data/vitrine/scripts/`), hot-reloaded on change, no restart.
+   A script is one file with a declared `manifest` table + functions. WASM
+   plugins, when they come, are the opposite: packaged, versioned, capability-
+   gated — that split is the whole point of having two tiers.
+
+### 16.2 The host API contract (the actual seam)
+
+One versioned table, `vitrine` (with `vitrine.api_version = 1`), passed into
+every script. The sandbox is subtractive: scripts get a fresh environment with
+`os`, `io`, `require`, `load`, `dofile` removed — the API table is the world.
+
+**Read side (pure, memoized-friendly):**
+- `item` facts as plain tables: `name`, `path`, `size`, `mtime`, `width`,
+  `height`, `date_taken`, `camera`, `orientation`, `rating`, `tags`,
+  `content_hash` — exactly the §10.3.1 list; nothing that requires I/O at call
+  time. Paths are display-honest (`scope_display` semantics available).
+- `vitrine.query{ under=, tag=, min_rating=, … }` — a thin veil over
+  `vitrine_engine::Query`. **No raw SQL, ever** — the schema is not API.
+
+**Write side (queued, honest):**
+- `vitrine.tag(hashes, name, add)`, `vitrine.rate(hashes, n)` — routed through
+  the existing `Annotator` queue. Scripts inherit the V-02/V-03 semantics:
+  the call returns *accepted*, not *committed*, and the API docs say so.
+- No direct file writes. File-producing operations go through §16.3 batch
+  declarations, which the *host* executes (progress, cancellation, per-file
+  results — the V-22 lesson is host code, not script code).
+
+**Providers (registration, not execution):**
+- `vitrine.register_sort{ name=, key=fn(item) }` — §10.3.1 verbatim: key
+  function, computed once per item, memoized; comparator stays native.
+- `vitrine.register_batch{ name=, params=, run=… }` — §16.3.
+- `vitrine.register_filter{ name=, params=, args=fn(params) }` — §16.4.
+
+**Never available:** filesystem, network, subprocess spawning, blocking the
+main loop (scripts run on a worker; the key-function path memoizes so sort
+stays off the hot comparator), or anything that can hold a DB handle.
+
+### 16.3 Batch operations (mogrify-shaped)
+
+A batch declaration names its params (typed: float/int/enum/bool → the host
+renders controls), a **destination policy** (`in_place | suffix | subfolder` —
+chosen by the *user* in the run dialog, defaulting to `subfolder`), and an
+args-builder `fn(params, file) -> [argv]` for a helper binary. The host:
+
+1. resolves the helper from the extension point (absent → feature hidden);
+2. runs per-file subprocesses off-thread with progress + cancel;
+3. for `in_place`, snapshots originals via `vitrine-engine::backup` first;
+4. reports per-file results honestly (toast totals from *outcomes*, V-22);
+5. re-indexes touched files (mtime change → rescan of the affected paths).
+
+### 16.4 The Magick window (the payoff feature)
+
+A parametric edit surface: pick images → open **Process** view → choose a
+filter recipe → sliders/knobs appear from its declared params → live preview →
+apply to the batch. The design constraints all come from lessons already paid
+for:
+
+- **Recipes are Lua filter registrations** (§16.2): a recipe maps params to
+  `magick` argv (e.g. `modulate = { brightness=slider(0..200) } → ["-modulate",
+  "%d"]`). The host owns the UI; scripts never touch widgets. Shipping a
+  starter set (modulate, blur/sharpen, levels, grayscale, watermark, format
+  convert) makes the window useful with zero user scripting.
+- **Preview on a proxy, never the original.** The preview pipeline runs the
+  recipe on a downscaled proxy (~1024px, cached per image) so a slider drag is
+  a subsecond subprocess, debounced like the thumbnail scheduler (§13
+  discipline: bounded in-flight, latest-wins per image).
+- **The edit-tier lesson is law** (Status §, 2026-07-18): a slider changes the
+  *preview only*. Committing is an explicit Apply with the §16.3 destination
+  policy + backup path. No silent destructive writes, no exceptions.
+- **Batch apply = the same recipe over the selection** through §16.3 — one
+  progress surface, per-file outcomes, honest totals.
+
+### 16.5 What moves out of core / what stays
+
+**Out (extension territory, stop building in core):** sort orders beyond the
+built-ins; rename rules; batch file ops; volume/intent-aware dedup scoping;
+custom similarity metrics; aesthetic/quality scoring.
+
+**Stays in core:** the query engine and **global search (V-11)** — search is
+infrastructure extensions build *on*, FTS5 when it needs scale; Date Taken
+sort (a built-in fact, blocked only on the enrichment callback, V-12);
+Find Duplicates' current exact/pHash clustering; everything indexing.
+
+### 16.6 Phases & acceptance
+
+- **E0 — seam freeze.** This section reviewed + merged; `vitrine.api_version`
+  semantics written into `docs/` for script authors. *Acceptance: none of
+  E1–E3 requires a contract change (additions fine).*
+- **E1 — Lua host + sort providers.** mlua embedded (engine-free: the host
+  lives in `vitrine-app`, house rule 2); sandboxed env; hot reload;
+  `register_sort` wired into the Sort By menu. *Acceptance: a natural-sort
+  script orders `img_2 < img_10` on a 10k folder with no measurable stall
+  regression (§13 numbers); editing the script re-sorts without restart;
+  a script error surfaces as a toast naming the script, never a crash.*
+- **E2 — helper extension point + batches.** Manifest `add-extensions`;
+  `…Helper.magick` package builds offline (house rule 5); `register_batch` +
+  run dialog with destination policy, progress, cancel; backup-first for
+  in-place. *Acceptance: a format-convert batch over 100 files runs off-thread,
+  reports per-file failures honestly, and a magick-less install simply doesn't
+  show the menu item.*
+- **E3 — the Magick window.** Process view, param-driven controls, proxy
+  preview, Apply via E2 machinery; starter recipe set. *Acceptance: slider drag
+  previews in <1s on the proxy; Apply never touches originals without the
+  chosen policy + backup; cancelling mid-batch leaves a coherent, reported
+  state.*
+- **E4 — WASM tier.** Unchanged from §10.5, scheduled only when auto-tagging
+  or embeddings is committed to.
