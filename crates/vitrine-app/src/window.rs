@@ -186,6 +186,12 @@ mod imp {
         pub current_location: RefCell<Option<Location>>,
         /// True while navigating via Back/Forward, so it doesn't re-record history.
         pub navigating_back: Cell<bool>,
+        /// True between a scan's Started and Finished. Items only carry a
+        /// content hash once they are indexed, so this is what separates
+        /// "nothing selected" from "not indexed *yet*" in user-facing messages.
+        pub scanning: Cell<bool>,
+        /// Throttle for progressive re-stamping during a long scan.
+        pub last_restamp: Cell<Option<std::time::Instant>>,
         /// The lazily-built "Duplicates" page + its content box (rebuilt per scan).
         pub duplicates_page: RefCell<Option<adw::NavigationPage>>,
         pub duplicates_content: RefCell<Option<gtk::Box>>,
@@ -294,6 +300,8 @@ mod imp {
                 forward: RefCell::new(Vec::new()),
                 current_location: RefCell::new(None),
                 navigating_back: Cell::new(false),
+                scanning: Cell::new(false),
+                last_restamp: Cell::new(None),
                 duplicates_page: RefCell::new(None),
                 duplicates_content: RefCell::new(None),
                 dedup_near: Cell::new(false),
@@ -1149,7 +1157,7 @@ impl VitrineWindow {
         let hashes = self.selected_hashes();
         crate::debug::tag_action("add", name, hashes.len());
         if hashes.is_empty() {
-            self.toast("Select one or more indexed images to tag");
+            self.toast(&self.no_hashes_message("tag"));
             return;
         }
         let accepted = match self.imp().indexer.borrow().as_ref() {
@@ -2611,7 +2619,7 @@ impl VitrineWindow {
                 move |_| {
                     let hashes = window.selected_hashes();
                     if hashes.is_empty() {
-                        window.toast("Select images to add");
+                        window.toast(&window.no_hashes_message("add"));
                     } else {
                         let accepted = match window.imp().indexer.borrow().as_ref() {
                             Some(indexer) => indexer.annotator().add_to_catalog(id, &hashes),
@@ -2797,6 +2805,24 @@ impl VitrineWindow {
         }
     }
 
+    /// Why a selection produced no content hashes.
+    ///
+    /// An item only carries a hash once the indexer has reached it, so during a
+    /// scan the grid is full of images that cannot yet be annotated. Saying
+    /// "select one or more indexed images" then is true but reads as *you picked
+    /// the wrong thing*, when the honest answer is *not yet*.
+    fn no_hashes_message(&self, verb: &str) -> String {
+        if self.imp().scanning.get() {
+            gettextrs::gettext("Still indexing this folder — it can be tagged once that finishes")
+        } else {
+            format!(
+                "{} {}",
+                gettextrs::gettext("Select one or more indexed images to"),
+                verb
+            )
+        }
+    }
+
     /// Drop the whole selection (Escape, or a click on empty grid background).
     fn clear_selection(&self) {
         if let Some(selection) = self.imp().selection.borrow().as_ref() {
@@ -2975,7 +3001,7 @@ impl VitrineWindow {
             .filter(|item| !item.content_hash().is_empty())
             .collect();
         if items.is_empty() {
-            self.toast("Select one or more indexed images to remove");
+            self.toast(&self.no_hashes_message("remove"));
             return;
         }
         let hashes: Vec<String> = items.iter().map(|item| item.content_hash()).collect();
@@ -3298,6 +3324,7 @@ impl VitrineWindow {
         let banner = &self.imp().index_banner;
         match msg {
             IndexProgress::Started { total } => {
+                self.imp().scanning.set(true);
                 if total > 0 {
                     banner.set_title(&gettextrs::gettext("Indexing library…"));
                     banner.set_revealed(true);
@@ -3308,8 +3335,25 @@ impl VitrineWindow {
                     "{} ({done} / {total})",
                     gettextrs::gettext("Indexing library…")
                 ));
+                // Stamp what has landed so far instead of waiting for the whole
+                // scan. A folder of a few thousand images on external storage
+                // takes minutes to hash, and until an item has its content hash
+                // it cannot be tagged or rated — so the grid would sit there
+                // looking ready while every annotation silently did nothing.
+                // Throttled, because each pass re-queries the folder subtree.
+                let imp = self.imp();
+                let due = imp
+                    .last_restamp
+                    .get()
+                    .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3));
+                if due {
+                    imp.last_restamp.set(Some(std::time::Instant::now()));
+                    self.restamp_store();
+                }
             }
             IndexProgress::Finished { .. } => {
+                self.imp().scanning.set(false);
+                self.imp().last_restamp.set(None);
                 banner.set_revealed(false);
                 // Identity rows exist now → stamp the grid's items with their
                 // content hash + rating (star overlays appear; keyboard rating
