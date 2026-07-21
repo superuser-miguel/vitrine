@@ -721,6 +721,31 @@ Closed this pass, from existing evidence: **eb0a701 VERIFIED** (worst stall
 landed, see entry); **V-04 FIXED (untested)** — user-priority queue +
 in-scan checkpoints, probe `VDBG-SCANYIELD`, see entry.
 
+> **Checklist run 2026-07-21, 12:16 session (rebuilt install, 684s, ~1,230
+> decodes, warm mode) — all green per the user, log concurs.**
+>
+> - **Health:** zero CRITICAL / panic / Gtk-WARNING; worst stall **153ms**
+>   across a session with edits, drags, catalog ops and deletes (eb0a701
+>   double-confirmed); 23/23 writes accepted, peak writer queue **1** — writes
+>   at t=183–189s (minutes into the session, while the launch rescan would
+>   still be running) landed with `queued=0/1`, which is the checkpoint drain
+>   doing its job (pre-fix they'd have stacked behind the scan).
+> - **V-04:** write-half **verified** by the queue numbers above. The
+>   `VDBG-SCANYIELD` count was 0 — no *nested* preemption was exercised; note
+>   the probe undercounts by design: a user scan arriving *between* root
+>   rescans is served front-of-queue without a SCANYIELD line. The nested path
+>   still wants one deliberate test: open a never-indexed folder within the
+>   first minutes after launch.
+> - **Folder row: verified in use** — both exits (browse-in-grid, Nautilus
+>   launch) confirmed by the user.
+> - **V-21 / V-22 / select-all / delete: verified in use** per the user
+>   ("select all works, delete works, everything smooth"); drag→drop→catalog
+>   round-trips healthy in the probes (`hash=true`, `items=1/2`,
+>   `remove_from_catalog` ops landing).
+>
+> Remaining untested: the V-04 nested-preemption path (above) and a portal
+> sacrifice-file re-test to see V-22's error toast with its exact wording.
+
 **In-app checklist for the next run (rebuild + reinstall FIRST):**
 
 1. **V-04:** launch (roots rescan starts), immediately open a small
