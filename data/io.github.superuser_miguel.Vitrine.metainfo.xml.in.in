@@ -48,6 +48,30 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.2.0" date="2026-07-21">
+      <description>
+        <p>
+          A correctness and responsiveness release: the index no longer treats
+          unreachable files as deleted, annotations keep working while a scan
+          runs, and opening a folder no longer waits behind a background rescan.
+        </p>
+        <p>New in this release:</p>
+        <ul>
+          <li>Per-image tags, plus drag and drop from Files onto the viewport.</li>
+          <li>Sort by rating or by date taken; a Close Folder button.</li>
+          <li>The viewer's folder row browses that folder or opens it in Files.</li>
+          <li>Find Duplicates is scoped to the folder you have open.</li>
+        </ul>
+        <p>Fixed in this release:</p>
+        <ul>
+          <li>Delete in a catalog no longer trashes the original file.</li>
+          <li>Offline and unreadable files are no longer reconciled away.</li>
+          <li>Catalog members and drops resolve to durable paths, not stale portal handles.</li>
+          <li>Scanning a large library no longer freezes the grid.</li>
+          <li>Tag filtering and the tag menu are dramatically faster.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-07-18">
       <description>
         <p>
