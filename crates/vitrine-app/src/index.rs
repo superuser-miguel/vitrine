@@ -622,12 +622,13 @@ fn scan(
     // author's index a single unplugged 8TB drive accounts for 44,340 rows, and
     // `missing` is what reconciliation acts on afterwards.
     //
-    // An empty-but-present folder is a real (harmless) case, so the guard is
-    // "the root did not read back", not "the root had no images".
-    let root_readable = std::fs::read_dir(folder)
-        .map(|mut d| d.next().is_some())
-        .unwrap_or(false);
-    if root_readable || !files.is_empty() {
+    // The distinguishing signal is the *error*, not emptiness. An unmounted
+    // volume makes the indexed folder vanish outright — the parent
+    // document-portal directory survives but the granted subtree is gone — so
+    // `read_dir` fails. A folder the user genuinely emptied still opens fine and
+    // must still reconcile, or real deletions would never be recorded.
+    let root_readable = std::fs::read_dir(folder).is_ok();
+    if root_readable {
         db.reconcile_deleted(&folder.to_string_lossy(), &seen)?;
     } else {
         glib::g_warning!(
