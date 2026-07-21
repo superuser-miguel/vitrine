@@ -63,7 +63,9 @@ flatpak run "${ENVFLAGS[@]}" "$APP" "${ARGS[@]}" 2>&1 \
   | tee -a "$LOG" "$RUNLOG" || true
 
 # Count a probe field, tolerating a run where that probe never fired.
-count() { grep -c -- "$1" "$RUNLOG" 2>/dev/null || echo 0; }
+# (`grep -c` prints its 0 *and* exits nonzero on no match, so `|| echo 0`
+# doubled the zero and broke the queue-depth guard below.)
+count() { grep -c -- "$1" "$RUNLOG" 2>/dev/null | head -1; }
 
 echo
 echo "=== summary (this run) ==="
@@ -81,7 +83,7 @@ printf "  peak writer queue      : %s\n" \
   "$(grep -oP 'VDBG-WRITE .*queued=\K[0-9]+' "$RUNLOG" | sort -n | tail -1)"
 printf "  tag actions            : %s\n"  "$(count 'VDBG-TAG')"
 printf "  drops handled          : %s (%s resolved nothing)\n" \
-  "$(count 'VDBG-DROP')" "$(grep -c 'VDBG-DROP.*items=0' "$RUNLOG" 2>/dev/null || echo 0)"
+  "$(count 'VDBG-DROP')" "$(count 'VDBG-DROP.*items=0')"
 printf "  drags refused (no hash): %s\n"  "$(count 'VDBG-DRAG ms=.*hash=false')"
 printf "  scans preempted (V-04) : %s\n"  "$(count 'VDBG-SCANYIELD')"
 

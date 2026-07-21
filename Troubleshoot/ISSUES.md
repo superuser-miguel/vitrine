@@ -288,8 +288,17 @@ twice per interaction. Needs a probe to close.
 `window.rs:1179` calls `all_tags()` — paying the full V-06 subquery — then maps to
 `t.name` and drops every count. Wants a plain `SELECT name FROM tags ORDER BY name`.
 
-### V-23 · Enriching a large-image folder freezes the app and spikes RSS to ~2 GB · `MEASURED` (2026-07-21 evening logs) · **FIXED (untested)**
+### V-23 · Enriching a large-image folder freezes the app and spikes RSS to ~2 GB · `MEASURED` (2026-07-21 evening logs) · **FIXED · VERIFIED**
 
+> **Verified 2026-07-21, 19:50 run** (rebuilt install, no interaction — the
+> leftover queue exercises the fix by itself). The remaining ~700 items,
+> including the same large-image folder, drained at 30–45 items/s with the app
+> at a flat 60fps: worst stall of the whole run **84ms** (the launch tick
+> itself; ≤6ms while enrichment was actually running), worst frame 150ms, peak
+> RSS **304MB** — against 3–6s stalls, ~11s frames and 2.2GB the evening
+> before. `enrich[live=4]` throughout, queue fully drained
+> (`done=1216`, then idle at 60fps/168MB).
+>
 > **Fixed 2026-07-21, same evening.** Four changes, one commit:
 >
 > 1. `decode::probe()` routes sources ≥ the heavy threshold through the
