@@ -114,6 +114,30 @@ simply almost never *start*.
 > ~2 = not. Fallback if it fails: disable rubber-band, which makes drag reliable
 > at the cost of rubber-band multi-select. That is a UX trade for the user to make.
 
+### V-22 · Trash failure is silent, and dedup corrupts the index on it · `CONFIRMED` code + `OBSERVED` in test (2026-07-21)
+
+Found by the portal trash verification (see the V-19 update of 2026-07-21).
+Trashing a portal-document path fails inside the sandbox — and both trash paths
+handle failure badly:
+
+- `trash_selected` (`window.rs:3055`) toasts **"Moved 1 image to Trash"
+  unconditionally** before the async result arrives — the V-02 pattern, which
+  the V-02 fix covered for tag/catalog writes but not for trash. The error
+  branch does toast "Couldn't move to trash: …", but in the live test only the
+  success toast was seen (screenshot `Screenshot From 2026-07-21 10-19-48.png`:
+  file still in grid and on disk, success toast showing). Whether the error
+  toast fired late, was replaced, or never fired is not yet pinned down.
+- `trash_duplicate_others` (`window.rs:2370`) is worse: it toasts "Moved N
+  copies to Trash" **and calls `mark_missing` on the rows regardless of the
+  trash outcome**, then refreshes the list. A failed trash therefore still
+  removes the pair from the Duplicates card and stamps `missing` on a row whose
+  file is present — the index now asserts something false, and `missing` drives
+  reconciliation.
+
+Fix shape: toast on the *result* (the V-02 recipe), and move `mark_missing` into
+the trash-success callback. Small, contained, worth doing before Find Duplicates
+leaves Experimental.
+
 ### V-04 · Single writer thread; large scans block user writes · `CONFIRMED` mechanism — **NOT the reported symptom**
 
 > **2026-07-20 logs rule this out as the cause of "tagging claims to have added
@@ -124,6 +148,32 @@ simply almost never *start*.
 >
 > The head-of-line mechanism is still real and still worth fixing eventually; it
 > simply was not what the user was hitting. Left open, deprioritised.
+
+> **Update 2026-07-21 — head-of-line observed live; re-prioritised.** `MEASURED`
+> during the portal verification test, run of 10:00:
+>
+> - 10:00:05 — app launched; the startup roots rescan (`window.rs:3331`, ~193k
+>   files across roots) took the single worker.
+> - ~10:05 — `~/vitrine-portal-test` (**2 files**) opened via the file chooser;
+>   its `Request::Scan` enqueued (`window.rs:3485` → `index_folder`). Grid
+>   rendered, thumbnails decoded — but nothing indexed.
+> - 10:10+ — still no rows; `vitrine-indexer` thread continuously busy; zero DB
+>   writes since 10:00:06.
+> - 10:11:14 — the two rows finally landed
+>   (`/run/user/1000/doc/v_9HXiy51q5svAzp9CSevA/vitrine-portal-test/…`).
+>
+> **A 2-file scan waited ~5 minutes in queue; the writer was occupied ~11 minutes
+> from launch on a session where essentially nothing on disk had changed.** Two
+> consequences the deprioritise call missed: (1) *every* launch pays this on a
+> library this size, because the roots rescan runs unconditionally at startup;
+> (2) any folder opened during that window renders but gets **no hashes stamped**,
+> so tagging/drag degrade to "Still indexing this folder…" for minutes.
+> `OBSERVED`: this is the likely cause of the `items=0` cluster at t=221–232s
+> (see the 2026-07-21 end-of-session note) — same shape, same message.
+>
+> Candidate fix shapes, deliberately **not** chosen yet: a user-priority queue
+> (user-triggered scans and writes preempt root rescans), chunking root scans
+> into many small requests, or scans yielding between batches.
 
 
 `worker()` serializes `Scan`, `Enrich`, and all user writes through one
@@ -261,6 +311,37 @@ copy". For a portal/real pair those may be the same bytes on disk, so trashing
 the "copy" could delete the file the kept row points at. Unverified — the FUSE
 mount is not statable from outside the sandbox — but it is the same shape as
 V-01 and should be checked before that feature is used at scale.
+
+> **Update 2026-07-21 — the warning above is now too broad.** `c4d62d8` landed
+> both safety items: `into_clusters` routes every group through
+> `prefer_durable_paths` (`dedup.rs:177`), so a portal/durable pair collapses to
+> the durable row and is never reported as a duplicate (tests:
+> `one_file_seen_through_the_portal_is_not_a_duplicate`,
+> `genuine_duplicates_still_reported_alongside_portal_aliases`), and trashing now
+> goes through `confirm_trash_duplicates` (`window.rs:2328`, `adw::AlertDialog`).
+>
+> **The residual risk is narrower: portal/portal pairs.** The guard keeps all
+> portal rows when no durable row shares the hash
+> (`portal_only_files_keep_their_rows` — deliberate, nothing else stands for
+> them). But two doc IDs *can* be the same host file granted twice, so such a
+> pair may still be one file listed against itself, now behind a confirm dialog
+> the user can accept on a wrong premise. Two facts decide how bad this is, and
+> both were **measured on 2026-07-21** (test folder `~/vitrine-portal-test`,
+> 2 files, opened via chooser):
+>
+> 1. **Doc IDs are reused across sessions.** `MEASURED` — a fresh app session
+>    (10:17) with a fresh chooser grant of the same folder produced the *same*
+>    doc ID (`v_9HXiy51q5svAzp9CSevA`) as the previous session; portal row count
+>    stayed flat (119,541). So portal rows do **not** grow per session, the
+>    "opaque per-session document paths" phrasing above is wrong as stated, and
+>    the deferral of the structural fix is comfortable. Caveat: proven across an
+>    app restart within one boot; across reboots untested.
+> 2. **`trash_async` on a `/run/user/…/doc/…` path does not reach the real
+>    file.** `MEASURED` — Delete on a portal-only row left the host file intact,
+>    nothing in the host Trash, nothing in the sandbox-private data dir, and the
+>    item stayed in the grid. So a portal/portal false pair **cannot actually
+>    delete real bytes** through the dedup card — GIO refuses. The failure is
+>    a silent lie instead: see V-22.
 
 **Open decision.** `--filesystem=home` was considered and **rejected**: portals-first
 is how a Flatpak should behave, and it matters more once helper binaries
@@ -507,6 +588,25 @@ Items 2 and 3 above are **not done** and are not blocked by V-19. They stay on
 the backlog: the same-file guard is a path-prefix check, and `trash_duplicate_others`
 still trashes on click with no confirmation.
 
+> **Update 2026-07-21 — items 2 and 3 are DONE (`c4d62d8`), the paragraph above
+> is stale.** The same-file guard shipped as `prefer_durable_paths` applied in
+> `into_clusters` (`dedup.rs:177`), with tests for the portal-alias,
+> genuine-duplicate and portal-only cases. The confirmation shipped as
+> `confirm_trash_duplicates` (`window.rs:2328`). Item 1 — what counts as a
+> duplicate — remains deferred by choice, along with the V-19 structural fix
+> (`host_path` via ashpd + migration).
+>
+> **Verification queue — both run 2026-07-21, both answered** (details in the
+> V-19 update block above):
+>
+> 1. **Trash on a portal path** → outcome (b): fails without reaching the real
+>    file, and the failure is effectively silent. Portal/portal false pairs
+>    cannot delete real bytes; the honesty bug is now **V-22**.
+> 2. **Doc-ID stability across sessions** → reused (same id across a fresh
+>    session and fresh chooser grant, row count flat). No leak; V-19 deferral
+>    stands. As a bonus the same test caught V-04 live — see its 2026-07-21
+>    update.
+
 
 ---
 
@@ -529,6 +629,11 @@ Most likely a move to another unindexed folder, but unconfirmed. The message tex
 distinguishes the causes: "Still indexing this folder…" means a scan is in
 flight; "Select one or more indexed images to…" means no scan is running and the
 items genuinely have no hash. Ask which one appeared.
+
+> **Update 2026-07-21:** likely explained by V-04 head-of-line — a folder opened
+> while the launch roots rescan holds the worker gets no hashes stamped for
+> minutes (measured: a 2-file scan queued ~5 min). See the V-04 update of
+> 2026-07-21.
 
 **Not touched by choice:** Find Duplicates has no scope at all — both entry
 points pass `Query::default()`, i.e. the whole library, always. `Query.under`
