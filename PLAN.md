@@ -268,6 +268,12 @@ Manifest permissions (initial, complete set):
 - SQLite DB and config live in the app's own data dir (`~/.var/app/<id>/data/vitrine/`) —
   no permission needed.
 - Everything else stays closed. No `--talk-name` additions without a documented reason.
+- **Helpers need no widening at all** (measured 2026-07-21, §16.7.3):
+  `flatpak-spawn --sandbox` spawns a subprocess with *fewer* permissions than we
+  have, and requires no manifest permission — the Flatpak portal is reachable
+  from inside the sandbox by default. `--host` is refused without
+  `--talk-name=org.freedesktop.Flatpak`, which we **never** grant: it is a full
+  sandbox escape, and possessing it would make every other line here decorative.
 
 ---
 
@@ -1437,7 +1443,11 @@ Find Duplicates' current exact/pHash clustering; everything indexing.
   `register_sort` wired into the Sort By menu. *Acceptance: a natural-sort
   script orders `img_2 < img_10` on a 10k folder with no measurable stall
   regression (§13 numbers); editing the script re-sorts without restart;
-  a script error surfaces as a toast naming the script, never a crash.*
+  a script error surfaces as a toast naming the script, never a crash;
+  **`while true do end` in a sort key toasts and unloads the script instead of
+  hanging the worker** (instruction-count hook, §16.7.2); **a runaway
+  allocation errors rather than growing unbounded** (`set_memory_limit`);
+  **a binary chunk is refused** (`ChunkMode::Text`).*
 - **E2 — helper extension point + batches.** Manifest `add-extensions`;
   `…Helper.magick` package builds offline (house rule 5); `register_batch` +
   run dialog with destination policy, progress, cancel; backup-first for
@@ -1451,3 +1461,114 @@ Find Duplicates' current exact/pHash clustering; everything indexing.
   state.*
 - **E4 — WASM tier.** Unchanged from §10.5, scheduled only when auto-tagging
   or embeddings is committed to.
+
+### 16.7 Security model — what "sandboxed" means here (decided 2026-07-21)
+
+§16.2 says the script sandbox is "subtractive." That is true and insufficient:
+it describes a *mechanism* without naming the *threat model*, and E1's API
+surface depends on the threat model. This section names it, because the phrase
+"sandboxed scripting" is a claim we would otherwise be making without being able
+to hold it.
+
+**Two boundaries, routinely conflated. They are not the same boundary.**
+
+| | Lua environment | OS sandbox |
+|---|---|---|
+| Where | in-process (mlua shares Vitrine's address space) | `flatpak-spawn --sandbox` subprocess |
+| Stops | accidents, casual misuse, typos | a hostile binary |
+| On escape | attacker has **everything Vitrine has** | attacker has what we granted, and no more |
+| Is it a security boundary | **No** | **Yes** |
+
+#### 16.7.1 The decision
+
+**Lua scripts are trusted user configuration, not untrusted plugins.** They sit
+at the same trust level as a shell rc file or a GTK CSS override: the user wrote
+them or deliberately installed them, and running one is an act of trust the user
+performed, not a risk the app absorbed.
+
+Consequences, and they cut both ways:
+
+- **Permitted:** `register_sort` may return arbitrary Lua values; the host
+  converts and type-checks at the boundary but does not need to defend against
+  a *malicious* return. Providers may hold state. Recipes may be authored
+  casually. The API can stay ergonomic.
+- **Required:** the docs say this **in the author-facing text**, plainly — "a
+  script runs with the app's full authority; install scripts you trust, the same
+  way you would a shell alias." No implication of containment we do not provide.
+  This is the V-02 discipline (`accepted ≠ committed`) applied to security: state
+  the honest limit rather than let the word "sandbox" imply the stronger one.
+- **Forbidden:** advertising the script tier as a safe way to run code from
+  strangers, or accepting scripts from any *automatic* channel (a URL handler, a
+  drag-drop install, a "browse community recipes" button). Automatic acquisition
+  is what converts trusted config into untrusted plugin, and the moment it is
+  proposed this section must be reopened first. **The WASM tier (E4) is the
+  answer for untrusted code** — that is the whole reason the two tiers exist
+  (§16.1 decision 4), and it is why "scripts are data, packages are packages" is
+  a security split and not merely a packaging one.
+
+#### 16.7.2 What the subtractive env is actually for
+
+Given the above, `os` / `io` / `require` / `load` / `dofile` are removed to make
+the *honest failure mode* the common one — a script that tries to touch the
+filesystem fails immediately and visibly, instead of half-working and corrupting
+a library. It is guardrail, not armour. Do not let it drift into a claim.
+
+Two hard requirements that are **not** optional, because both are cheap and both
+turn a hang or a crash into a toast:
+
+1. **`ChunkMode::Text` on every load.** Lua's VM does not validate bytecode;
+   loading a crafted binary chunk is a known escape. Never load binary chunks,
+   including from files that appear to be in the scripts dir.
+2. **Instruction-count and memory ceilings.** `set_hook` with
+   `HookTriggers::every_nth_instruction` (error out past a budget) and
+   `set_memory_limit`. Without the former, `while true do end` in a sort key
+   hangs the script worker permanently — a trivially reachable state for a
+   *well-meaning* author, which is exactly the accident class this tier exists
+   to survive. **Add both to E1's acceptance criteria** (§16.6).
+
+*mlua note:* `Lua::sandbox()` is **Luau-only** and therefore unavailable to us —
+§16.1 locked Lua 5.4. The environment is hand-built. Current mlua's `Lua` is
+`Send + Sync`, so the worker threading is simpler than a state-per-thread design.
+
+#### 16.7.3 Why the host executes batches — now empirically grounded
+
+§16.2's "no direct file writes; file-producing operations go through §16.3
+batch declarations, which the *host* executes" was written as an honesty and
+progress-reporting rule (the V-22 lesson). It has a second, stronger
+justification, verified 2026-07-21 against the installed v0.2.0:
+
+**Only the host can drop privileges.** A script that spawned its own helper
+would inherit Vitrine's full authority. The host, spawning the same helper
+through `flatpak-spawn --sandbox`, runs it with *strictly less*.
+
+Measured on the shipping sandbox (no `--talk-name` of any kind):
+
+- `flatpak-spawn --sandbox <cmd>` — **works, requires no manifest permission.**
+  The Flatpak portal is reachable from inside the sandbox by default.
+- `flatpak-spawn --host <cmd>` — **correctly refused** (needs
+  `org.freedesktop.Flatpak`, which we do not grant and must never grant).
+- Parent sandbox reads `~/Pictures`: **visible**. Sub-sandbox: **denied.** The
+  child does not inherit our filesystem grants.
+- stdio passes through the sub-sandbox; `--forward-fd=N` works.
+
+**Therefore the E2/E3 helper transport is: bytes over fds, not paths.**
+`magick - -resize 50% jpg:-` in a sub-sandbox with no filesystem access at all is
+the target shape — the helper cannot touch the library even in principle, so a
+recipe bug cannot become data loss. Where an operation genuinely needs seekable
+input or multiple files, stage into `~/.var/app/<id>/sandbox/` (the *only*
+directory `--sandbox-expose` / `--sandbox-expose-ro` accept — absolute paths and
+subdirectories are rejected) and expose read-only where possible.
+
+**Open, blocks E2's cancel criterion:** `flatpak-spawn` has **no
+`--die-with-parent` and no pid-sharing options** (unlike `flatpak run`), so a
+sub-sandbox child can outlive Vitrine and we never see its PID. `--watch-bus`
+is the documented substitute — the spawned command exits when the spawner's bus
+connection closes. **Unverified:** a first attempt hung because the sub-sandbox
+child kept the parent instance alive, which is itself a lifecycle fact E2 must
+handle. Verify before building the run dialog; E2's "cancelling mid-batch leaves
+a coherent, reported state" depends on it.
+
+#### 16.7.4 The rule, one line
+
+Anything reachable by a script runs with the app's authority and is documented
+as such; anything that must run with *less* is a subprocess the host spawns.
