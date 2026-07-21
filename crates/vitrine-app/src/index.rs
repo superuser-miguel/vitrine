@@ -614,7 +614,32 @@ fn scan(
         .iter()
         .map(|sf| sf.path.to_string_lossy().to_string())
         .collect();
-    db.reconcile_deleted(&folder.to_string_lossy(), &seen)?;
+
+    // Reconcile only when the root is actually readable. An unplugged drive — or
+    // a document-portal handle whose volume is gone — walks as *zero files*,
+    // which is indistinguishable from "the user deleted everything" unless we
+    // look. Reconciling then would mark the whole subtree missing: on this
+    // author's index a single unplugged 8TB drive accounts for 44,340 rows, and
+    // `missing` is what reconciliation acts on afterwards.
+    //
+    // An empty-but-present folder is a real (harmless) case, so the guard is
+    // "the root did not read back", not "the root had no images".
+    let root_readable = std::fs::read_dir(folder)
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(false);
+    if root_readable || !files.is_empty() {
+        db.reconcile_deleted(&folder.to_string_lossy(), &seen)?;
+    } else {
+        glib::g_warning!(
+            "vitrine",
+            "skipping deletion reconcile for {}: root unreadable (unmounted volume?) — \
+             {} indexed rows left untouched",
+            folder.display(),
+            db.paths_under(&folder.to_string_lossy())
+                .map(|v| v.len())
+                .unwrap_or(0)
+        );
+    }
 
     let now = now_secs();
     let mut added = 0usize;
