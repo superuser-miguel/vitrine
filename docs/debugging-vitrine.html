@@ -230,7 +230,7 @@ FROM tags t ORDER BY t.name COLLATE NOCASE</code></pre>
     <code>~/Pictures</code> and nothing else. Everything beyond that arrives through the
     XDG file chooser portal, which hands the app a path like:</p>
 
-  <pre><code>/run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg/Ashley Trevort/utHPx4N.jpg</code></pre>
+  <pre><code>/run/user/1000/doc/Kf3xQ9tLm2NpVr7WsYbZ4A/Holiday Photos/IMG_4417.jpg</code></pre>
 
   <p>That is not where the file lives. It's an opaque per-document handle on a FUSE
     mount, valid while the grant lasts. Vitrine stored it in the <code>path</code> column
@@ -270,7 +270,7 @@ FROM tags t ORDER BY t.name COLLATE NOCASE</code></pre>
   <p>The last symptom is the one that makes the model concrete. Some images simply
     failed to render:</p>
 
-  <pre><code>thumbnail file:///run/user/1000/doc/ZmzOt26RunVwVA8lnYBSqg/Ashley Trevort/utHPx4N.jpg
+  <pre><code>thumbnail file:///run/user/1000/doc/Kf3xQ9tLm2NpVr7WsYbZ4A/Holiday Photos/IMG_4417.jpg
   Failed to load: No such file or directory</code></pre>
 
   <p>The first explanation offered here was that the grant had lapsed. It hadn't — and
@@ -279,9 +279,9 @@ FROM tags t ORDER BY t.name COLLATE NOCASE</code></pre>
 
   <pre><code>$ gdbus call --session --dest org.freedesktop.portal.Documents \
     --object-path /org/freedesktop/portal/documents \
-    --method org.freedesktop.portal.Documents.Info "ZmzOt26RunVwVA8lnYBSqg"
+    --method org.freedesktop.portal.Documents.Info "Kf3xQ9tLm2NpVr7WsYbZ4A"
 
-(b'/run/media/definitive_group/873d7a68-…/EasyStore/Pictures/Instagram/Ashley Trevort',
+(b'/run/media/alice/b91f2c3d-…/Archive/Pictures/Holiday Photos',
  {'io.github.superuser_miguel.Vitrine': ['read', 'write', 'grant-permissions']})</code></pre>
 
   <p>The grant is intact — the permissions are right there. The handle points at an
