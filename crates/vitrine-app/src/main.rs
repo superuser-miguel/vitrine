@@ -11,6 +11,7 @@ mod grid_cell;
 mod image_object;
 mod index;
 mod preferences;
+mod script;
 mod settings;
 mod thumbnails;
 mod viewer;

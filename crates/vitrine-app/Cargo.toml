@@ -29,4 +29,5 @@ async-lock = "3.4.2"
 async-channel = "2.5.0"
 # mallopt(M_MMAP_THRESHOLD) at startup — see main.rs; Linux-only app (GNOME).
 libc = "0.2"
+mlua = { version = "0.12.0", features = ["lua54", "vendored"] }
 # ashpd (XDG portals) is added when the extra-roots chooser lands.
