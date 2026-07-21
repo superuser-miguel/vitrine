@@ -28,6 +28,9 @@
 # --- Local planning docs (context for Claude, not repo content) ---
 /gallery-viewer-design-notes.md
 /gallery-viewer-plan.pptx
+# HISTORY.md is the internal narrative record (brief -> now: root causes,
+# reverts, open questions). Internal use only — deliberately not published.
+/HISTORY.md
 
 # --- Editors / OS ---
 *.swp
