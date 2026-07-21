@@ -2795,6 +2795,31 @@ impl VitrineWindow {
         self.refilter(); // freshly-stamped ratings may change a rating filter
     }
 
+    /// Stamp only the items still waiting for a content hash — the progressive
+    /// pass run while a scan is in flight.
+    ///
+    /// Deliberately not `restamp_store`. That one re-stamps every item and then
+    /// calls `refilter()`, which invalidates the filter and makes the sort model
+    /// re-sort the whole store; at a few tens of thousands of items that costs
+    /// over two seconds, and running it every few seconds during a scan froze
+    /// the UI for most of the scan. The DB query is not the expensive part
+    /// (~30ms for 27k rows) — the model invalidation and the property
+    /// notifications are.
+    ///
+    /// So: skip entirely when nothing is waiting, touch only the items that are,
+    /// and leave filter and sort alone. `Finished` still does the full pass.
+    fn stamp_pending_items(&self) {
+        let imp = self.imp();
+        let pending: Vec<ImageObject> = (0..imp.store.n_items())
+            .filter_map(|i| imp.store.item(i).and_downcast::<ImageObject>())
+            .filter(|item| item.content_hash().is_empty())
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        self.stamp_annotations(&pending);
+    }
+
     fn ensure_read_db(&self) {
         let imp = self.imp();
         if imp.read_db.borrow().is_none() {
@@ -3348,7 +3373,7 @@ impl VitrineWindow {
                     .is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(3));
                 if due {
                     imp.last_restamp.set(Some(std::time::Instant::now()));
-                    self.restamp_store();
+                    self.stamp_pending_items();
                 }
             }
             IndexProgress::Finished { .. } => {
