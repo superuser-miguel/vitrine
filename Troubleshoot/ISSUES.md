@@ -507,3 +507,33 @@ Items 2 and 3 above are **not done** and are not blocked by V-19. They stay on
 the backlog: the same-file guard is a path-prefix check, and `trash_duplicate_others`
 still trashes on click with no confirmation.
 
+
+---
+
+## Open at end of session — 2026-07-21
+
+Two things unresolved, recorded so the next session doesn't re-derive them.
+
+**1. `eb0a701` is untested.** Progressive stamping during a scan worked (four
+successful tags mid-scan), but the first attempt at it froze the UI: seven
+consecutive seconds of ~2.3s stalls, because it called `restamp_store()`, which
+re-filters and re-sorts the whole store. Replaced with `stamp_pending_items()`.
+**The number to check on the next run is the worst main-loop stall** — it should
+be back under ~300ms during indexing. The DB was never the cost (`ratings_under`
+over 27,090 rows = 30ms); model invalidation and per-item property notifications
+were.
+
+**2. `items=0` returned at t=221s–232s** in the 2026-07-21 00:06 run, five
+attempts, well before the stall cluster at t=402s — so it is *not* the freeze.
+Most likely a move to another unindexed folder, but unconfirmed. The message text
+distinguishes the causes: "Still indexing this folder…" means a scan is in
+flight; "Select one or more indexed images to…" means no scan is running and the
+items genuinely have no hash. Ask which one appeared.
+
+**Not touched by choice:** Find Duplicates has no scope at all — both entry
+points pass `Query::default()`, i.e. the whole library, always. `Query.under`
+exists and is indexed, so scoping it is one field. The owner's position, which
+settles the design: duplicates are meaningful *within* the drive you are on or a
+drive you deliberately chose to compare; copies across backup volumes are a 1-2-3
+backup, not waste. Anything cleverer (volume awareness, intent) belongs in the
+extension layer, not the core.
