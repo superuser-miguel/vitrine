@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The duplicate that was one file — Vitrine</title>
+<meta name="description" content="A Find Duplicates feature that reported 41,727 duplicates on a library with far fewer: sandbox path aliases, a trash button that lied, two five-minute experiments, and why 'duplicate' turned out to be a product decision with a one-field fix.">
+<style>
+  :root {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf;
+    --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+      --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6;
+      --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf; --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+    --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6; --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 16px/1.68 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  a { color: var(--accent); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 40px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: 0; }
+
+  .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
+  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
+  .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
+  .meta { color: var(--muted); font-size: .88rem; margin: 0; }
+
+  h2 { font-size: 1.42rem; letter-spacing: -.01em; margin: 0 0 6px; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5em; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .98rem; }
+  h3 { font-size: 1.02rem; margin: 26px 0 6px; }
+  p { margin: 0 0 15px; }
+
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+        padding: 14px 16px; overflow-x: auto; font-size: .87rem; line-height: 1.5; }
+  code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px;
+         border-radius: 6px; font-size: .92em; }
+  pre code { background: none; padding: 0; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; margin: 0 0 16px; }
+  table { width: 100%; border-collapse: collapse; min-width: 460px; background: var(--surface); }
+  th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  th:last-child, td:last-child { text-align: left; }
+  thead th { font-size: .78rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  blockquote { margin: 0 0 15px; padding: 12px 18px; border-left: 3px solid var(--accent);
+               background: color-mix(in srgb, var(--accent) 7%, transparent);
+               border-radius: 0 10px 10px 0; }
+  blockquote p:last-child { margin: 0; }
+
+  .lesson { background: var(--surface); border: 1px solid var(--border);
+            border-left: 3px solid var(--ok); border-radius: 0 12px 12px 0;
+            padding: 14px 18px; margin: 20px 0 0; }
+  .lesson b { display: block; font-size: .78rem; text-transform: uppercase;
+              letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+  .lesson p { margin: 0; }
+  .warnbox { border-left-color: var(--warn); }
+
+  ul, ol { padding-left: 22px; margin: 0 0 15px; }
+  li { margin: 0 0 7px; }
+  .toc { list-style: none; padding: 0; margin: 0; }
+  .toc li { margin: 0; border-bottom: 1px solid var(--border); }
+  .toc li:last-child { border: 0; }
+  .toc a { display: block; padding: 10px 0; text-decoration: none; color: var(--text); }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .7em; }
+
+  footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; padding: 26px 0 46px; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <a class="back" href="./">&larr; Vitrine</a>
+  <h1>The duplicate that was one file</h1>
+  <p class="lede">Vitrine's Find Duplicates feature reported 41,727 duplicated images on a
+    library that did not have anywhere near that many. Working out why took an argument
+    about what a duplicate even <em>is</em>, two five-minute experiments, one screenshot of
+    the app lying, and a fix that was ultimately a single field on a query.</p>
+  <p class="meta">July 2026 · SQLite · GIO · Flatpak portals · product design</p>
+</header>
+
+<section class="wrap">
+  <p>This is a follow-up to
+    <a href="flatpak-document-portal.html">What the document portal actually does</a>. You
+    don't need to have read it, but the short version matters here: a sandboxed app that
+    opens a folder through the file chooser sees it under an opaque handle like
+    <code>/run/user/1000/doc/9bf3a2/trip/</code>, not under its real path — and if the app
+    <em>indexes</em> what it sees, the same file can end up in the database twice under two
+    unrelated names.</p>
+  <ol class="toc">
+    <li><a href="#feature"><span class="n">1</span>What Find Duplicates is</a></li>
+    <li><a href="#alias"><span class="n">2</span>41,727 duplicates that weren't</a></li>
+    <li><a href="#guard"><span class="n">3</span>The guard: prefer the durable path</a></li>
+    <li><a href="#trash"><span class="n">4</span>Experiment one: the trash button that lied</a></li>
+    <li><a href="#leak"><span class="n">5</span>Experiment two: do handles leak?</a></li>
+    <li><a href="#bycatch"><span class="n">6</span>Bycatch: the two-file scan that took five minutes</a></li>
+    <li><a href="#scope"><span class="n">7</span>Scope: what a duplicate even is</a></li>
+  </ol>
+</section>
+
+<section class="wrap" id="feature">
+  <h2><span class="num">1</span>What Find Duplicates is</h2>
+  <p class="sub">Two definitions of "same", both cheap by construction.</p>
+
+  <p>Vitrine's background index stores a BLAKE3 content hash for every file, and a
+    perceptual hash (pHash) once enrichment has visited it. Duplicates fall out of the
+    index without touching the image bytes again:</p>
+
+  <ul>
+    <li><strong>Exact</strong> — group rows by content hash. Byte-identical files, full stop.</li>
+    <li><strong>Similar</strong> — union-find over pHash Hamming distance, with a BK-tree
+      so a big library doesn't cost a billion pairwise comparisons. Catches re-encodes,
+      resizes, minor edits.</li>
+  </ul>
+
+  <p>Each cluster renders as a card: the suggested keeper, a thumbnail strip, the
+    reclaimable bytes, and a button that trashes every copy but the keeper. That button is
+    the loaded gun in this story — remember it.</p>
+</section>
+
+<section class="wrap" id="alias">
+  <h2><span class="num">2</span>41,727 duplicates that weren't</h2>
+  <p class="sub">The hash said "same content". Nobody asked "same file?"</p>
+
+  <p>On the real library the exact scan lit up 41,727 content hashes with more than one
+    present row. The library has genuine duplicates — download folders always do — but not
+    that many. The bulk looked like this:</p>
+
+  <pre><code>~/Pictures/trip/IMG_1007.jpg
+/run/user/1000/doc/9bf3a2/trip/IMG_1007.jpg</code></pre>
+
+  <p>One file. The first row came from browsing the folder under the app's one static
+    grant (<code>--filesystem=xdg-pictures</code>); the second from the same folder being
+    opened through the file-chooser portal at some point. Same bytes, two paths, two index
+    rows — and a "duplicate pair" whose second copy is an illusion.</p>
+
+  <p>The tempting fix is to collapse the files table on content hash. It's wrong, and the
+    reason is worth stating precisely, because it's the sentence the whole feature hangs
+    on:</p>
+
+  <blockquote>
+    <p>The content hash answers <em>"are these the same bytes?"</em>. Only a resolved real
+      path can answer <em>"are these the same file?"</em>. Find Duplicates exists precisely
+      to tell those two questions apart — so it can't be built on a table that has
+      already confused them.</p>
+  </blockquote>
+
+  <p>Two questions, two keys. Annotations (tags, ratings, comments) key on the content
+    hash and are correct — the same image reached two ways should share its stars. The
+    files table keys on path and is also correct — it records where things are. The bug
+    was only ever in the seam: a feature that read "two rows, same hash" as "two copies on
+    disk".</p>
+</section>
+
+<section class="wrap" id="guard">
+  <h2><span class="num">3</span>The guard: prefer the durable path</h2>
+  <p class="sub">Thirty minutes, no schema change, no D-Bus.</p>
+
+  <p>The structural fix — resolving every portal handle to its real path via the portal's
+    <code>Info()</code> call and storing it as a second key — is a day of work that was
+    deliberately deferred, because a much smaller observation covers the dangerous case: a
+    pair where one path is a portal handle and the other isn't is <em>one file listed
+    against itself under any definition of duplicate you could ever adopt</em>. You don't
+    need to resolve anything to know that. You need a prefix check.</p>
+
+  <pre><code>// Inside each candidate cluster:
+// if any row has a durable (non-portal) path,
+// drop the portal-handle rows — they are aliases,
+// not copies.
+if group.iter().any(|f| !is_portal_document_path(&f.path)) {
+    group.retain(|f| !is_portal_document_path(&f.path));
+}</code></pre>
+
+  <p>Three properties, each pinned by a unit test: an alias pair vanishes from the
+    results; a genuine duplicate (two real copies) still reports even when a portal alias
+    tags along; and files seen <em>only</em> through the portal keep their rows, because
+    nothing else stands for them. That last clause preserves one honest residual: two
+    portal handles with no durable sibling <em>might</em> still be one file granted twice.
+    Which is why there were experiments.</p>
+</section>
+
+<section class="wrap" id="trash">
+  <h2><span class="num">4</span>Experiment one: the trash button that lied</h2>
+  <p class="sub">A sacrificial file, a Delete key, and a toast with no basis in fact.</p>
+
+  <p>The open question: if the noisy list ever tricked someone into clicking "trash the
+    other copy" on a portal-handle row, what would actually happen? The pessimistic guess
+    was data loss — trash reaches through the FUSE mount and deletes the only real file,
+    the exact disaster the guard exists to prevent. Five minutes with a sacrificial file
+    settled it:</p>
+
+  <ol>
+    <li>Make a folder outside every static grant, put two throwaway images in it, open it
+      through the file chooser. It indexes under <code>/run/user/1000/doc/…</code> only.</li>
+    <li>Select one, press Delete. Then look at the real folder from a host terminal.</li>
+  </ol>
+
+  <p>Result: the file was untouched. Host trash: empty. The sandbox's private data dir:
+    no trash there either. GIO simply refuses to trash across the document mount. So the
+    catastrophic version is off the table — a portal/portal false pair <em>cannot</em>
+    delete real bytes. Good news, except for what the app was doing while all that nothing
+    happened:</p>
+
+  <blockquote><p>The screenshot from the test shows the image still sitting in the grid,
+    still selected, above a toast reading <strong>"Moved 1 image to Trash."</strong></p></blockquote>
+
+  <p>The toast fired when the operation was <em>requested</em>, not when it succeeded —
+    the same shape as an earlier bug where tagging toasted success before the write
+    landed. And the duplicates flow was worse than cosmetic: after requesting the trash,
+    it marked the rows missing in the index <em>regardless of the outcome</em>, then
+    refreshed the list. A failed trash would still make the "duplicate" vanish from the
+    card and stamp the database with a fact that isn't one — <code>missing</code>, on a
+    row whose file is right there.</p>
+
+  <p>The fix is the boring, correct plumbing: count the async results, toast what
+    actually moved, toast each failure with its actual error, and mark rows missing only
+    inside the success path. Failure now looks like failure.</p>
+
+  <div class="lesson warnbox">
+    <b>The pattern to grep for</b>
+    <p>Any UI message in the same breath as an async request is a claim about the future.
+      <code>toast(); request();</code> is a lie waiting for its moment — and the moment
+      will pick the worst possible audience: the user who was already suspicious.</p>
+  </div>
+</section>
+
+<section class="wrap" id="leak">
+  <h2><span class="num">5</span>Experiment two: do handles leak?</h2>
+  <p class="sub">If every session mints new paths, the index grows forever.</p>
+
+  <p>The second worry was quieter but compounding. Portal handles were assumed to be
+    per-session — the register literally said "opaque per-session document paths". If
+    true, every launch that reopens a folder through the chooser mints fresh handles,
+    which means fresh index rows, which means the portal side of the index grows without
+    bound and every scan re-hashes content the durable rows already cover. That assumption
+    had never actually been tested, and it decides how long the deferred structural fix
+    can stay deferred.</p>
+
+  <p>The test is one command from a host terminal, because the document mount is visible
+    outside the sandbox:</p>
+
+  <pre><code>$ find /run/user/1000/doc -maxdepth 2 -name 'test-folder'
+/run/user/1000/doc/9bf3a2/test-folder</code></pre>
+
+  <p>Open the folder through the chooser, note the handle. Quit the app, relaunch, open
+    the same folder through the chooser again, run the command again. Same single handle
+    both times; the indexed row count didn't move. The portal reuses the existing document
+    grant instead of minting a new one — the "per-session" assumption was simply wrong,
+    the index does not leak, and the deferral is safe. One measured fact retired a
+    standing anxiety and corrected the record that had been feeding it.</p>
+</section>
+
+<section class="wrap" id="bycatch">
+  <h2><span class="num">6</span>Bycatch: the two-file scan that took five minutes</h2>
+  <p class="sub">The best bug reports are the ones your own tests file against you.</p>
+
+  <p>Experiment two had a confusing middle act. After opening the two-image test folder,
+    the grid showed both thumbnails immediately — and the index showed nothing. Not
+    stale rows: <em>no rows</em>, for minutes, while a query loop watched for them. The
+    indexer thread was pegged the whole time.</p>
+
+  <p>The explanation was a known mechanism finally caught in the act. All index work —
+    scans and user writes alike — flows through one worker thread, one request at a time.
+    At launch the app queues a rescan of every library root; on a ~193,000-file index that
+    single request occupies the worker for on the order of ten minutes even when nothing
+    changed. The two-file folder scan sat in the queue behind it for about five. Until
+    then, the folder's images have no content hashes stamped, which quietly degrades
+    everything keyed on them — tagging, drag-to-collection — into "still indexing…"
+    territory. A mystery from an earlier debugging session (five failed attempts to act on
+    a freshly opened folder) matches this exactly.</p>
+
+  <p>Nothing was fixed that day — the finding was recorded, re-prioritised, and left
+    deliberately undesigned. But it upgraded from "mechanism that exists" to "measured,
+    with a timeline", and that's usually the step that gets a bug fixed.</p>
+</section>
+
+<section class="wrap" id="scope">
+  <h2><span class="num">7</span>Scope: what a duplicate even is</h2>
+  <p class="sub">The last fix wasn't code. It was a definition. Then it was one field.</p>
+
+  <p>With the aliases collapsed and the trash flow honest, one design question remained,
+    and it belongs to the owner of the library, not the implementation: the scan still ran
+    over <em>everything</em>. Whole library, always. And at whole-library scale,
+    "duplicate" stops being a technical property:</p>
+
+  <blockquote>
+    <p>A copy of the same photo inside the folder you're organising is waste. The same
+      photo on a second drive is not waste — it's a backup, and flagging it for deletion
+      is a duplicate finder recommending you undo your backup strategy.</p>
+  </blockquote>
+
+  <p>So the definition Vitrine landed on: <strong>duplicates are meaningful within the
+    tree you are looking at.</strong> Open a folder, and Find Duplicates scans that
+    subtree; open nothing, and it scans the whole library because you asked it to. The
+    page header says which, in plain words — "in ~/Pictures/trip" — because a scoped
+    answer presented as a global one would be its own little lie. Anything cleverer
+    (volume awareness, "compare these two drives", intent) is deliberately left to a
+    future extension layer rather than grown into the core.</p>
+
+  <p>And the implementation cost of the whole product decision? The index's query struct
+    already had an <code>under</code> field — a subtree restriction that compiles to an
+    indexed range scan, built long ago for folder browsing. Scoping Find Duplicates was
+    threading one optional string through two functions, plus a regression test proving a
+    cross-tree pair stops reporting when scoped. The scan gets faster as a side effect,
+    since the BK-tree now builds over the subtree instead of the world.</p>
+
+  <div class="lesson">
+    <b>The short version</b>
+    <p>The feature was "done" for weeks — clustering correct, BK-tree fast, cards pretty.
+      What made it <em>trustworthy</em> was everything else: refusing to let a hash answer
+      a question about files, a guard for the case that's wrong under every definition,
+      two five-minute experiments instead of two standing assumptions, an error path that
+      tells the truth, and a scope that matches what a human means by the word
+      "duplicate". None of that was hard. All of it was the actual feature.</p>
+  </div>
+</section>
+
+<footer class="wrap">
+  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p><a href="flatpak-document-portal.html">What the document portal actually does</a>
+     · <a href="debugging-vitrine.html">Six bugs in an image browser</a>
+     · <a href="https://github.com/superuser-miguel/vitrine">GitHub</a>
+     · <a href="./">Project page</a></p>
+</footer>
+
+</body>
+</html>
