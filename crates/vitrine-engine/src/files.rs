@@ -24,6 +24,38 @@ pub fn is_portal_document_path(path: &str) -> bool {
     }
 }
 
+/// Drop rows whose file is not reachable right now.
+///
+/// A path can be perfectly valid and still resolve to nothing: an external drive
+/// is unplugged, or a document-portal handle points at a volume that is not
+/// mounted. Those files are **offline**, not deleted — the rows stay in the
+/// index and keep their annotations, they simply have nothing to show.
+///
+/// Checks each distinct parent directory once rather than each file, so a view
+/// of a few hundred rows costs a handful of `stat` calls. Intended for the small
+/// result sets a view actually renders (a collection, a tag browse), not for
+/// sweeping the whole table.
+///
+/// This must never be used to set `missing`: that flag means "verified gone" and
+/// drives reconciliation. Unplugging a drive is not a deletion.
+pub fn drop_unreachable(files: Vec<FileRecord>) -> Vec<FileRecord> {
+    let mut dir_ok: std::collections::HashMap<std::path::PathBuf, bool> =
+        std::collections::HashMap::new();
+    files
+        .into_iter()
+        .filter(|f| {
+            let path = std::path::Path::new(&f.path);
+            let Some(dir) = path.parent() else {
+                return true;
+            };
+            let reachable = *dir_ok
+                .entry(dir.to_path_buf())
+                .or_insert_with(|| dir.is_dir());
+            reachable && path.exists()
+        })
+        .collect()
+}
+
 /// Prefer the durable path wherever the same content is indexed more than once.
 ///
 /// Drops document-portal rows when a non-portal row for the **same content hash**
@@ -409,5 +441,42 @@ mod tests {
             kept,
             ["/home/u/Pictures/a.jpg", "/run/user/1000/doc/xyz/b.jpg"]
         );
+    }
+
+    #[test]
+    fn unreachable_rows_are_dropped_not_marked_missing() {
+        // An unplugged drive leaves the row valid and the file absent. The row
+        // must not render, and — critically — nothing here touches `missing`,
+        // which means "verified gone" and drives reconciliation.
+        let dir = std::env::temp_dir().join(format!("vitrine-reach-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("here.jpg");
+        std::fs::write(&present, b"x").unwrap();
+
+        let rows = vec![
+            FileRecord {
+                path: present.to_string_lossy().into_owned(),
+                content_hash: "h1".into(),
+                ..Default::default()
+            },
+            FileRecord {
+                path: "/run/media/u/UNPLUGGED/gone.jpg".into(),
+                content_hash: "h2".into(),
+                ..Default::default()
+            },
+            FileRecord {
+                path: dir.join("deleted.jpg").to_string_lossy().into_owned(),
+                content_hash: "h3".into(),
+                ..Default::default()
+            },
+        ];
+        let kept = drop_unreachable(rows);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].content_hash, "h1");
+        assert!(
+            !kept[0].missing,
+            "reachability must not touch the missing flag"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1299,7 +1299,12 @@ impl VitrineWindow {
             };
             // A stale document-portal handle renders as a broken cell while the
             // real file sits right there — prefer the durable path.
-            let rows = vitrine_engine::prefer_durable_paths(db.query(&query).unwrap_or_default());
+            // Prefer the durable path, then drop anything still unreachable —
+            // an unplugged drive is offline, not deleted, so the rows stay in the
+            // index but have nothing to render.
+            let rows = vitrine_engine::drop_unreachable(vitrine_engine::prefer_durable_paths(
+                db.query(&query).unwrap_or_default(),
+            ));
             rows.into_iter()
                 .map(|record| {
                     let file = gio::File::for_path(&record.path);
@@ -2544,8 +2549,9 @@ impl VitrineWindow {
         let items: Vec<ImageObject> = {
             let db = self.imp().read_db.borrow();
             let Some(db) = db.as_ref() else { return };
-            let rows =
-                vitrine_engine::prefer_durable_paths(db.collection_files(id).unwrap_or_default());
+            let rows = vitrine_engine::drop_unreachable(vitrine_engine::prefer_durable_paths(
+                db.collection_files(id).unwrap_or_default(),
+            ));
             rows.into_iter()
                 .map(|record| {
                     let file = gio::File::for_path(&record.path);
