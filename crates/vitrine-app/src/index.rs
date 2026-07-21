@@ -64,7 +64,10 @@ enum Request {
     /// opened — it jumps ahead of queued root rescans and even preempts one
     /// mid-flight (see the worker's checkpoint), because the user is sitting
     /// in front of that folder waiting for hashes (V-04).
-    Scan { folder: PathBuf, user: bool },
+    Scan {
+        folder: PathBuf,
+        user: bool,
+    },
     Enrich {
         path: String,
         enrichment: Enrichment,

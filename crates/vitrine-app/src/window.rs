@@ -2415,8 +2415,9 @@ impl VitrineWindow {
                     move |result| {
                         match result {
                             Ok(()) => moved.borrow_mut().push(path.clone()),
-                            Err(err) => window
-                                .toast(&format!("Couldn’t move to trash: {}", err.message())),
+                            Err(err) => {
+                                window.toast(&format!("Couldn’t move to trash: {}", err.message()))
+                            }
                         }
                         remaining.set(remaining.get() - 1);
                         if remaining.get() != 0 {
@@ -3135,8 +3136,9 @@ impl VitrineWindow {
                                 moved.set(moved.get() + 1);
                                 window.remove_item(&item);
                             }
-                            Err(err) => window
-                                .toast(&format!("Couldn’t move to trash: {}", err.message())),
+                            Err(err) => {
+                                window.toast(&format!("Couldn’t move to trash: {}", err.message()))
+                            }
                         }
                         remaining.set(remaining.get() - 1);
                         if remaining.get() == 0 {
@@ -3272,8 +3274,7 @@ impl VitrineWindow {
 
         // Browse a folder by path — the viewer's Folder row activates this to
         // jump from an image to its containing folder in the grid.
-        let browse_folder =
-            gio::SimpleAction::new("browse-folder", Some(glib::VariantTy::STRING));
+        let browse_folder = gio::SimpleAction::new("browse-folder", Some(glib::VariantTy::STRING));
         browse_folder.connect_activate(glib::clone!(
             #[weak(rename_to = window)]
             self,
