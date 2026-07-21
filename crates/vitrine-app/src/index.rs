@@ -584,6 +584,12 @@ fn apply(
 /// The enrichment driver (main thread). Pulls a batch of un-enriched paths,
 /// decodes them concurrently (gated by the shared decode limit), sends each
 /// result back to the writer, then repeats until a batch comes back empty.
+/// How many enrichment items run at once. Deliberately below the decode gate's
+/// width, so background probes can never occupy every decode slot — and it is
+/// the bound on decoded-but-unhashed frames alive at one time (V-23: spawning
+/// the whole batch let frames pile up behind a stalled main loop).
+const ENRICH_CONCURRENCY: usize = 4;
+
 async fn run_enrichment(requests: async_channel::Sender<Request>) {
     loop {
         let (reply_tx, reply_rx) = async_channel::bounded(1);
@@ -601,25 +607,43 @@ async fn run_enrichment(requests: async_channel::Sender<Request>) {
             return;
         }
 
-        // Yield the decode gate to interactive thumbnail/viewer decodes before
-        // spending it on a batch of background pHash decodes: park while the UI is
-        // actively loading, resume when it's idle. Checked once per batch, not per
-        // item (which would spawn a poller per decode and churn the main loop).
-        crate::decode::yield_to_foreground().await;
-
-        // Decode the whole batch concurrently (the decode gate bounds real
-        // parallelism); await all so every Enrich write is enqueued before the
+        // A fixed set of workers pulling from a shared queue, each yielding to
+        // interactive decodes *per item*: a batch begun while the UI was idle
+        // parks the moment the user starts browsing (V-23 — the old
+        // once-per-batch yield let a started batch compete to its end). When
+        // the UI is idle the yield returns after two atomic loads; the 50ms
+        // pollers it warned about only exist while interactive decodes are in
+        // flight, and are capped at ENRICH_CONCURRENCY, not batch size.
+        //
+        // All workers are awaited, so every Enrich write is enqueued before the
         // next TakeBatch, keeping the queue monotonic.
-        let mut handles = Vec::with_capacity(batch.len());
-        for path in batch {
+        let queue: Rc<std::cell::RefCell<std::collections::VecDeque<String>>> =
+            Rc::new(std::cell::RefCell::new(batch.into()));
+        let mut workers = Vec::with_capacity(ENRICH_CONCURRENCY);
+        for _ in 0..ENRICH_CONCURRENCY {
+            let queue = queue.clone();
             let requests = requests.clone();
-            handles.push(glib::spawn_future_local(async move {
-                let enrichment = enrich_one(&path).await;
-                let _ = requests.send(Request::Enrich { path, enrichment }).await;
+            workers.push(glib::spawn_future_local(async move {
+                loop {
+                    crate::decode::yield_to_foreground().await;
+                    let Some(path) = queue.borrow_mut().pop_front() else {
+                        break;
+                    };
+                    crate::debug::enrich_begin();
+                    let enrichment = enrich_one(&path).await;
+                    crate::debug::enrich_end();
+                    if requests
+                        .send(Request::Enrich { path, enrichment })
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
             }));
         }
-        for handle in handles {
-            let _ = handle.await;
+        for worker in workers {
+            let _ = worker.await;
         }
     }
 }
@@ -629,9 +653,18 @@ async fn run_enrichment(requests: async_channel::Sender<Request>) {
 /// retried forever.
 async fn enrich_one(path: &str) -> Enrichment {
     let file = gio::File::for_path(path);
+    // One stat serves both the heavy-lane routing and the cache-validity mtime.
+    let meta = std::fs::metadata(path).ok();
+    let byte_size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+    let mtime = meta
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
     // Decode at the grid's thumbnail size, not a pHash-only 64px frame: the same
     // decode now serves both the pHash *and* the warmed display thumbnail (#3).
-    let Some(probe) = crate::decode::probe(&file, crate::thumbnails::WARM_PX).await else {
+    let Some(probe) = crate::decode::probe(&file, crate::thumbnails::WARM_PX, byte_size).await
+    else {
         return Enrichment::default();
     };
     let exif = probe
@@ -639,25 +672,31 @@ async fn enrich_one(path: &str) -> Enrichment {
         .as_deref()
         .map(vitrine_engine::parse_exif)
         .unwrap_or_default();
-    let phash = phash_from_texture(&probe.frame);
-    // #3: warm the on-disk thumbnail cache from this decode so browsing an indexed
-    // folder needs no on-demand decode. Uses the source's mtime for cache validity.
-    let mtime = std::fs::metadata(path)
-        .ok()
-        .and_then(|m| m.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    crate::thumbnails::warm_cache(&file, mtime, &probe.frame).await;
-    Enrichment {
+    let mut enrichment = Enrichment {
         width: probe.width as i64,
         height: probe.height as i64,
-        phash,
+        phash: None,
         format: probe.format,
         date_taken: exif.date_taken,
         camera: exif.camera,
         orientation: exif.orientation,
-    }
+    };
+    // glycin's scale hint is best-effort, so the frame may come back near full
+    // size. Shrink it on a worker — which also frees the full-size texture off
+    // the main thread — before any pixels are downloaded here: downloading
+    // full frames on the main loop was V-23's multi-second stall. The pHash is
+    // unaffected by hashing the shrunk frame (phash_rgb8 reduces to its own
+    // tiny grid regardless). A failed downscale still keeps the metadata.
+    let Some(frame) =
+        crate::thumbnails::downscale_cpu(probe.frame, crate::thumbnails::WARM_PX).await
+    else {
+        return enrichment;
+    };
+    enrichment.phash = phash_from_texture(&frame);
+    // #3: warm the on-disk thumbnail cache from this decode so browsing an indexed
+    // folder needs no on-demand decode. Uses the source's mtime for cache validity.
+    crate::thumbnails::warm_cache(&file, mtime, &frame).await;
+    enrichment
 }
 
 /// Compute the perceptual hash of a decoded frame by downloading its pixels as

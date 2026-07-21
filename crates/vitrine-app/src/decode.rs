@@ -57,10 +57,12 @@ impl Drop for InteractiveGuard {
 }
 
 /// Park until the interactive foreground is idle: no interactive decodes in flight
-/// and none for a short grace period. The enrichment driver calls this **once per
-/// batch** (not per item — that spawned a poller per decode and churned the main
-/// loop). Background indexing runs full-tilt when you're not browsing and steps
-/// aside the moment you are.
+/// and none for a short grace period. The enrichment workers call this per item;
+/// when the foreground is idle it returns immediately (two atomic loads), so the
+/// 50ms poll only runs while the user is actively decoding — and then only from
+/// `ENRICH_CONCURRENCY` parked workers, not one per batch item. Background
+/// indexing runs full-tilt when you're not browsing and steps aside the moment
+/// you are.
 pub async fn yield_to_foreground() {
     const GRACE_MS: u64 = 150;
     loop {
@@ -188,8 +190,16 @@ pub struct Probe {
 
 /// Decode `file` once for indexing: read its metadata and a `phash_px`-scaled
 /// frame (perceptual hashing only needs a small image). Shares the decode gate
-/// with thumbnailing so background enrichment can't outrun the UI's decodes.
-pub async fn probe(file: &gio::File, phash_px: u32) -> Option<Probe> {
+/// with thumbnailing so background enrichment can't outrun the UI's decodes,
+/// and — like `thumbnail` — routes large sources through the heavy lane, so a
+/// batch of big probes can't occupy every decode slot at once (V-23: an
+/// enrichment batch over a large-image folder held ~2 GB of frames).
+/// `byte_size` is the source file's size (0 when unknown — treated as small).
+pub async fn probe(file: &gio::File, phash_px: u32, byte_size: i64) -> Option<Probe> {
+    let _heavy = match heavy_gate() {
+        Some(gate) if byte_size >= heavy_bytes() => Some(gate.acquire().await),
+        _ => None,
+    };
     let _permit = decode_gate().acquire().await;
     let image = Loader::new(file.clone()).load().await.ok()?;
     let details = image.details();

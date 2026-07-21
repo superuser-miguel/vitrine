@@ -916,10 +916,13 @@ impl VitrineWindow {
                     };
                     eprintln!(
                         "VDBG fps={fps} frame_max={fmax_ms}ms stall={stall}ms \
-                         decode[live={} done={} +{rate}/s] queued={queued} \
-                         cache_hit={hit}% ram_cache={cache_mb}MB/{cache_n} rss={}MB",
+                         decode[live={} done={} +{rate}/s] enrich[live={} done={}] \
+                         queued={queued} cache_hit={hit}% \
+                         ram_cache={cache_mb}MB/{cache_n} rss={}MB",
                         c.inflight,
                         c.done,
+                        c.enrich_inflight,
+                        c.enrich_done,
                         crate::debug::rss_mb()
                     );
                     glib::ControlFlow::Continue

@@ -15,6 +15,10 @@ static DECODES_INFLIGHT: AtomicU64 = AtomicU64::new(0);
 static DECODES_DONE: AtomicU64 = AtomicU64::new(0);
 static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+// Enrichment probes are not interactive decodes, so they get their own pair —
+// V-23 was misread for three logs because its work was invisible to the HUD.
+static ENRICH_INFLIGHT: AtomicU64 = AtomicU64::new(0);
+static ENRICH_DONE: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the HUD/log is enabled (`VITRINE_DEBUG` set in the environment).
 pub fn enabled() -> bool {
@@ -46,6 +50,15 @@ pub fn decode_begin() {
 pub fn decode_end() {
     DECODES_INFLIGHT.fetch_sub(1, Ordering::Relaxed);
     DECODES_DONE.fetch_add(1, Ordering::Relaxed);
+}
+/// A background enrichment item started (decode + pHash + cache warm).
+pub fn enrich_begin() {
+    ENRICH_INFLIGHT.fetch_add(1, Ordering::Relaxed);
+}
+/// A background enrichment item finished (success or failure).
+pub fn enrich_end() {
+    ENRICH_INFLIGHT.fetch_sub(1, Ordering::Relaxed);
+    ENRICH_DONE.fetch_add(1, Ordering::Relaxed);
 }
 
 /// An annotation write was handed to the writer thread: which op, how many rows
@@ -130,6 +143,8 @@ pub struct Counters {
     pub done: u64,
     pub hits: u64,
     pub misses: u64,
+    pub enrich_inflight: u64,
+    pub enrich_done: u64,
 }
 
 pub fn snapshot() -> Counters {
@@ -138,6 +153,8 @@ pub fn snapshot() -> Counters {
         done: DECODES_DONE.load(Ordering::Relaxed),
         hits: CACHE_HITS.load(Ordering::Relaxed),
         misses: CACHE_MISSES.load(Ordering::Relaxed),
+        enrich_inflight: ENRICH_INFLIGHT.load(Ordering::Relaxed),
+        enrich_done: ENRICH_DONE.load(Ordering::Relaxed),
     }
 }
 

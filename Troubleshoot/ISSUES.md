@@ -288,6 +288,55 @@ twice per interaction. Needs a probe to close.
 `window.rs:1179` calls `all_tags()` — paying the full V-06 subquery — then maps to
 `t.name` and drops every count. Wants a plain `SELECT name FROM tags ORDER BY name`.
 
+### V-23 · Enriching a large-image folder freezes the app and spikes RSS to ~2 GB · `MEASURED` (2026-07-21 evening logs) · **FIXED (untested)**
+
+> **Fixed 2026-07-21, same evening.** Four changes, one commit:
+>
+> 1. `decode::probe()` routes sources ≥ the heavy threshold through the
+>    **heavy lane**, exactly like `thumbnail()` — it was the one decode path
+>    that skipped it, so an enrichment batch could fill every decode slot
+>    with huge frames at once.
+> 2. `enrich_one` **downscales the frame off the main thread**
+>    (`downscale_cpu`, which also frees the full-size texture on the worker)
+>    *before* any pixel download. glycin's `scale(256)` hint is best-effort;
+>    when a loader ignored it, the pHash's `TextureDownloader` pulled the
+>    full-size frame through the main context — that was the multi-second
+>    stall.
+> 3. `run_enrichment` replaces spawn-the-whole-batch with
+>    `ENRICH_CONCURRENCY = 4` workers pulling a shared queue, yielding to the
+>    foreground **per item**. The old once-per-batch yield let a batch begun
+>    while idle compete with the user to its end, and the spawn-all shape let
+>    up to 64 decoded frames pile up behind the stalled loop (the ~2 GB).
+> 4. The HUD now prints `enrich[live=… done=…]`. Enrichment was invisible to
+>    `decode[…]`, which is why three logs read as "frozen with nothing
+>    happening".
+>
+> Side effect, deliberate: pHashes are now computed from the ≤256px frame.
+> Equivalent for hamming-distance matching (`phash_rgb8` reduces to its own
+> tiny grid regardless of input size), but not bit-identical to hashes stored
+> before the fix.
+>
+> **Verify next run (rebuild + reinstall first):** launch must stay responsive
+> while `enrich[live>0]` climbs; RSS in the hundreds of MB, not ~2 GB; scrolling
+> mid-enrichment stays smooth (per-item yield). The queue from the large-image
+> folder was still draining as of the 19:12 log, so just launching exercises it.
+
+Measured across the 2026-07-21 evening logs. The 17:47 run browsed a folder of
+much larger images than the library norm, healthy — until the first tick after
+grid decodes went idle: RSS 301→**2024MB**, stall 1456ms (that is
+`yield_to_foreground` un-parking the first enrichment batch). The 18:20 and
+18:21 runs were killed during launch freezes: repeated 3–6s stalls,
+`frame_max` ~11s, RSS 1.9–2.2GB, with `decode[live=0 done=0]` throughout —
+the launch mop-up (`setup_indexer` → `start_enrichment`) resumes the same
+queue every session until it drains. 18:22 survived the freeze (one 10.9s
+frame, then RSS 172MB and 60fps) and stuttered 300–600ms while browsing;
+19:12 stalled 200–800ms for its entire run, an hour after the trigger.
+
+Chain: scan `Finished` → enrichment queue fills → 64-item batch spawned all at
+once → glycin's scale hint ignored for these files → near-full-size frames →
+full-texture pHash downloads on the main context, one per stall, while further
+decoded frames accumulate in resolved futures behind the blocked loop.
+
 ---
 
 ## Tier 3 — UI/UX. Observed in use.
