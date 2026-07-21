@@ -33,13 +33,6 @@
 //! called once per item and memoised by the caller, never a comparator called
 //! O(n log n) times.
 
-// TEMPORARY — remove in the commit that wires this into the Sort By menu.
-// The host is complete and covered by the tests below, but nothing in the app
-// calls it yet, so every public item reads as dead to clippy. This allow must
-// not outlive the wiring commit: once `window.rs` drives the host, real dead
-// code here should fail the gate again like anywhere else.
-#![allow(dead_code)]
-
 use mlua::chunk::ChunkMode;
 use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, Value, VmState};
 use std::path::Path;
@@ -583,6 +576,38 @@ mod tests {
             SortKey::Num(f64::NAN).cmp_key(&SortKey::Num(1.0)),
             Ordering::Greater
         );
+    }
+
+    /// The example we ship must actually work — otherwise the first thing a
+    /// script author copies is broken. Loads the real file from `docs/`, so
+    /// editing it without re-checking fails the gate.
+    #[test]
+    fn the_shipped_example_script_works() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/scripts/natural-sort.lua");
+        let src = std::fs::read_to_string(path).expect("shipped example is missing");
+        let host = ScriptHost::new().unwrap();
+        host.load_str("natural-sort", &src)
+            .expect("shipped example must load");
+
+        let names: Vec<String> = host.providers().iter().map(|p| p.name.clone()).collect();
+        assert_eq!(names, vec!["Name (natural)", "Oldest first"]);
+
+        // The order it exists to produce.
+        let two = host.sort_key(0, &facts("IMG_2.jpg")).unwrap();
+        let ten = host.sort_key(0, &facts("img_10.jpg")).unwrap();
+        assert_eq!(two.cmp_key(&ten), std::cmp::Ordering::Less);
+
+        // The gsub-returns-two-values trap the file warns about: a key must be
+        // one value, and a string here rather than a number.
+        assert!(matches!(two, SortKey::Str(_)));
+
+        // `date_taken or mtime` must yield a number even when unenriched.
+        let unenriched = ItemFacts {
+            mtime: 1234,
+            date_taken: None,
+            ..Default::default()
+        };
+        assert_eq!(host.sort_key(1, &unenriched).unwrap(), SortKey::Num(1234.0));
     }
 
     /// The whole point of mlua's `send` feature: the host must be movable to a

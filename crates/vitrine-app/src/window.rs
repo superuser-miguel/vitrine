@@ -7,9 +7,10 @@
 //! the [`crate::viewer`] page onto the `AdwNavigationView`, sharing the store.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -32,11 +33,26 @@ pub enum SortField {
     Type,
     Rating,
     DateTaken,
+    /// A sort order supplied by a Lua script (PLAN §16.2).
+    ///
+    /// Carries the provider's *index* rather than its name so `SortState`
+    /// stays `Copy` and can keep living in a `Cell`. The index is only valid
+    /// against the provider list of the moment, so it is never persisted:
+    /// settings store the provider's name (`script:<name>`), which survives a
+    /// reload that reorders registrations, and it is resolved back to an index
+    /// at startup by `sort_field_from_id`.
+    Script(u32),
 }
 
+/// Settings prefix marking a persisted script sort, distinguishing it from the
+/// built-in ids without risking a collision with one.
+const SCRIPT_SORT_PREFIX: &str = "script:";
+
 impl SortField {
-    /// The menu-action target string ↔ field.
-    fn from_id(id: &str) -> SortField {
+    /// The menu-action target string ↔ built-in field. Script sorts do not
+    /// round-trip through here — they need the provider list, so the window's
+    /// `sort_field_from_id` handles them.
+    fn from_builtin_id(id: &str) -> SortField {
         match id {
             "size" => SortField::Size,
             "modified" => SortField::Modified,
@@ -47,7 +63,9 @@ impl SortField {
         }
     }
 
-    fn id(self) -> &'static str {
+    /// The stable id for a built-in. `Script` has none — it is named, not
+    /// enumerated — so callers must go through the window.
+    fn builtin_id(self) -> &'static str {
         match self {
             SortField::Name => "name",
             SortField::Size => "size",
@@ -55,6 +73,10 @@ impl SortField {
             SortField::Type => "type",
             SortField::Rating => "rating",
             SortField::DateTaken => "date-taken",
+            // Unreachable through `sort_field_id`, which special-cases Script
+            // before consulting this; falling back to the default sort is the
+            // safe answer if some future caller forgets.
+            SortField::Script(_) => "name",
         }
     }
 }
@@ -210,6 +232,10 @@ mod imp {
         pub nav_view: TemplateChild<adw::NavigationView>,
         #[template_child]
         pub toast_overlay: TemplateChild<adw::ToastOverlay>,
+        /// The Sort By menu button — its menu model gains a script section
+        /// at runtime (`rebuild_script_sort_menu`).
+        #[template_child]
+        pub sort_button: TemplateChild<gtk::MenuButton>,
         #[template_child]
         pub icon_smaller: TemplateChild<gtk::Button>,
         #[template_child]
@@ -261,6 +287,24 @@ mod imp {
         pub sorter: RefCell<Option<gtk::CustomSorter>>,
         /// Active sort, shared with the sorter closure.
         pub sort_state: Rc<Cell<SortState>>,
+        /// The Lua host (PLAN §16, security model §16.7), or `None` if the VM
+        /// could not be created. `Arc` because key computation runs on a
+        /// worker — §16.2 keeps scripts off the main loop.
+        pub script_host: RefCell<Option<Arc<crate::script::ScriptHost>>>,
+        /// Memoised script sort keys for the active script sort, shared with
+        /// the sorter closure so the comparator stays native.
+        ///
+        /// **Keyed by path, deliberately not by content hash.** A content hash
+        /// identifies *bytes*, and two copies of one image under different
+        /// names share it — but a key function reading `item.name` (the
+        /// natural-sort case, E1's own acceptance criterion) must yield a
+        /// different key for each. Path is the identity of the *item as the
+        /// script sees it*, and we cannot know which facts a given key
+        /// function read. Hash-keying here would silently mis-order duplicates.
+        pub script_keys: Rc<RefCell<HashMap<String, crate::script::SortKey>>>,
+        /// Which provider `script_keys` was computed for, so a stale memo from
+        /// a previous sort is never read as if it belonged to this one.
+        pub script_keys_for: Rc<Cell<Option<u32>>>,
         /// Selection model the grid renders.
         pub selection: RefCell<Option<gtk::MultiSelection>>,
         /// The grid view (its factory is rebuilt when the icon size changes).
@@ -316,6 +360,7 @@ mod imp {
                 dedup_title: RefCell::new(None),
                 nav_view: Default::default(),
                 toast_overlay: Default::default(),
+                sort_button: Default::default(),
                 icon_smaller: Default::default(),
                 icon_larger: Default::default(),
                 index_banner: Default::default(),
@@ -338,6 +383,9 @@ mod imp {
                 sort_model: RefCell::new(None),
                 sorter: RefCell::new(None),
                 sort_state: Rc::new(Cell::new(SortState::default())),
+                script_host: RefCell::new(None),
+                script_keys: Rc::new(RefCell::new(HashMap::new())),
+                script_keys_for: Rc::new(Cell::new(None)),
                 selection: RefCell::new(None),
                 grid_view: RefCell::new(None),
                 icon_index: std::cell::Cell::new(DEFAULT_ICON),
@@ -445,10 +493,22 @@ impl VitrineWindow {
         let filter_model = gtk::FilterListModel::new(Some(imp.store.clone()), Some(filter.clone()));
 
         let state = imp.sort_state.clone();
+        // Script keys are precomputed on a worker and read here as plain data
+        // (§16.2: the comparator never enters Lua).
+        let script_keys = imp.script_keys.clone();
+        let script_keys_for = imp.script_keys_for.clone();
         let sorter = gtk::CustomSorter::new(move |a, b| {
             let a = a.downcast_ref::<ImageObject>().unwrap();
             let b = b.downcast_ref::<ImageObject>().unwrap();
-            compare_images(a, b, state.get())
+            let state = state.get();
+            if let SortField::Script(idx) = state.field {
+                // A memo belonging to a different provider is not an answer to
+                // this question; fall back rather than order by the wrong key.
+                if script_keys_for.get() == Some(idx) {
+                    return compare_by_script_key(a, b, state, &script_keys.borrow());
+                }
+            }
+            compare_images(a, b, state)
         });
         let sort_model = gtk::SortListModel::new(Some(filter_model), Some(sorter.clone()));
         *imp.filter.borrow_mut() = Some(filter);
@@ -3216,16 +3276,22 @@ impl VitrineWindow {
         // Nautilus (pick what to sort by, then flip the order). Both restore
         // from settings so the choice is remembered across sessions.
         let saved = crate::settings::Settings::load();
+        // Scripts load before the saved sort is resolved, so a persisted
+        // `script:<name>` can find its provider instead of silently reverting.
+        self.setup_scripts();
         let state = SortState {
-            field: SortField::from_id(&saved.sort_field()),
+            field: self.sort_field_from_id(&saved.sort_field()),
             descending: saved.sort_descending(),
         };
         self.imp().sort_state.set(state);
+        if let SortField::Script(i) = state.field {
+            self.recompute_script_keys(i);
+        }
 
         let field = gio::SimpleAction::new_stateful(
             "sort-field",
             Some(glib::VariantTy::STRING),
-            &state.field.id().to_variant(),
+            &self.sort_field_id(state.field).to_variant(),
         );
         field.connect_activate(glib::clone!(
             #[weak(rename_to = window)]
@@ -3233,7 +3299,8 @@ impl VitrineWindow {
             move |action, param| {
                 if let Some(id) = param.and_then(|v| v.str()) {
                     action.set_state(&id.to_variant());
-                    window.set_sort_field(SortField::from_id(id));
+                    let field = window.sort_field_from_id(id);
+                    window.set_sort_field(field);
                 }
             }
         ));
@@ -3366,12 +3433,209 @@ impl VitrineWindow {
         }
     }
 
+    /// Where user scripts live: the app's own data dir, so no sandbox
+    /// permission is involved (PLAN §16.1 decision 4 — scripts are data).
+    fn scripts_dir() -> PathBuf {
+        glib::user_data_dir().join("vitrine").join("scripts")
+    }
+
+    /// Create the Lua host and load whatever is in the scripts directory.
+    ///
+    /// Every failure here is non-fatal: no scripts, an unreadable directory, a
+    /// broken script, even a VM that refuses to start all degrade to "the
+    /// script sorts are not in the menu", never to an error dialog.
+    fn setup_scripts(&self) {
+        let host = match crate::script::ScriptHost::new() {
+            Ok(h) => Arc::new(h),
+            Err(e) => {
+                // Worth a line in the log, but not worth interrupting someone
+                // who never asked for scripting.
+                eprintln!("VDBG-SCRIPT host unavailable: {e}");
+                return;
+            }
+        };
+        let errors = host.load_dir(&Self::scripts_dir());
+        *self.imp().script_host.borrow_mut() = Some(host);
+
+        // §16.6: a script error surfaces as a toast naming the script.
+        for e in errors.iter().take(3) {
+            self.toast(&format!("Script “{}” failed: {}", e.script, e.message));
+        }
+        if errors.len() > 3 {
+            self.toast(&format!("{} more scripts failed to load", errors.len() - 3));
+        }
+        self.rebuild_script_sort_menu();
+    }
+
+    /// Append a section of script-provided sort orders to the Sort By menu,
+    /// replacing any previously appended one. No providers, no section.
+    fn rebuild_script_sort_menu(&self) {
+        let imp = self.imp();
+        let Some(model) = imp.sort_button.menu_model() else {
+            return;
+        };
+        let Ok(menu) = model.downcast::<gio::Menu>() else {
+            return;
+        };
+
+        // The blueprint contributes two sections (fields, direction); ours is
+        // any third one, removed before re-adding so a hot reload does not
+        // stack duplicates.
+        const BUILTIN_SECTIONS: i32 = 2;
+        while menu.n_items() > BUILTIN_SECTIONS {
+            menu.remove(menu.n_items() - 1);
+        }
+
+        let Some(host) = imp.script_host.borrow().clone() else {
+            return;
+        };
+        let providers = host.providers();
+        if providers.is_empty() {
+            return;
+        }
+        let section = gio::Menu::new();
+        for p in providers.iter() {
+            let item = gio::MenuItem::new(Some(&p.name), None);
+            item.set_action_and_target_value(
+                Some("win.sort-field"),
+                Some(&format!("{SCRIPT_SORT_PREFIX}{}", p.name).to_variant()),
+            );
+            section.append_item(&item);
+        }
+        menu.append_section(Some(&gettextrs::gettext("From Scripts")), &section);
+    }
+
+    /// The provider index registered under `name`, if any.
+    fn script_index_by_name(&self, name: &str) -> Option<u32> {
+        let host = self.imp().script_host.borrow().clone()?;
+        let providers = host.providers();
+        providers
+            .iter()
+            .position(|p| p.name == name)
+            .map(|i| i as u32)
+    }
+
+    /// The provider name at `index`, if it still exists.
+    fn script_provider_name(&self, index: u32) -> Option<String> {
+        let host = self.imp().script_host.borrow().clone()?;
+        let providers = host.providers();
+        providers.get(index as usize).map(|p| p.name.clone())
+    }
+
+    /// The settings/menu id for a field. Script sorts persist by *name*, so a
+    /// reload that reorders registrations does not silently change the sort.
+    fn sort_field_id(&self, field: SortField) -> String {
+        match field {
+            SortField::Script(i) => self
+                .script_provider_name(i)
+                .map(|n| format!("{SCRIPT_SORT_PREFIX}{n}"))
+                .unwrap_or_else(|| SortField::Name.builtin_id().to_string()),
+            other => other.builtin_id().to_string(),
+        }
+    }
+
+    /// Resolve a persisted or menu id back to a field. A `script:` id whose
+    /// provider is gone (script deleted or renamed between sessions) falls
+    /// back to Name rather than leaving the grid in an unsortable state.
+    fn sort_field_from_id(&self, id: &str) -> SortField {
+        match id.strip_prefix(SCRIPT_SORT_PREFIX) {
+            Some(name) => self
+                .script_index_by_name(name)
+                .map(SortField::Script)
+                .unwrap_or(SortField::Name),
+            None => SortField::from_builtin_id(id),
+        }
+    }
+
+    /// Compute this script sort's keys for every item currently in the store,
+    /// off the main loop (§16.2), then re-sort.
+    ///
+    /// The whole pass is one worker hop: facts are cheap GObject reads done on
+    /// the main thread, the Lua calls happen on the worker, and only plain
+    /// data crosses back. The comparator never enters Lua.
+    fn recompute_script_keys(&self, index: u32) {
+        let imp = self.imp();
+        let Some(host) = imp.script_host.borrow().clone() else {
+            return;
+        };
+
+        let mut facts = Vec::with_capacity(imp.store.n_items() as usize);
+        for i in 0..imp.store.n_items() {
+            let Some(obj) = imp.store.item(i).and_downcast::<ImageObject>() else {
+                continue;
+            };
+            facts.push((
+                script_memo_key(&obj),
+                crate::script::ItemFacts {
+                    name: obj.display_name(),
+                    path: obj
+                        .file()
+                        .path()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    size: obj.size(),
+                    mtime: obj.mtime(),
+                    content_type: obj.content_type(),
+                    content_hash: obj.content_hash(),
+                    rating: obj.rating(),
+                    orientation: obj.orientation(),
+                    date_taken: obj.date_taken(),
+                },
+            ));
+        }
+
+        let (tx, rx) = async_channel::bounded(1);
+        gio::spawn_blocking(move || {
+            let mut keys = HashMap::with_capacity(facts.len());
+            let mut failure = None;
+            for (memo, f) in facts {
+                match host.sort_key(index as usize, &f) {
+                    Ok(k) => {
+                        keys.insert(memo, k);
+                    }
+                    Err(e) => {
+                        // One bad item is one bad script: stop rather than run
+                        // the same failing call thousands more times.
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+            let _ = tx.send_blocking((keys, failure));
+        });
+
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            async move {
+                let Ok((keys, failure)) = rx.recv().await else {
+                    return;
+                };
+                let imp = window.imp();
+                if let Some(e) = failure {
+                    window.toast(&format!("Sort script “{}” failed: {}", e.script, e.message));
+                    // Leave the grid in a state the user can reason about.
+                    imp.script_keys.borrow_mut().clear();
+                    imp.script_keys_for.set(None);
+                    window.set_sort_field(SortField::Name);
+                    return;
+                }
+                *imp.script_keys.borrow_mut() = keys;
+                imp.script_keys_for.set(Some(index));
+                window.apply_sort_state(imp.sort_state.get());
+            }
+        ));
+    }
+
     /// Change the sort field (and persist it), re-sorting the grid live.
     fn set_sort_field(&self, field: SortField) {
         let mut state = self.imp().sort_state.get();
         state.field = field;
         self.apply_sort_state(state);
-        crate::settings::Settings::load().set_sort_field(field.id());
+        crate::settings::Settings::load().set_sort_field(&self.sort_field_id(field));
+        if let SortField::Script(i) = field {
+            self.recompute_script_keys(i);
+        }
     }
 
     /// Flip ascending/descending (and persist it), re-sorting the grid live.
@@ -3702,7 +3966,8 @@ impl VitrineWindow {
                 #[weak(rename_to = window)]
                 self,
                 move || {
-                    window.set_sort_field(SortField::from_id(&field));
+                    let field = window.sort_field_from_id(&field);
+                    window.set_sort_field(field);
                     window.set_sort_descending(descending);
                     let top: Vec<String> = window
                         .model()
@@ -4060,6 +4325,54 @@ fn direction_id(descending: bool) -> &'static str {
     }
 }
 
+/// The memo key identifying one item's script sort key.
+///
+/// Path, not content hash — see the `script_keys` field comment: a hash
+/// identifies bytes, and a key function reading `item.name` must distinguish
+/// two identically-encoded files with different names.
+fn script_memo_key(o: &ImageObject) -> String {
+    o.file()
+        .path()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| o.display_name())
+}
+
+/// Order by a precomputed script key, falling back to the name tiebreak.
+///
+/// Items with no key yet — a folder that gained files after the precompute —
+/// sort *after* everything keyed, deterministically, rather than clumping at
+/// the top. That mirrors the Date Taken treatment of un-enriched files: a
+/// partially-computed sort degrades into "keyed ones first, rest after"
+/// instead of looking randomly ordered.
+fn compare_by_script_key(
+    a: &ImageObject,
+    b: &ImageObject,
+    state: SortState,
+    keys: &HashMap<String, crate::script::SortKey>,
+) -> gtk::Ordering {
+    use std::cmp::Ordering;
+    let by_name = || {
+        a.display_name()
+            .to_lowercase()
+            .cmp(&b.display_name().to_lowercase())
+    };
+    let ka = keys.get(&script_memo_key(a));
+    let kb = keys.get(&script_memo_key(b));
+    let primary = match (ka, kb) {
+        (Some(x), Some(y)) => x.cmp_key(y),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    };
+    let ord = primary.then_with(by_name);
+    let ord = if state.descending { ord.reverse() } else { ord };
+    match ord {
+        Ordering::Less => gtk::Ordering::Smaller,
+        Ordering::Equal => gtk::Ordering::Equal,
+        Ordering::Greater => gtk::Ordering::Larger,
+    }
+}
+
 /// Compare two items for the grid sorter: the chosen field, then a case-folded
 /// name tiebreak for a stable order, all reversed together when descending.
 fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Ordering {
@@ -4090,6 +4403,11 @@ fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Or
             (None, Some(_)) => Ordering::Greater,
             (None, None) => Ordering::Equal,
         },
+        // Reached only when a script sort is active but its keys are not ready
+        // (or belong to another provider) — the sorter routes to
+        // `compare_by_script_key` otherwise. Ordering by name meanwhile is a
+        // calm, explicable placeholder rather than an arbitrary one.
+        SortField::Script(_) => Ordering::Equal,
     };
     let ord = primary.then_with(by_name);
     let ord = if state.descending { ord.reverse() } else { ord };
