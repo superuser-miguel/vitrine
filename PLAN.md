@@ -1526,9 +1526,22 @@ turn a hang or a crash into a toast:
    *well-meaning* author, which is exactly the accident class this tier exists
    to survive. **Add both to E1's acceptance criteria** (§16.6).
 
-*mlua note:* `Lua::sandbox()` is **Luau-only** and therefore unavailable to us —
-§16.1 locked Lua 5.4. The environment is hand-built. Current mlua's `Lua` is
-`Send + Sync`, so the worker threading is simpler than a state-per-thread design.
+*mlua notes (both corrected against the crate source, not docs.rs — docs.rs
+builds with all features on and will mislead you):*
+
+- `Lua::sandbox()` is **Luau-only** and therefore unavailable to us — §16.1
+  locked Lua 5.4. The environment is hand-built.
+- `Lua` is `Send` **only with mlua's `send` feature**, which we enable precisely
+  so the host can live on a worker as §16.2 requires. The feature adds no
+  crates (it is a pure `cfg` flag over `MaybeSend`), so `cargo-sources.json` is
+  unaffected — but it does make every registered callback `Send`, so host state
+  shared with Lua must be `Arc`/atomic rather than `Rc`/`Cell`.
+- The stdlib is opted *into* via `StdLib` flags rather than deleted from
+  globals. An unloaded library has no table to reach through an upvalue or the
+  registry, so this is strictly stronger than the "subtractive" framing above.
+  Only the base library's loaders must still be removed by hand (Lua always
+  loads base and offers no flag), and that step is the weakest link in the
+  sandbox — one more reason §16.7 refuses to call any of it a security boundary.
 
 #### 16.7.3 Why the host executes batches — now empirically grounded
 
@@ -1559,14 +1572,26 @@ input or multiple files, stage into `~/.var/app/<id>/sandbox/` (the *only*
 directory `--sandbox-expose` / `--sandbox-expose-ro` accept — absolute paths and
 subdirectories are rejected) and expose read-only where possible.
 
-**Open, blocks E2's cancel criterion:** `flatpak-spawn` has **no
-`--die-with-parent` and no pid-sharing options** (unlike `flatpak run`), so a
-sub-sandbox child can outlive Vitrine and we never see its PID. `--watch-bus`
-is the documented substitute — the spawned command exits when the spawner's bus
-connection closes. **Unverified:** a first attempt hung because the sub-sandbox
-child kept the parent instance alive, which is itself a lifecycle fact E2 must
-handle. Verify before building the run dialog; E2's "cancelling mid-batch leaves
-a coherent, reported state" depends on it.
+**Child lifecycle — `--watch-bus` is mandatory (VERIFIED 2026-07-21).**
+`flatpak-spawn` has **no `--die-with-parent` and no pid-sharing options**
+(unlike `flatpak run`), so a sub-sandbox child can outlive Vitrine and we never
+see its PID to kill it. `--watch-bus` is the substitute: the spawned command
+exits when the spawner's bus connection closes. Measured with a control:
+
+| spawn flags | spawner killed → child |
+|---|---|
+| `--sandbox --watch-bus` | **died with the spawner** (reaped) |
+| `--sandbox` (control) | **survived** (orphaned) |
+
+So E2 cancels a batch by killing the `flatpak-spawn` process it holds, and
+**every helper spawn passes `--watch-bus`** — without it, cancel leaks a running
+`magick` per file and app exit leaves them behind. That is E2's "cancelling
+mid-batch leaves a coherent, reported state," and it now has a mechanism.
+
+*(A first attempt at this test appeared to hang; the cause was the test itself —
+`pkill -f "sleep NNNN"` matched the shell whose own command line contained the
+pattern, killing the harness. Match with a bracket pattern (`sleep 9[9]131`)
+when probing for marker processes.)*
 
 #### 16.7.4 The rule, one line
 

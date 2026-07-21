@@ -42,9 +42,9 @@
 
 use mlua::chunk::ChunkMode;
 use mlua::{Function, HookTriggers, Lua, LuaOptions, StdLib, Table, Value, VmState};
-use std::cell::Cell;
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// The API version handed to scripts as `vitrine.api_version` (§16.2).
 /// Additions are fine without a bump; removals and behaviour changes are not.
@@ -144,17 +144,24 @@ pub struct SortProvider {
     key: Function,
 }
 
-/// The Lua host. Owns one VM; lives on the script worker thread.
+/// The Lua host. Owns one VM and is `Send`, so it can be handed to a worker —
+/// §16.2 forbids scripts from running anywhere near the main loop.
 ///
-/// `mlua::Lua` is `Send + Sync` in current mlua, so a single state on a
-/// dedicated worker is enough — no state-per-thread, and no `Mutex` on the
-/// hot path because the comparator never enters Lua at all.
+/// `Send` costs mlua's `send` feature (a pure `cfg` flag, no extra crates).
+/// Without it `Lua` is emphatically *not* `Send`, whatever docs.rs suggests —
+/// docs.rs builds with all features enabled. The price of the feature is that
+/// every callback registered into Lua must be `Send`, which is why the hook
+/// counter is an atomic and the provider list is a `Mutex` rather than the
+/// `Cell`/`RefCell` this would otherwise want.
+///
+/// None of that is on the hot path: the comparator never enters Lua at all
+/// (§16.2 — key functions, computed once per item and memoised by the caller).
 pub struct ScriptHost {
     lua: Lua,
     /// Hook firings within the current call. Reset before every entry into
     /// Lua; read by the hook to decide when a call has run away.
-    fires: Rc<Cell<u32>>,
-    providers: Rc<std::cell::RefCell<Vec<SortProvider>>>,
+    fires: Arc<AtomicU32>,
+    providers: Arc<Mutex<Vec<SortProvider>>>,
 }
 
 impl ScriptHost {
@@ -178,7 +185,7 @@ impl ScriptHost {
 
         // Limit 3b: instructions. The hook is per-VM and stays installed; the
         // budget is per-call, reset by `enter`.
-        let fires = Rc::new(Cell::new(0u32));
+        let fires = Arc::new(AtomicU32::new(0));
         {
             let fires = fires.clone();
             lua.set_hook(
@@ -187,8 +194,7 @@ impl ScriptHost {
                     ..Default::default()
                 },
                 move |_lua, _debug| {
-                    let n = fires.get() + 1;
-                    fires.set(n);
+                    let n = fires.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                     if n > MAX_HOOK_FIRES {
                         // Surfaces as a normal Lua error, so it travels the
                         // same path as a syntax error and lands in a toast.
@@ -221,7 +227,7 @@ impl ScriptHost {
             globals.set(name, Value::Nil).map_err(err)?;
         }
 
-        let providers = Rc::new(std::cell::RefCell::new(Vec::<SortProvider>::new()));
+        let providers = Arc::new(Mutex::new(Vec::<SortProvider>::new()));
 
         // The `vitrine` table — the world, per §16.2.
         let vitrine = lua.create_table().map_err(err)?;
@@ -239,7 +245,17 @@ impl ScriptHost {
     /// Reset the per-call instruction budget. Every entry into Lua goes
     /// through this, so one runaway call cannot poison the next.
     fn enter(&self) {
-        self.fires.set(0);
+        self.fires.store(0, AtomicOrdering::Relaxed);
+    }
+
+    /// The provider list, recovering from a poisoned lock instead of
+    /// panicking. Poisoning means some earlier call panicked while holding it;
+    /// propagating that would turn one bad script into a permanently dead
+    /// scripting tier, which is exactly the "never a crash" §16.6 rules out.
+    /// The data behind the lock is a plain `Vec` with no invariant a panic
+    /// could have left half-broken, so taking it back is safe.
+    fn lock(&self) -> MutexGuard<'_, Vec<SortProvider>> {
+        self.providers.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Load one script's source. `name` is the file stem, used for error
@@ -249,7 +265,7 @@ impl ScriptHost {
     /// first, which is what makes hot reload idempotent rather than
     /// accumulating a duplicate menu entry per save.
     pub fn load_str(&self, name: &str, src: &str) -> Result<(), ScriptError> {
-        self.providers.borrow_mut().retain(|p| p.script != name);
+        self.lock().retain(|p| p.script != name);
 
         let err = |e: mlua::Error| ScriptError {
             script: name.to_string(),
@@ -271,11 +287,14 @@ impl ScriptHost {
                         "register_sort: `name` must be a non-empty string",
                     ));
                 }
-                providers.borrow_mut().push(SortProvider {
-                    name,
-                    script: owner.clone(),
-                    key,
-                });
+                providers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(SortProvider {
+                        name,
+                        script: owner.clone(),
+                        key,
+                    });
                 Ok(())
             })
             .map_err(err)?;
@@ -333,14 +352,14 @@ impl ScriptHost {
     }
 
     /// Every registered sort order, in registration order.
-    pub fn providers(&self) -> std::cell::Ref<'_, Vec<SortProvider>> {
-        self.providers.borrow()
+    pub fn providers(&self) -> MutexGuard<'_, Vec<SortProvider>> {
+        self.lock()
     }
 
     /// Compute one item's sort key. Called once per item by the worker and
     /// memoised there; the comparator never reaches Lua.
     pub fn sort_key(&self, index: usize, facts: &ItemFacts) -> Result<SortKey, ScriptError> {
-        let providers = self.providers.borrow();
+        let providers = self.lock();
         let provider = providers.get(index).ok_or_else(|| ScriptError {
             script: "<host>".into(),
             message: format!("no sort provider at index {index}"),
@@ -564,6 +583,17 @@ mod tests {
             SortKey::Num(f64::NAN).cmp_key(&SortKey::Num(1.0)),
             Ordering::Greater
         );
+    }
+
+    /// The whole point of mlua's `send` feature: the host must be movable to a
+    /// worker, because §16.2 forbids scripts anywhere near the main loop. This
+    /// is a compile-time assertion — if the feature is ever dropped from
+    /// Cargo.toml, this test fails to build rather than silently pinning the
+    /// scripting tier to the main thread.
+    #[test]
+    fn host_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<ScriptHost>();
     }
 
     /// Scripts see the documented API version.
