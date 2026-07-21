@@ -121,11 +121,29 @@ impl Db {
                 self.query(&q)
             }
             CollectionKind::Catalog => {
+                // A catalog stores content hashes, and one hash can have many
+                // rows in `files` — genuine duplicate copies, and the same file
+                // indexed under both a real path and a document-portal handle.
+                //
+                // This used to be `GROUP BY ci.content_hash`, which collapses the
+                // join to one *arbitrary* row per hash. When the arbitrary pick
+                // was a portal handle the member rendered as a broken cell, and
+                // filtering the results afterwards could not help: only the one
+                // already-chosen row was ever handed out.
+                //
+                // Pick explicitly instead. Durable paths sort before portal
+                // handles, then lexicographically so the choice is stable across
+                // runs rather than left to the query planner.
                 let mut stmt = self.conn().prepare(
                     "SELECT f.* FROM collection_items ci
                      JOIN files f ON f.content_hash = ci.content_hash AND f.missing = 0
                      WHERE ci.collection_id = ?1
-                     GROUP BY ci.content_hash
+                       AND f.path = (
+                           SELECT g.path FROM files g
+                           WHERE g.content_hash = ci.content_hash AND g.missing = 0
+                           ORDER BY (g.path LIKE '/run/user/%/doc/%'), g.path
+                           LIMIT 1
+                       )
                      ORDER BY ci.position",
                 )?;
                 let rows = stmt.query_map([id], FileRecord::from_row)?;
@@ -349,5 +367,43 @@ mod tests {
         assert_eq!(db.rating("H").unwrap(), Some(5));
         assert_eq!(db.comment("H").unwrap().as_deref(), Some("great shot"));
         assert_eq!(paths(db.collection_files(cat).unwrap()), ["/new.jpg"]);
+    }
+
+    #[test]
+    fn a_catalog_member_resolves_to_its_durable_path() {
+        // One hash, many rows: a portal handle and a real path. The catalog holds
+        // the hash, so the view has to choose — and choosing the portal handle
+        // renders a broken cell whenever that grant's volume is not mounted.
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "/run/user/1000/doc/xyz/Trip/a.jpg", "h1");
+        seed(&db, "/home/u/Pictures/Trip/a.jpg", "h1");
+        // A second member reachable only through the portal — nothing else
+        // represents it, so it must still appear rather than vanish.
+        seed(&db, "/run/user/1000/doc/xyz/Trip/b.jpg", "h2");
+
+        let id = db.create_catalog("Trip").unwrap();
+        db.add_to_catalog(id, &h(&["h1", "h2"])).unwrap();
+
+        assert_eq!(
+            paths(db.collection_files(id).unwrap()),
+            [
+                "/home/u/Pictures/Trip/a.jpg",
+                "/run/user/1000/doc/xyz/Trip/b.jpg"
+            ],
+            "durable path preferred; portal-only member still listed"
+        );
+    }
+
+    #[test]
+    fn a_catalog_lists_each_member_once() {
+        // Several real copies of one image must not multiply the member into
+        // several grid cells.
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "/home/u/Pictures/a.jpg", "h1");
+        seed(&db, "/home/u/Backup/a.jpg", "h1");
+        seed(&db, "/home/u/Third/a.jpg", "h1");
+        let id = db.create_catalog("Trip").unwrap();
+        db.add_to_catalog(id, &h(&["h1"])).unwrap();
+        assert_eq!(db.collection_files(id).unwrap().len(), 1);
     }
 }
