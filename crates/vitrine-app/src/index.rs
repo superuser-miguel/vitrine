@@ -60,7 +60,11 @@ pub enum IndexProgress {
 /// [`Request::TakeBatch`] query runs, which is what keeps enrichment from
 /// handing the same file out twice (no client-side de-dup needed).
 enum Request {
-    Scan(PathBuf),
+    /// Index a folder subtree. `user: true` marks a folder the user just
+    /// opened — it jumps ahead of queued root rescans and even preempts one
+    /// mid-flight (see the worker's checkpoint), because the user is sitting
+    /// in front of that folder waiting for hashes (V-04).
+    Scan { folder: PathBuf, user: bool },
     Enrich {
         path: String,
         enrichment: Enrichment,
@@ -321,9 +325,19 @@ impl Indexer {
         }
     }
 
-    /// Enqueue a folder to index (non-blocking; ignored if the worker is gone).
+    /// Enqueue a user-opened folder to index (non-blocking; ignored if the
+    /// worker is gone). Jumps the scan queue — the user is waiting on it.
     pub fn request(&self, folder: PathBuf) {
-        let _ = self.requests.try_send(Request::Scan(folder));
+        let _ = self.requests.try_send(Request::Scan { folder, user: true });
+    }
+
+    /// Enqueue a library root for background indexing (launch rescan,
+    /// Preferences). Waits its turn behind anything the user asked for.
+    pub fn request_background(&self, folder: PathBuf) {
+        let _ = self.requests.try_send(Request::Scan {
+            folder,
+            user: false,
+        });
     }
 
     /// A handle for routing annotation writes to the writer thread.
@@ -368,13 +382,88 @@ fn worker(
         }
     };
 
-    // Single writer: process one request at a time. recv_blocking parks the
-    // thread cheaply between requests.
-    while let Ok(req) = requests.recv_blocking() {
+    // Single writer, but no head-of-line blocking (V-04, measured 2026-07-21:
+    // the launch roots rescan held the worker ~11 minutes and a 2-file user
+    // scan queued ~5 of them). Scans are deferred into a local queue — user
+    // folders at the front, root rescans at the back — and run only when the
+    // channel is idle; writes apply the moment they arrive, both here and at
+    // checkpoints *inside* a running scan.
+    let mut scans: std::collections::VecDeque<(PathBuf, bool)> = Default::default();
+    loop {
+        let req = if scans.is_empty() {
+            // Nothing to do: park cheaply until a request arrives.
+            match requests.recv_blocking() {
+                Ok(req) => req,
+                Err(_) => break,
+            }
+        } else {
+            // Scans pending: drain the channel first, then run one.
+            match requests.try_recv() {
+                Ok(req) => req,
+                Err(async_channel::TryRecvError::Empty) => {
+                    let (folder, _) = scans.pop_front().expect("non-empty");
+                    run_scan(&db, &folder, &progress, &requests, &mut scans);
+                    continue;
+                }
+                Err(async_channel::TryRecvError::Closed) => break,
+            }
+        };
+        apply(&db, &progress, req, &mut scans);
+    }
+}
+
+/// Run one scan with a checkpoint that keeps the writer responsive mid-scan:
+/// every stride the scan drains the request channel — annotation writes apply
+/// immediately, and a user-opened folder's scan runs *nested* right away
+/// (user folders are small by nature; root rescans never nest). Opening a
+/// folder during a launch rescan stamps its hashes in seconds, not minutes.
+fn run_scan(
+    db: &Db,
+    folder: &std::path::Path,
+    progress: &async_channel::Sender<IndexProgress>,
+    requests: &async_channel::Receiver<Request>,
+    scans: &mut std::collections::VecDeque<(PathBuf, bool)>,
+) {
+    let mut checkpoint = || {
+        while let Ok(req) = requests.try_recv() {
+            apply(db, progress, req, scans);
+        }
+        while scans.front().is_some_and(|(_, user)| *user) {
+            let (nested, _) = scans.pop_front().expect("non-empty");
+            if crate::debug::enabled() {
+                eprintln!(
+                    "VDBG-SCANYIELD ms={} nested={}",
+                    crate::debug::since_start_ms(),
+                    nested.display()
+                );
+            }
+            if let Err(e) = scan(db, &nested, progress, &mut || {}) {
+                glib::g_warning!("vitrine", "index scan {}: {e}", nested.display());
+            }
+        }
+    };
+    if let Err(e) = scan(db, folder, progress, &mut checkpoint) {
+        glib::g_warning!("vitrine", "index scan {}: {e}", folder.display());
+    }
+}
+
+/// Handle one request: everything except a scan applies immediately; scans
+/// are deferred (user folders to the front of the queue, roots to the back).
+fn apply(
+    db: &Db,
+    progress: &async_channel::Sender<IndexProgress>,
+    req: Request,
+    scans: &mut std::collections::VecDeque<(PathBuf, bool)>,
+) {
+    {
         match req {
-            Request::Scan(folder) => {
-                if let Err(e) = scan(&db, &folder, &progress) {
-                    glib::g_warning!("vitrine", "index scan {}: {e}", folder.display());
+            Request::Scan { folder, user } => {
+                if !scans.iter().any(|(queued, _)| *queued == folder) {
+                    if user {
+                        scans.push_front((folder, true));
+                    } else {
+                        scans.push_back((folder, false));
+                    }
                 }
             }
             Request::Enrich { path, enrichment } => {
@@ -600,6 +689,7 @@ fn scan(
     db: &Db,
     folder: &std::path::Path,
     progress: &async_channel::Sender<IndexProgress>,
+    checkpoint: &mut dyn FnMut(),
 ) -> ScanResult {
     let files = walk_images(folder);
     let total = files.len();
@@ -642,6 +732,10 @@ fn scan(
         );
     }
 
+    // The walk + reconcile above can take a while on a large root; let any
+    // writes that arrived meanwhile land before the per-file loop starts.
+    checkpoint();
+
     let now = now_secs();
     let mut added = 0usize;
 
@@ -672,9 +766,12 @@ fn scan(
             }
         }
 
-        // Throttle UI updates: every 64 files and at the end.
+        // Throttle UI updates: every 64 files and at the end. The checkpoint
+        // rides the same stride — it drains pending writes (and any nested
+        // user scan) so a long scan never holds the writer hostage (V-04).
         if i % 64 == 0 || i + 1 == total {
             let _ = progress.try_send(IndexProgress::Advanced { done: i + 1, total });
+            checkpoint();
         }
     }
 

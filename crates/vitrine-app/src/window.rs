@@ -3361,7 +3361,7 @@ impl VitrineWindow {
     /// Enqueue a library root for background indexing (used by Preferences).
     pub fn index_root(&self, path: PathBuf) {
         if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
-            indexer.request(path);
+            indexer.request_background(path);
         }
     }
 
@@ -3406,9 +3406,10 @@ impl VitrineWindow {
             move || window.restamp_after_enrichment()
         ));
         // Index the persistent library roots in the background at launch, so the
-        // index covers them even before (or without) browsing.
+        // index covers them even before (or without) browsing. Background
+        // priority: a folder the user opens must never wait behind these (V-04).
         for root in crate::settings::Settings::load().roots() {
-            indexer.request(root);
+            indexer.request_background(root);
         }
         *self.imp().indexer.borrow_mut() = Some(indexer);
 
@@ -3489,7 +3490,8 @@ impl VitrineWindow {
         }
     }
 
-    /// Enqueue a folder for background indexing, if it has a local path. Portal
+    /// Enqueue a just-opened folder for indexing, if it has a local path — at
+    /// user priority, so it preempts any running root rescan (V-04). Portal
     /// document paths are indexed as-is; content-hash keying keeps tags stable
     /// even as those opaque paths churn across sessions.
     fn index_folder(&self, folder: &gio::File) {

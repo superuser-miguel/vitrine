@@ -38,7 +38,7 @@ for a in "$@"; do
   case "$a" in
     --cold)   ENVFLAGS+=(--env=VITRINE_NOCACHE=1); MODE="cold" ;;
     --interact)
-      KEEP='VDBG-(WRITE|TAG|DROP|DRAG)|^VDBG fps|panic|CRITICAL|WARNING'
+      KEEP='VDBG-(WRITE|TAG|DROP|DRAG|SCANYIELD)|^VDBG fps|panic|CRITICAL|WARNING'
       MODE="interact" ;;
     -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)        ARGS+=("$a") ;;
@@ -83,6 +83,7 @@ printf "  tag actions            : %s\n"  "$(count 'VDBG-TAG')"
 printf "  drops handled          : %s (%s resolved nothing)\n" \
   "$(count 'VDBG-DROP')" "$(grep -c 'VDBG-DROP.*items=0' "$RUNLOG" 2>/dev/null || echo 0)"
 printf "  drags refused (no hash): %s\n"  "$(count 'VDBG-DRAG ms=.*hash=false')"
+printf "  scans preempted (V-04) : %s\n"  "$(count 'VDBG-SCANYIELD')"
 
 # These two are the whole point of the write probe — call them out explicitly.
 if [ "$(count 'accepted=false')" -gt 0 ]; then

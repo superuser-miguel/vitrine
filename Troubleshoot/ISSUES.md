@@ -183,6 +183,23 @@ leaves Experimental.
 > (user-triggered scans and writes preempt root rescans), chunking root scans
 > into many small requests, or scans yielding between batches.
 
+> **FIXED (untested) 2026-07-21 — user-priority queue + in-scan checkpoints.**
+> The worker now defers scans into a local queue (user-opened folders at the
+> front, root rescans at the back) and applies every non-scan request the
+> moment it arrives. `scan()` checkpoints on its existing 64-file stride
+> (plus once after walk+reconcile): each checkpoint drains the channel —
+> annotation writes land immediately, and a *user* folder's scan runs nested
+> right then, so opening a folder during the launch rescan stamps hashes in
+> seconds, not minutes. Root rescans never nest. `Request::Scan` carries
+> `user: bool`; launch roots and Preferences use `request_background()`.
+> New probe `VDBG-SCANYIELD` (counted in the `--interact` summary as "scans
+> preempted") is the verification instrument: re-run the portal test — the
+> 2-file folder should land while the roots rescan is visibly still running,
+> with a SCANYIELD line naming it. Known cosmetic: a nested scan's
+> Started/Finished briefly retargets the progress banner to the small folder.
+> Side effect (intended): enrichment `TakeBatch`/`Enrich` are also serviced
+> mid-scan, so enrichment no longer idles during the launch rescan.
+
 
 `worker()` serializes `Scan`, `Enrich`, and all user writes through one
 `recv_blocking` loop. `Request::Scan` covers a whole tree walk plus a blake3 hash
@@ -384,6 +401,20 @@ inside it.
 >
 > CSS cannot be verified headlessly — GTK parses it at runtime and skips
 > malformed rules with a `Gtk-WARNING`. If the slab persists, check the log for one.
+
+> **NOT fixed — measured 2026-07-21, third attempt made.** Pixel-sampled the
+> 10:19 screenshot: the selected cell is **uniform solid accent (46,179,152)**
+> — a 16% wash over that dark background could not exceed ~(70,80,70). Two
+> facts narrow the cause: the `margin: 16px` rule from the *same file* visibly
+> applies (tile gaps measure ~38px ≈ 2×16 + Adwaita's 3px padding), so the
+> provider is installed and `gridview > child` matches; and the logs carry no
+> CSS parse warning. So only the `:selected` declarations lose — prime suspect
+> is the `color-mix(var(--accent-bg-color)…)` syntax failing at *compute* time
+> (silent, unlike parse failures). Rewritten to the conservative
+> `background: alpha(@accent_bg_color, 0.16)` (shorthand also clears any theme
+> background-image) + `border-radius: 9px` + `color: inherit`. Verify by eye
+> after a rebuild; if STILL solid, next step is `GTK_DEBUG=interactive` and
+> reading the child node's computed style — stop guessing from screenshots.
 
 ### V-20 · A collection view doesn't refresh when it gains members · `CONFIRMED` · **FIXED (untested)**
 
@@ -638,6 +669,12 @@ be back under ~300ms during indexing. The DB was never the cost (`ratings_under`
 over 27,090 rows = 30ms); model invalidation and per-item property notifications
 were.
 
+> **VERIFIED 2026-07-21** from the 10:00 log, which ran through the entire
+> ~11-minute launch rescan: worst stall **535ms** (once, at t≈457s), next worst
+> 368/363ms — both at `fps=0` (window idle/unfocused), everything else under
+> ~300ms. Against the pre-fix signature of seven *consecutive* ~2,300ms stalls,
+> progressive stamping is confirmed cheap. Closed.
+
 **2. `items=0` returned at t=221s–232s** in the 2026-07-21 00:06 run, five
 attempts, well before the stall cluster at t=402s — so it is *not* the freeze.
 Most likely a move to another unindexed folder, but unconfirmed. The message text
@@ -665,3 +702,37 @@ extension layer, not the core.
 > for display by `scope_display`). Regression test:
 > `dedup::tests::scoping_limits_the_scan_to_one_subtree`. Written up, with the
 > whole portal/dedup arc, in `docs/duplicates-that-arent.html`.
+
+---
+
+## Verification pass — 2026-07-21 (afternoon)
+
+**Log-reading trap, newly recorded: `debug-run.sh` runs the *installed*
+flatpak, not the working tree.** It never builds. Every "FIXED (untested)"
+item stays untestable until `flatpak-builder --user --install --force-clean
+build-dir build-aux/io.github.superuser_miguel.Vitrine.yml` is re-run. The
+10:00/10:17 sessions ran the 00:25 install — current CSS was in (verified by
+extracting `style.css` from the installed gresource), but nothing committed
+later that day was.
+
+Closed this pass, from existing evidence: **eb0a701 VERIFIED** (worst stall
+535ms across the full launch rescan, vs seven consecutive ~2.3s before);
+**V-21 measured NOT fixed** (solid accent by pixel sample; third attempt
+landed, see entry); **V-04 FIXED (untested)** — user-priority queue +
+in-scan checkpoints, probe `VDBG-SCANYIELD`, see entry.
+
+**In-app checklist for the next run (rebuild + reinstall FIRST):**
+
+1. **V-04:** launch (roots rescan starts), immediately open a small
+   never-indexed folder via the chooser → its images should be taggable
+   within seconds; summary line "scans preempted" ≥ 1.
+2. **V-22:** portal sacrifice test again → expect an error toast only, file
+   stays in grid, no `missing` stamp (`sqlite3` check).
+3. **V-21:** select several adjacent images → discrete rounded tiles with a
+   light wash, not a merged slab. If still solid: `GTK_DEBUG=interactive`.
+4. **Dedup scope:** open a folder → Find Duplicates → header reads "in ~/…"
+   and results stay inside it; no folder → "whole library".
+5. **Folder row:** viewer → Properties → Folder shows the friendly path;
+   row click browses the folder; suffix button opens Files (try a
+   portal-opened folder too).
+6. **eb0a701 regression watch:** worst stall during indexing stays ≲ 500ms.

@@ -37,12 +37,20 @@ gridview > child {
   margin: 16px;
 }
 
+/* alpha(@named_color) rather than color-mix(var(--…)): measured from the
+   2026-07-21 screenshot, the selected cell rendered SOLID accent (46,179,152)
+   while the margin rule above demonstrably applied — so the provider is live
+   and the selector matches, and the modern syntax is the remaining suspect.
+   The shorthand `background:` (not background-color) also overrides any theme
+   background-image. `color: inherit` keeps the filename label readable. */
 gridview > child:selected {
-  background-color: color-mix(in srgb, var(--accent-bg-color) 16%, transparent);
+  background: alpha(@accent_bg_color, 0.16);
+  border-radius: 9px;
+  color: inherit;
 }
 
 gridview > child.activatable:selected:hover {
-  background-color: color-mix(in srgb, var(--accent-bg-color) 22%, transparent);
+  background: alpha(@accent_bg_color, 0.22);
 }
 
 /* Duplicates page: mark the copy that will be kept. */
