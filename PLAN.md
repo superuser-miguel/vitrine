@@ -1336,9 +1336,13 @@ subprocesses), 4 (portals-first) and 6 (nothing blocks the main loop).
    (`subdirectories: true`, no-autodownload), mounted under `/app/helpers/<id>/`.
    ImageMagick is the first helper package (`…Vitrine.Helper.magick` — we build
    it; no freedesktop extension exists for it). ffmpeg later can follow the
-   established `org.freedesktop.Platform.ffmpeg-full` pattern instead. Core
-   detects presence at startup and lights features up; absence degrades to the
-   feature not appearing, never to an error dialog.
+   established `org.freedesktop.Platform.ffmpeg-full` pattern instead — its
+   first concrete recipe is already known (user, 2026-07-21): **frame capture
+   from shorts/video sections as reference images** — a §16.3 batch whose input
+   is a video and whose output is stills Vitrine then indexes. Later down the
+   line; the packaging work is also shared with the future Video Gallery
+   sibling app. Core detects helper presence at startup and lights features up;
+   absence degrades to the feature not appearing, never to an error dialog.
 4. **Scripts are data, not packages.** Lua scripts live in the app's data dir
    (`~/.var/app/…/data/vitrine/scripts/`), hot-reloaded on change, no restart.
    A script is one file with a declared `manifest` table + functions. WASM
