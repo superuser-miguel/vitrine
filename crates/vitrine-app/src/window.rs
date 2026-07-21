@@ -3270,6 +3270,21 @@ impl VitrineWindow {
         ));
         self.add_action(&find_duplicates);
 
+        // Browse a folder by path — the viewer's Folder row activates this to
+        // jump from an image to its containing folder in the grid.
+        let browse_folder =
+            gio::SimpleAction::new("browse-folder", Some(glib::VariantTy::STRING));
+        browse_folder.connect_activate(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, param| {
+                if let Some(path) = param.and_then(|p| p.str()) {
+                    window.load_folder(gio::File::for_path(path));
+                }
+            }
+        ));
+        self.add_action(&browse_folder);
+
         let write_xmp = gio::SimpleAction::new("write-xmp", None);
         write_xmp.connect_activate(glib::clone!(
             #[weak(rename_to = window)]
@@ -4014,8 +4029,9 @@ impl VitrineWindow {
 /// The menu-action target string for a direction.
 /// A folder path as the user thinks of it: home-relative with `~`, and portal
 /// document paths stripped to the part after the opaque doc id — the sandbox
-/// prefix means nothing to anyone.
-fn scope_display(path: &std::path::Path) -> String {
+/// prefix means nothing to anyone. Used by the dedup header and the viewer's
+/// Folder row.
+pub(crate) fn scope_display(path: &std::path::Path) -> String {
     let s = path.to_string_lossy();
     if let Some(rest) = s.strip_prefix("/run/user/") {
         let mut parts = rest.splitn(4, '/');

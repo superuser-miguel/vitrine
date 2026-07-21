@@ -350,6 +350,13 @@ V-01 and should be checked before that feature is used at scale.
 >    item stayed in the grid. So a portal/portal false pair **cannot actually
 >    delete real bytes** through the dedup card — GIO refuses. The failure is
 >    a silent lie instead: see V-22.
+>
+> Related (same day): the viewer's Folder row now shows the friendly path
+> (`scope_display` — `~`-relative, doc prefix stripped; raw path in the
+> tooltip), activates to browse the folder in the grid (`win.browse-folder`),
+> and has a Show in Files suffix button (`gtk::FileLauncher`, portal-safe).
+> Display-level only — resolving a portal handle to its *real host* folder is
+> still the deferred `host_path` work.
 
 **Open decision.** `--filesystem=home` was considered and **rejected**: portals-first
 is how a Flatpak should behave, and it matters more once helper binaries

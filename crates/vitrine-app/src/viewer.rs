@@ -135,6 +135,11 @@ mod imp {
         #[template_child]
         pub meta_folder_row: TemplateChild<adw::ActionRow>,
         #[template_child]
+        pub meta_folder_files_button: TemplateChild<gtk::Button>,
+        /// The current image's parent folder, for the Folder row's two actions
+        /// (browse in Vitrine / show in Files).
+        pub meta_folder: RefCell<Option<gio::File>>,
+        #[template_child]
         pub meta_dimensions_row: TemplateChild<adw::ActionRow>,
         #[template_child]
         pub meta_size_row: TemplateChild<adw::ActionRow>,
@@ -244,6 +249,8 @@ mod imp {
                 tag_chips: Default::default(),
                 meta_name_row: Default::default(),
                 meta_folder_row: Default::default(),
+                meta_folder_files_button: Default::default(),
+                meta_folder: RefCell::new(None),
                 meta_dimensions_row: Default::default(),
                 meta_size_row: Default::default(),
                 meta_format_row: Default::default(),
@@ -300,6 +307,7 @@ mod imp {
             obj.setup_controls();
             obj.setup_review();
             obj.setup_tags();
+            obj.setup_metadata();
         }
     }
 
@@ -1580,6 +1588,46 @@ impl VitrineViewer {
 
     // --- metadata sidebar ----------------------------------------------------
 
+    /// Wire the Folder row's two exits: activating the row browses the folder
+    /// in Vitrine's grid; the suffix button shows it in the system file
+    /// manager (via the OpenURI portal, so document paths work too).
+    fn setup_metadata(&self) {
+        let imp = self.imp();
+        imp.meta_folder_row.connect_activated(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| {
+                let Some(path) = v.imp().meta_folder.borrow().as_ref().and_then(|f| f.path())
+                else {
+                    return;
+                };
+                let _ = v.activate_action(
+                    "win.browse-folder",
+                    Some(&path.to_string_lossy().to_variant()),
+                );
+            }
+        ));
+        imp.meta_folder_files_button.connect_clicked(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_| {
+                let Some(folder) = v.imp().meta_folder.borrow().clone() else {
+                    return;
+                };
+                let parent = v.root().and_downcast::<gtk::Window>();
+                gtk::FileLauncher::new(Some(&folder)).launch(
+                    parent.as_ref(),
+                    gio::Cancellable::NONE,
+                    |result| {
+                        if let Err(err) = result {
+                            glib::g_warning!("vitrine", "show folder in Files: {err}");
+                        }
+                    },
+                );
+            }
+        ));
+    }
+
     /// Fill the properties sidebar for `item` from the index. Fields the index
     /// hasn't backfilled yet (enrichment still pending, or an un-indexed folder)
     /// show an em dash and fill in once the image is revisited.
@@ -1588,13 +1636,18 @@ impl VitrineViewer {
         const DASH: &str = "—";
 
         imp.meta_name_row.set_subtitle(&item.display_name());
-        let folder = item
-            .file()
-            .parent()
-            .and_then(|p| p.path())
-            .map(|p| p.to_string_lossy().into_owned())
+        // Show the folder as the user thinks of it (~-relative, portal doc
+        // prefix stripped); the raw path stays available in the tooltip.
+        let parent = item.file().parent();
+        let raw = parent.as_ref().and_then(|p| p.path());
+        let folder = raw
+            .as_deref()
+            .map(crate::window::scope_display)
             .unwrap_or_else(|| DASH.to_string());
         imp.meta_folder_row.set_subtitle(&folder);
+        imp.meta_folder_row
+            .set_tooltip_text(raw.as_deref().and_then(|p| p.to_str()));
+        *imp.meta_folder.borrow_mut() = parent;
 
         let text = |value: Option<String>| value.unwrap_or_else(|| DASH.to_string());
 

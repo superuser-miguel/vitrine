@@ -330,6 +330,18 @@ template $VitrineViewer: Adw.NavigationPage {
             title: _("Folder");
             subtitle-selectable: true;
             subtitle-lines: 0;
+            activatable: true;
+
+            [suffix]
+            Button meta_folder_files_button {
+              icon-name: "folder-open-symbolic";
+              tooltip-text: _("Show in Files");
+              valign: center;
+
+              styles [
+                "flat",
+              ]
+            }
           }
         }
 
