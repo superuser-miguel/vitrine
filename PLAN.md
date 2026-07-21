@@ -1448,6 +1448,31 @@ Find Duplicates' current exact/pHash clustering; everything indexing.
   hanging the worker** (instruction-count hook, §16.7.2); **a runaway
   allocation errors rather than growing unbounded** (`set_memory_limit`);
   **a binary chunk is refused** (`ChunkMode::Text`).*
+
+  **Status 2026-07-21 — partially done, two criteria outstanding.** Landed:
+  the host (`crates/vitrine-app/src/script.rs`, 13 tests), `register_sort`
+  wired into a "From Scripts" section of the Sort By menu, off-main key
+  computation with a path-keyed memo, error toasts naming the script, and all
+  three ceilings proven by test rather than asserted. Shipped example:
+  `docs/scripts/natural-sort.lua`, itself covered by a test so it cannot rot.
+  Still open, and E1 is not done until both are:
+  - **Hot reload is not implemented.** "Editing the script re-sorts without
+    restart" fails today — scripts load once at startup. Needs a file monitor
+    on the scripts dir calling `load_dir` + `rebuild_script_sort_menu`, and
+    the memo invalidated because a reloaded key function may key differently.
+  - **The 10k stall criterion is unmeasured.** Correctness is covered by unit
+    tests; "no measurable stall regression on a 10k folder" is a §13 feel
+    measurement on real folders and has not been run. The design keeps Lua off
+    both the main loop and the comparator, so the expectation is no regression
+    — but that is a prediction, not a result.
+
+  *Memo-key note (decided in implementation):* keys are memoised **by path,
+  not by content hash**, against the grain of everything else in Vitrine. A
+  hash identifies bytes, so two copies of one image under different names
+  share it — while a key function reading `item.name` must distinguish them.
+  Since the host cannot know which facts a key function read, the memo key
+  must be the item's identity *as the script sees it*. Hash-keying here would
+  silently mis-order duplicates.
 - **E2 — helper extension point + batches.** Manifest `add-extensions`;
   `…Helper.magick` package builds offline (house rule 5); `register_batch` +
   run dialog with destination policy, progress, cancel; backup-first for
