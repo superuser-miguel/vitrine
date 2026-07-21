@@ -6,7 +6,7 @@
 //! lazily per visible cell (see [`crate::grid_cell`]). Activating a cell pushes
 //! the [`crate::viewer`] page onto the `AdwNavigationView`, sharing the store.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -200,6 +200,12 @@ mod imp {
         /// Bumped on every dedup scan so a slow off-thread result that finishes
         /// after the user switched modes (or left) is discarded, not rendered.
         pub dedup_generation: Cell<u64>,
+        /// Subtree the dedup scan is limited to (the folder open when the page
+        /// was entered; `None` = whole library). Captured at entry so switching
+        /// Exact/Similar keeps the same scope.
+        pub dedup_scope: RefCell<Option<std::path::PathBuf>>,
+        /// The Duplicates header title, so refreshes can show the scope.
+        pub dedup_title: RefCell<Option<adw::WindowTitle>>,
         #[template_child]
         pub nav_view: TemplateChild<adw::NavigationView>,
         #[template_child]
@@ -306,6 +312,8 @@ mod imp {
                 duplicates_content: RefCell::new(None),
                 dedup_near: Cell::new(false),
                 dedup_generation: Cell::new(0),
+                dedup_scope: RefCell::new(None),
+                dedup_title: RefCell::new(None),
                 nav_view: Default::default(),
                 toast_overlay: Default::default(),
                 icon_smaller: Default::default(),
@@ -2048,6 +2056,10 @@ impl VitrineWindow {
         if imp.duplicates_page.borrow().is_none() {
             self.build_duplicates_page();
         }
+        // Duplicates are meaningful within the tree you are looking at (copies
+        // across backup volumes are a backup, not waste), so scope the scan to
+        // the folder open at entry; nothing open scans the whole library.
+        *imp.dedup_scope.borrow_mut() = imp.current_folder.borrow().clone();
         self.refresh_duplicates();
         // Same stack-vs-pool distinction as the viewer — see `nav_stack_contains`.
         if self.nav_stack_contains("duplicates") {
@@ -2090,6 +2102,9 @@ impl VitrineWindow {
 
         let header = adw::HeaderBar::new();
         header.pack_end(&mode);
+        let title = adw::WindowTitle::new(&gettextrs::gettext("Duplicates"), "");
+        header.set_title_widget(Some(&title));
+        *imp.dedup_title.borrow_mut() = Some(title);
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&header);
         toolbar.set_content(Some(&scroller));
@@ -2119,9 +2134,20 @@ impl VitrineWindow {
         }
 
         let near = imp.dedup_near.get();
+        let under = imp
+            .dedup_scope
+            .borrow()
+            .as_ref()
+            .map(|p| p.to_string_lossy().into_owned());
+        if let Some(title) = imp.dedup_title.borrow().as_ref() {
+            title.set_subtitle(&match imp.dedup_scope.borrow().as_ref() {
+                Some(scope) => format!("in {}", scope_display(scope)),
+                None => gettextrs::gettext("whole library"),
+            });
+        }
 
-        // The near-duplicate scan is O(n²) over every indexed file — seconds of
-        // work on a big library — so run it off the main thread behind a spinner
+        // The scan is bounded work but not main-thread work — seconds on a big
+        // library — so run it off the main thread behind a spinner
         // instead of freezing (and eventually crashing) the UI.
         let spinner = gtk::Spinner::new();
         spinner.set_size_request(32, 32);
@@ -2150,9 +2176,9 @@ impl VitrineWindow {
                         return Vec::new();
                     };
                     if near {
-                        db.near_duplicates(8)
+                        db.near_duplicates(8, under.as_deref())
                     } else {
-                        db.exact_duplicates()
+                        db.exact_duplicates(under.as_deref())
                     }
                     .unwrap_or_default()
                 })
@@ -2368,37 +2394,59 @@ impl VitrineWindow {
     }
 
     fn trash_duplicate_others(&self, paths: &[String]) {
+        // Toast on the results and mark rows missing only for trashes that
+        // really happened (V-22). A portal document path refuses to trash;
+        // marking it missing anyway stamps the index with a false fact and
+        // hides the pair from the list while both files still exist.
+        let remaining = Rc::new(Cell::new(paths.len()));
+        let moved = Rc::new(RefCell::new(Vec::<String>::new()));
         for path in paths {
-            gio::File::for_path(path).trash_async(
+            let path = path.clone();
+            gio::File::for_path(&path).trash_async(
                 glib::Priority::DEFAULT,
                 gio::Cancellable::NONE,
                 glib::clone!(
                     #[weak(rename_to = window)]
                     self,
+                    #[strong]
+                    remaining,
+                    #[strong]
+                    moved,
                     move |result| {
-                        if let Err(err) = result {
-                            window.toast(&format!("Couldn’t move to trash: {}", err.message()));
+                        match result {
+                            Ok(()) => moved.borrow_mut().push(path.clone()),
+                            Err(err) => window
+                                .toast(&format!("Couldn’t move to trash: {}", err.message())),
                         }
+                        remaining.set(remaining.get() - 1);
+                        if remaining.get() != 0 {
+                            return;
+                        }
+                        let moved = moved.borrow();
+                        if moved.is_empty() {
+                            return; // nothing changed; failures toasted above
+                        }
+                        if let Some(indexer) = window.imp().indexer.borrow().as_ref() {
+                            indexer.annotator().mark_missing(&moved);
+                        }
+                        window.toast(&match moved.len() {
+                            1 => "Moved 1 copy to Trash".to_string(),
+                            n => format!("Moved {n} copies to Trash"),
+                        });
+                        // Give the writer a beat to mark them missing, then
+                        // rebuild the list.
+                        glib::timeout_add_seconds_local_once(
+                            1,
+                            glib::clone!(
+                                #[weak(rename_to = window)]
+                                window,
+                                move || window.refresh_duplicates()
+                            ),
+                        );
                     }
                 ),
             );
         }
-        if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
-            indexer.annotator().mark_missing(paths);
-        }
-        self.toast(&match paths.len() {
-            1 => "Moved 1 copy to Trash".to_string(),
-            n => format!("Moved {n} copies to Trash"),
-        });
-        // Give the writer a beat to mark them missing, then rebuild the list.
-        glib::timeout_add_seconds_local_once(
-            1,
-            glib::clone!(
-                #[weak(rename_to = window)]
-                self,
-                move || window.refresh_duplicates()
-            ),
-        );
     }
 
     // --- collections ---------------------------------------------------------
@@ -3062,7 +3110,11 @@ impl VitrineWindow {
         if items.is_empty() {
             return;
         }
-        let total = items.len();
+        // Toast on the results, not the attempt (V-22). Trash can refuse — a
+        // portal document path never reaches the real file — so count the async
+        // outcomes and report only what actually moved.
+        let remaining = Rc::new(Cell::new(items.len()));
+        let moved = Rc::new(Cell::new(0usize));
         for item in items {
             let file = item.file();
             file.trash_async(
@@ -3073,18 +3125,31 @@ impl VitrineWindow {
                     self,
                     #[strong]
                     item,
-                    move |result| match result {
-                        Ok(()) => window.remove_item(&item),
-                        Err(err) =>
-                            window.toast(&format!("Couldn’t move to trash: {}", err.message())),
+                    #[strong]
+                    remaining,
+                    #[strong]
+                    moved,
+                    move |result| {
+                        match result {
+                            Ok(()) => {
+                                moved.set(moved.get() + 1);
+                                window.remove_item(&item);
+                            }
+                            Err(err) => window
+                                .toast(&format!("Couldn’t move to trash: {}", err.message())),
+                        }
+                        remaining.set(remaining.get() - 1);
+                        if remaining.get() == 0 {
+                            match moved.get() {
+                                0 => {} // every failure toasted its own error
+                                1 => window.toast("Moved 1 image to Trash"),
+                                n => window.toast(&format!("Moved {n} images to Trash")),
+                            }
+                        }
                     }
                 ),
             );
         }
-        self.toast(&match total {
-            1 => "Moved 1 image to Trash".to_string(),
-            n => format!("Moved {n} images to Trash"),
-        });
     }
 
     fn remove_item(&self, item: &ImageObject) {
@@ -3947,6 +4012,27 @@ impl VitrineWindow {
 }
 
 /// The menu-action target string for a direction.
+/// A folder path as the user thinks of it: home-relative with `~`, and portal
+/// document paths stripped to the part after the opaque doc id — the sandbox
+/// prefix means nothing to anyone.
+fn scope_display(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("/run/user/") {
+        let mut parts = rest.splitn(4, '/');
+        if let (Some(_uid), Some("doc"), Some(_id), Some(tail)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        {
+            return tail.to_string();
+        }
+    }
+    if let Some(home) = glib::home_dir().to_str() {
+        if let Some(rest) = s.strip_prefix(home) {
+            return format!("~{rest}");
+        }
+    }
+    s.into_owned()
+}
+
 fn direction_id(descending: bool) -> &'static str {
     if descending {
         "descending"

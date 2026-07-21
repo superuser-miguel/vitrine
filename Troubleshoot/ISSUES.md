@@ -114,7 +114,15 @@ simply almost never *start*.
 > ~2 = not. Fallback if it fails: disable rubber-band, which makes drag reliable
 > at the cost of rubber-band multi-select. That is a UX trade for the user to make.
 
-### V-22 · Trash failure is silent, and dedup corrupts the index on it · `CONFIRMED` code + `OBSERVED` in test (2026-07-21)
+### V-22 · Trash failure is silent, and dedup corrupts the index on it · `CONFIRMED` code + `OBSERVED` in test (2026-07-21) · **FIXED (untested)**
+
+> **Fixed 2026-07-21, same day.** Both paths now count the async results:
+> `trash_selected` toasts what actually moved (failures toast their own error;
+> zero successes toasts nothing extra), and `trash_duplicate_others` runs
+> `mark_missing` + the success toast + the list refresh only over the paths
+> whose trash really succeeded. Untested in the app — GIO trash can't be driven
+> headlessly; re-run the portal sacrifice test to verify (expected: error toast
+> only, file stays listed, no `missing` stamp).
 
 Found by the portal trash verification (see the V-19 update of 2026-07-21).
 Trashing a portal-document path fails inside the sandbox — and both trash paths
@@ -642,3 +650,11 @@ settles the design: duplicates are meaningful *within* the drive you are on or a
 drive you deliberately chose to compare; copies across backup volumes are a 1-2-3
 backup, not waste. Anything cleverer (volume awareness, intent) belongs in the
 extension layer, not the core.
+
+> **Done 2026-07-21.** `exact_duplicates`/`near_duplicates` take
+> `under: Option<&str>`; `show_duplicates` captures the open folder at entry
+> (mode switches keep the scope; no folder = whole library), and the page
+> header's subtitle names the scope ("in ~/…" — portal doc prefixes stripped
+> for display by `scope_display`). Regression test:
+> `dedup::tests::scoping_limits_the_scan_to_one_subtree`. Written up, with the
+> whole portal/dedup arc, in `docs/duplicates-that-arent.html`.

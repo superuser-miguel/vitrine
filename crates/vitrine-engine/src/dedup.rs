@@ -31,11 +31,23 @@ impl DuplicateCluster {
     }
 }
 
+/// The query for a dedup scan: the whole library, or one folder subtree.
+/// Duplicates are meaningful *within* the tree you are looking at — copies
+/// across backup volumes are a backup, not waste — so callers pass the folder
+/// they have open. Anything cleverer (volume awareness, intent) belongs in the
+/// extension layer, not here.
+fn scope_query(under: Option<&str>) -> Query {
+    Query {
+        under: under.map(str::to_owned),
+        ..Query::default()
+    }
+}
+
 impl Db {
     /// Exact-duplicate clusters: present files grouped by `content_hash`, only
-    /// groups with more than one file.
-    pub fn exact_duplicates(&self) -> rusqlite::Result<Vec<DuplicateCluster>> {
-        let files = self.query(&Query::default())?;
+    /// groups with more than one file. `under` limits the scan to one subtree.
+    pub fn exact_duplicates(&self, under: Option<&str>) -> rusqlite::Result<Vec<DuplicateCluster>> {
+        let files = self.query(&scope_query(under))?;
         let mut by_hash: HashMap<String, Vec<FileRecord>> = HashMap::new();
         for file in files {
             by_hash
@@ -54,8 +66,12 @@ impl Db {
     /// scale (tens of thousands of files ⇒ billions of comparisons). Instead we
     /// union byte-identical files by content hash, then find near pHashes with a
     /// [`BkTree`], which only visits candidates the triangle inequality allows.
-    pub fn near_duplicates(&self, max_distance: u32) -> rusqlite::Result<Vec<DuplicateCluster>> {
-        let files = self.query(&Query::default())?;
+    pub fn near_duplicates(
+        &self,
+        max_distance: u32,
+        under: Option<&str>,
+    ) -> rusqlite::Result<Vec<DuplicateCluster>> {
+        let files = self.query(&scope_query(under))?;
         let n = files.len();
         let mut dsu = Dsu::new(n);
 
@@ -260,12 +276,31 @@ mod tests {
         seed(&db, "/b.jpg", "dup", 100, None);
         seed(&db, "/c.jpg", "unique", 50, None);
 
-        let clusters = db.exact_duplicates().unwrap();
+        let clusters = db.exact_duplicates(None).unwrap();
         assert_eq!(clusters.len(), 1);
         // Sorted largest-first → /a.jpg is the keeper.
         let paths: Vec<_> = clusters[0].files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["/a.jpg", "/b.jpg"]);
         assert_eq!(clusters[0].keeper().path, "/a.jpg");
+    }
+
+    #[test]
+    fn scoping_limits_the_scan_to_one_subtree() {
+        let db = Db::open_in_memory().unwrap();
+        // A pair inside the scope, and a pair whose second copy lives in
+        // another tree — a backup, not waste, once the scan is scoped.
+        seed(&db, "/a/in1.jpg", "inside", 10, None);
+        seed(&db, "/a/in2.jpg", "inside", 20, None);
+        seed(&db, "/a/cross.jpg", "cross", 30, None);
+        seed(&db, "/b/cross.jpg", "cross", 40, None);
+
+        // Whole library sees both pairs.
+        assert_eq!(db.exact_duplicates(None).unwrap().len(), 2);
+        // Scoped to /a, the cross-tree copy is out of sight and its twin is a
+        // singleton: only the in-scope pair remains.
+        let scoped = db.exact_duplicates(Some("/a")).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].keeper().content_hash, "inside");
     }
 
     #[test]
@@ -281,7 +316,7 @@ mod tests {
         seed(&db, "/e2.jpg", "he", 7, None);
 
         // Threshold 1 → {x1,x2} cluster and {e1,e2} cluster; y stands alone.
-        let clusters = db.near_duplicates(1).unwrap();
+        let clusters = db.near_duplicates(1, None).unwrap();
         assert_eq!(clusters.len(), 2);
         let mut sets: Vec<Vec<String>> = clusters
             .iter()
@@ -302,7 +337,7 @@ mod tests {
 
         // Threshold 0 → the near pair (distance 1) no longer clusters; only the
         // exact pair remains.
-        let strict = db.near_duplicates(0).unwrap();
+        let strict = db.near_duplicates(0, None).unwrap();
         assert_eq!(strict.len(), 1);
         assert_eq!(strict[0].files.len(), 2);
         assert_eq!(strict[0].keeper().content_hash, "he");
@@ -317,7 +352,7 @@ mod tests {
         seed(&db, "/a.jpg", "ha", 30, Some(0b0000_0000));
         seed(&db, "/b.jpg", "hb", 20, Some(0b0000_0011));
         seed(&db, "/c.jpg", "hc", 10, Some(0b0000_1111));
-        let clusters = db.near_duplicates(2).unwrap();
+        let clusters = db.near_duplicates(2, None).unwrap();
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].files.len(), 3);
         assert_eq!(clusters[0].keeper().path, "/a.jpg"); // largest
@@ -346,7 +381,7 @@ mod tests {
         seed(&db, "/home/u/Pictures/a.jpg", "h1", 10, None);
         seed(&db, "/run/user/1000/doc/xyz/a.jpg", "h1", 10, None);
         assert!(
-            db.exact_duplicates().unwrap().is_empty(),
+            db.exact_duplicates(None).unwrap().is_empty(),
             "portal alias of a real path must not be a duplicate"
         );
     }
@@ -360,7 +395,7 @@ mod tests {
         // Plus a portal alias, which must drop out without hiding the pair.
         seed(&db, "/run/user/1000/doc/xyz/a.jpg", "h1", 10, None);
 
-        let clusters = db.exact_duplicates().unwrap();
+        let clusters = db.exact_duplicates(None).unwrap();
         assert_eq!(clusters.len(), 1);
         let paths: Vec<&str> = clusters[0].files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(
@@ -375,6 +410,6 @@ mod tests {
         let db = Db::open_in_memory().unwrap();
         seed(&db, "/run/user/1000/doc/aaa/a.jpg", "h1", 10, None);
         seed(&db, "/run/user/1000/doc/bbb/a.jpg", "h1", 10, None);
-        assert_eq!(db.exact_duplicates().unwrap().len(), 1);
+        assert_eq!(db.exact_duplicates(None).unwrap().len(), 1);
     }
 }
