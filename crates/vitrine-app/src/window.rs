@@ -739,11 +739,30 @@ impl VitrineWindow {
         }
     }
 
+    /// Whether the single-image viewer is the page on top right now. While it
+    /// is, the grid is invisible — its decodes shouldn't compete for the shared
+    /// decode gate with the filmstrip and the viewer's own full-image loads.
+    fn viewer_is_visible(&self) -> bool {
+        self.imp()
+            .nav_view
+            .visible_page()
+            .and_then(|p| p.tag())
+            .is_some_and(|t| t == "viewer")
+    }
+
     /// Spawn load futures up to the in-flight bound, each pulling the queued
     /// request nearest the viewport (visible-first fill). This is what keeps a
     /// fling from spawning thousands of decode futures.
+    ///
+    /// Stands down while the viewer page is on top: the grid can't be seen, and
+    /// its up-to-24 in-flight futures would otherwise keep crowding the 4–8
+    /// decode-gate permits the filmstrip (8 in flight) is waiting on. The queue
+    /// is kept; the visible-page notify re-pumps on return to the browser.
     fn pump_loads(&self) {
         let imp = self.imp();
+        if self.viewer_is_visible() {
+            return;
+        }
         while imp.load_inflight.get() < max_load_inflight() {
             let Some(req) = self.pop_best_load() else {
                 break;
@@ -1523,6 +1542,19 @@ impl VitrineWindow {
 
     fn setup_navigation(&self) {
         let imp = self.imp();
+
+        // Resume the grid's load pump when the viewer is popped — pump_loads
+        // stands down while the viewer page is on top (filmstrip priority),
+        // and nothing else re-pumps until a new cell binds.
+        imp.nav_view.connect_visible_page_notify(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_| {
+                if !window.viewer_is_visible() {
+                    window.pump_loads();
+                }
+            }
+        ));
 
         imp.back_button.connect_clicked(glib::clone!(
             #[weak(rename_to = window)]
