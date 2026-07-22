@@ -1486,6 +1486,53 @@ impl VitrineViewer {
         }
     }
 
+    /// Dev aid (`VITRINE_FLIPTEST`): mash Right `count` times, one `step(1)`
+    /// every `interval_ms`, then wrap back to the start and keep going until
+    /// the budget is spent. This is the V-24 reproduction — flipping *faster
+    /// than a large image decodes*, which is what drove RSS to 3.2 GB before
+    /// the fix. The interval is deliberately shorter than a cold full decode so
+    /// the in-flight-dedup / bounded-hold path is the one under test, not a
+    /// leisurely one-at-a-time walk.
+    ///
+    /// Each step logs a `VDBG-FLIP` line so the log is self-describing without
+    /// needing to cross-reference the per-second HUD; the `VDBG fps` sampler
+    /// still runs alongside and carries the RSS/stall truth.
+    pub fn flip_test(&self, count: u32, interval_ms: u32) {
+        let remaining = std::rc::Rc::new(std::cell::Cell::new(count));
+        glib::timeout_add_local(
+            std::time::Duration::from_millis(interval_ms.max(1) as u64),
+            glib::clone!(
+                #[weak(rename_to = v)]
+                self,
+                #[upgrade_or]
+                glib::ControlFlow::Break,
+                move || {
+                    let left = remaining.get();
+                    if left == 0 {
+                        eprintln!("VDBG-FLIP done");
+                        return glib::ControlFlow::Break;
+                    }
+                    // Wrap to the start at the end so a short folder still gets
+                    // a long flip storm.
+                    if v.current_position() + 1 >= v.n_items() {
+                        v.show_position(0);
+                    } else {
+                        v.step(1);
+                    }
+                    eprintln!(
+                        "VDBG-FLIP ms={} pos={} left={} rss={}MB",
+                        crate::debug::since_start_ms(),
+                        v.current_position(),
+                        left - 1,
+                        crate::debug::rss_mb(),
+                    );
+                    remaining.set(left - 1);
+                    glib::ControlFlow::Continue
+                }
+            ),
+        );
+    }
+
     fn show_position(&self, pos: u32) {
         let Some(item) = self.item_at(pos) else {
             return;
@@ -1563,6 +1610,12 @@ impl VitrineViewer {
                             if imp.loading_uri.borrow().as_deref() == Some(uri.as_str()) {
                                 imp.loading_spinner.set_visible(true);
                                 imp.loading_spinner.start();
+                                if crate::debug::enabled() {
+                                    eprintln!(
+                                        "VDBG-SPINNER shown ms={}",
+                                        crate::debug::since_start_ms()
+                                    );
+                                }
                             }
                         }
                     ),

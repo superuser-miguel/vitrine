@@ -346,7 +346,7 @@ once → glycin's scale hint ignored for these files → near-full-size frames �
 full-texture pHash downloads on the main context, one per stall, while further
 decoded frames accumulate in resolved futures behind the blocked loop.
 
-### V-24 · Fast viewer flipping through large images spikes RSS to ~3 GB · `MEASURED` (2026-07-21, 19:56 log) · **FIXED (untested)**
+### V-24 · Fast viewer flipping through large images spikes RSS to ~3 GB · `MEASURED` (2026-07-21, 19:56 log) · **FIXED — VERIFIED (2026-07-21, flip-test)**
 
 > **Fixed 2026-07-21, same evening.** Three changes, one commit:
 >
@@ -370,6 +370,21 @@ decoded frames accumulate in resolved futures behind the blocked loop.
 > viewer. Expect: RSS transient well under 19:56's 3.2GB peak, no stall over
 > ~200ms, spinner appears only on the big files and vanishes as each lands
 > (placeholder → sharpened image, as before).
+>
+> **VERIFIED 2026-07-21** via a new `VITRINE_FLIPTEST` hook (mashes Right one
+> `step(1)` per interval; pairs with `VITRINE_OPEN`), against a synthetic
+> 24×6000×4000 folder — larger than the real files that first showed it, so
+> the decode reliably outruns a fast flip.
+> - **Bounded memory, no freeze:** 80 flips at 80ms (≈3× through the folder,
+>   far past the 4-opens-in-1s that hit 3.2GB) → **peak RSS 737–879MB**,
+>   worst stall **61–84ms**, zero stalls ≥500ms, RSS oscillating and
+>   recovering to ~432MB rather than climbing. The 3.2GB spike is gone.
+> - **Spinner is correct in both directions:** on a slow cold flip
+>   (12 @ 600ms, `VITRINE_NOCACHE`) it fires on **10 of 12** waiting landings
+>   (>200ms decode); during the fast storm it showed **once** — rapid flips
+>   supersede each decode's `loading_uri` before the 200ms grace, so it does
+>   not strobe. Exactly the "only when you land and wait" behaviour intended.
+>   Confirmed by a new `VDBG-SPINNER shown` probe.
 
 Measured in the 19:56 run — otherwise the log that verified V-23 in use. Four
 `VDBG-VIEWER` opens in ~1s (96.0–97.1s into the run) produced RSS

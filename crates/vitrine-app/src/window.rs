@@ -3866,6 +3866,18 @@ impl VitrineWindow {
         {
             if idx < self.imp().store.n_items() {
                 self.open_viewer(idx);
+                // Dev aid: VITRINE_FLIPTEST=<count>[:<interval_ms>] mashes Right
+                // through the viewer to reproduce V-24 (flipping faster than a
+                // large image decodes). Default 60 flips at 120ms.
+                if let Some(spec) = std::env::var_os("VITRINE_FLIPTEST") {
+                    let spec = spec.to_string_lossy();
+                    let mut parts = spec.split(':');
+                    let count: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(60);
+                    let interval: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(120);
+                    if let Some(viewer) = self.imp().viewer.borrow().as_ref() {
+                        viewer.flip_test(count, interval);
+                    }
+                }
             }
         }
         self.maybe_screenshot();
