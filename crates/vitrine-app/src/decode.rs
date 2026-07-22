@@ -161,9 +161,20 @@ pub async fn thumbnail(
 /// Decode `file` for the viewer, capping the longest edge at `max_dim` so a
 /// single displayed image stays a bounded texture (the LRU cache and zoom work
 /// against this). Requests a scaled frame when the source is larger; the caller
-/// still defensively downscales, since the scale hint is best-effort.
-pub async fn full(file: &gio::File, max_dim: u32) -> Result<gdk::Texture, glycin::ErrorCtx> {
+/// still defensively downscales, since the scale hint is best-effort. Large
+/// sources take the heavy lane first (V-24: a fast viewer flip through a
+/// large-image folder held several near-full-size frames at once — same
+/// medicine as `thumbnail` and `probe`). `byte_size` 0 = unknown = small.
+pub async fn full(
+    file: &gio::File,
+    max_dim: u32,
+    byte_size: i64,
+) -> Result<gdk::Texture, glycin::ErrorCtx> {
     let _foreground = InteractiveGuard::new();
+    let _heavy = match heavy_gate() {
+        Some(gate) if byte_size >= heavy_bytes() => Some(gate.acquire().await),
+        _ => None,
+    };
     let _permit = decode_gate().acquire().await;
     let image = Loader::new(file.clone()).load().await?;
     let details = image.details();

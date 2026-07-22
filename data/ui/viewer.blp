@@ -223,6 +223,18 @@ template $VitrineViewer: Adw.NavigationPage {
           can-target: true;
         }
 
+        // Full-decode wait indicator. The viewer shows it only after a grace
+        // period, so slow decodes get feedback and fast ones never flash it.
+        [overlay]
+        Gtk.Spinner loading_spinner {
+          visible: false;
+          can-target: false;
+          halign: center;
+          valign: center;
+          width-request: 48;
+          height-request: 48;
+        }
+
         [overlay]
         Gtk.Box crop_confirm_box {
           visible: false;

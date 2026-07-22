@@ -35,6 +35,10 @@ const ZOOM_STEP: f64 = 1.25;
 const ZOOM_MIN: f64 = 0.05;
 const ZOOM_MAX: f64 = 20.0;
 
+/// Grace period before the wait spinner appears over a pending full decode:
+/// slow decodes always get feedback, fast ones never flash it.
+const SPINNER_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// Max in-flight filmstrip thumbnail loads (bounds a fast filmstrip fling).
 const FILM_INFLIGHT: usize = 8;
 /// Cap on queued filmstrip loads; oldest (scrolled-past) dropped.
@@ -50,8 +54,9 @@ async fn decode_view(
     file: &gio::File,
     orientation: i32,
     crop: Option<(f64, f64, f64, f64)>,
+    byte_size: i64,
 ) -> Option<gdk::Texture> {
-    let texture = crate::decode::full(file, VIEW_MAX).await.ok()?;
+    let texture = crate::decode::full(file, VIEW_MAX, byte_size).await.ok()?;
     let texture = crate::thumbnails::downscale_cpu(texture, VIEW_MAX).await?;
     crate::thumbnails::transform_cpu(texture, orientation, crop).await
 }
@@ -72,6 +77,8 @@ mod imp {
         pub fs_close_button: TemplateChild<gtk::Button>,
         #[template_child]
         pub picture_scroller: TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub loading_spinner: TemplateChild<gtk::Spinner>,
         #[template_child]
         pub filmstrip_scroller: TemplateChild<gtk::ScrolledWindow>,
         #[template_child]
@@ -208,6 +215,14 @@ mod imp {
         /// and ordering/evicting by the stale value starved the very cells the
         /// user was looking at on viewer open). Cleared on manual scroll.
         pub film_center_hint: Cell<Option<u32>>,
+        /// The uri+edit-key the displayed pane is waiting a full decode for
+        /// (None once the shown texture is final). Keys both the grace-period
+        /// spinner and the arrival-time "apply or just cache?" decision.
+        pub loading_uri: RefCell<Option<String>>,
+        /// Viewer decodes in flight, by uri+edit-key: without this a fast flip
+        /// decodes the same neighbour twice — once as a prefetch, once on
+        /// arrival — doubling the transient full-size frames (V-24).
+        pub decode_inflight: RefCell<std::collections::HashSet<String>>,
     }
 
     impl Default for VitrineViewer {
@@ -280,6 +295,9 @@ mod imp {
                 crop_drag_mode: Cell::new(0),
                 crop_orig: Cell::new((0.0, 0.0, 0.0, 0.0)),
                 film_center_hint: Cell::new(None),
+                loading_spinner: Default::default(),
+                loading_uri: RefCell::new(None),
+                decode_inflight: Default::default(),
             }
         }
     }
@@ -1048,7 +1066,9 @@ impl VitrineViewer {
         let file = item.file();
         let orientation = item.orientation();
         let crop = item.crop();
-        let texture = crate::decode::full(&file, u32::MAX).await.ok()?;
+        let texture = crate::decode::full(&file, u32::MAX, item.size())
+            .await
+            .ok()?;
         gio::spawn_blocking(move || {
             let w = texture.width() as u32;
             let h = texture.height() as u32;
@@ -1492,6 +1512,7 @@ impl VitrineViewer {
         let okey = crate::thumbnails::edit_key(item.orientation(), item.crop());
         let uri = item.file().uri().to_string() + &okey;
         if let Some(texture) = imp.cache.borrow_mut().get(&uri).cloned() {
+            self.set_wait_state(None);
             self.set_texture(&texture);
         } else {
             // Instant preview: show the grid's RAM-cached thumbnail (upscaled,
@@ -1512,27 +1533,77 @@ impl VitrineViewer {
             if let Some(thumb) = placeholder {
                 self.set_texture(&thumb);
             }
-            self.load_and_show(item.clone(), pos);
+            self.set_wait_state(Some(uri));
+            self.ensure_loaded(&item);
         }
         self.prefetch(pos);
     }
 
-    /// Decode `item` at viewer resolution, cache it, and display it if the user
-    /// is still on `pos` when it arrives.
-    fn load_and_show(&self, item: ImageObject, pos: u32) {
+    /// Mark what the pane is waiting on. `Some(uri)` arms the wait spinner
+    /// after `SPINNER_GRACE` (fast decodes never flash it); `None` clears any
+    /// pending wait and hides the spinner.
+    fn set_wait_state(&self, waiting_on: Option<String>) {
+        let imp = self.imp();
+        match waiting_on {
+            None => {
+                imp.loading_uri.replace(None);
+                imp.loading_spinner.stop();
+                imp.loading_spinner.set_visible(false);
+            }
+            Some(uri) => {
+                imp.loading_uri.replace(Some(uri.clone()));
+                glib::timeout_add_local_once(
+                    SPINNER_GRACE,
+                    glib::clone!(
+                        #[weak(rename_to = viewer)]
+                        self,
+                        move || {
+                            let imp = viewer.imp();
+                            // Only if the pane is *still* waiting on this decode.
+                            if imp.loading_uri.borrow().as_deref() == Some(uri.as_str()) {
+                                imp.loading_spinner.set_visible(true);
+                                imp.loading_spinner.start();
+                            }
+                        }
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Decode `item` at viewer resolution and cache it, deduplicating
+    /// in-flight decodes (a fast flip otherwise decodes the same neighbour
+    /// twice — once as a prefetch, once on arrival; V-24). The texture is
+    /// applied on landing only if the pane is still waiting on this exact
+    /// uri — which also covers arriving at a still-loading prefetch.
+    fn ensure_loaded(&self, item: &ImageObject) {
         let file = item.file();
         let orientation = item.orientation();
         let crop = item.crop();
+        let byte_size = item.size();
         let uri = file.uri().to_string() + &crate::thumbnails::edit_key(orientation, crop);
+        if !self.imp().decode_inflight.borrow_mut().insert(uri.clone()) {
+            return;
+        }
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = viewer)]
             self,
             async move {
-                if let Some(texture) = decode_view(&file, orientation, crop).await {
-                    viewer.cache_texture(&uri, &texture);
-                    if viewer.current_position() == pos {
-                        viewer.set_texture(&texture);
+                let texture = decode_view(&file, orientation, crop, byte_size).await;
+                let imp = viewer.imp();
+                imp.decode_inflight.borrow_mut().remove(&uri);
+                let waited_on = imp.loading_uri.borrow().as_deref() == Some(uri.as_str());
+                let Some(texture) = texture else {
+                    // Decode failed: keep the placeholder, stop implying work.
+                    if waited_on {
+                        viewer.set_wait_state(None);
                     }
+                    return;
+                };
+                viewer.cache_texture(&uri, &texture);
+                if waited_on {
+                    viewer.set_wait_state(None);
+                    viewer.set_texture(&texture);
                 }
             }
         ));
@@ -1550,23 +1621,12 @@ impl VitrineViewer {
             let Some(item) = self.item_at(p) else {
                 continue;
             };
-            let orientation = item.orientation();
-            let crop = item.crop();
-            let uri =
-                item.file().uri().to_string() + &crate::thumbnails::edit_key(orientation, crop);
+            let uri = item.file().uri().to_string()
+                + &crate::thumbnails::edit_key(item.orientation(), item.crop());
             if self.imp().cache.borrow().contains(&uri) {
                 continue;
             }
-            let file = item.file();
-            glib::spawn_future_local(glib::clone!(
-                #[weak(rename_to = viewer)]
-                self,
-                async move {
-                    if let Some(texture) = decode_view(&file, orientation, crop).await {
-                        viewer.cache_texture(&uri, &texture);
-                    }
-                }
-            ));
+            self.ensure_loaded(&item);
         }
     }
 

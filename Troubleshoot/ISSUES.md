@@ -346,6 +346,39 @@ once → glycin's scale hint ignored for these files → near-full-size frames �
 full-texture pHash downloads on the main context, one per stall, while further
 decoded frames accumulate in resolved futures behind the blocked loop.
 
+### V-24 · Fast viewer flipping through large images spikes RSS to ~3 GB · `MEASURED` (2026-07-21, 19:56 log) · **FIXED (untested)**
+
+> **Fixed 2026-07-21, same evening.** Three changes, one commit:
+>
+> 1. `decode::full` now routes large sources through the **heavy lane** — it
+>    was the last decode path without it (V-23 closed `probe`). At most two
+>    near-full-size frames can now be in flight, instead of one per flip.
+> 2. **In-flight decode dedup** (`decode_inflight`, keyed by uri+edit-key).
+>    A fast flip decoded the same neighbour twice — once as a ±2 prefetch,
+>    once on arrival — doubling the transient frames. `load_and_show` and the
+>    prefetch path are now one `ensure_loaded`; a decode's texture is applied
+>    on landing iff the pane is still waiting on that exact uri (`loading_uri`),
+>    which also means landing on a still-loading prefetch now resolves instead
+>    of starting a second decode.
+> 3. **Grace-period wait spinner** (user asked "would a conditional loading
+>    screen help?"): if the full decode hasn't landed 200ms after showing the
+>    thumbnail placeholder, a spinner overlays the pane; it never appears for
+>    fast decodes. Conditional on *time*, not file size — size is a poor
+>    proxy for decode time. Indeterminate only; glycin reports no progress.
+>
+> **Verify in use:** flip quickly through the large-image folder in the
+> viewer. Expect: RSS transient well under 19:56's 3.2GB peak, no stall over
+> ~200ms, spinner appears only on the big files and vanishes as each lands
+> (placeholder → sharpened image, as before).
+
+Measured in the 19:56 run — otherwise the log that verified V-23 in use. Four
+`VDBG-VIEWER` opens in ~1s (96.0–97.1s into the run) produced RSS
+2049→2915→1952→**3208MB** with stalls of 264/221/501ms and one 1464ms frame,
+then settled to 480MB. The viewer path was already defensive per-image
+(`decode_view` = `full` + worker `downscale_cpu`), but a fast flip held
+several best-effort-unscaled frames at once: no heavy lane on `full`, plus
+the prefetch/arrival double decode.
+
 ---
 
 ## Tier 3 — UI/UX. Observed in use.
