@@ -1412,6 +1412,15 @@ for:
   "%d"]`). The host owns the UI; scripts never touch widgets. Shipping a
   starter set (modulate, blur/sharpen, levels, grayscale, watermark, format
   convert) makes the window useful with zero user scripting.
+  - **Explicit goal — emulate gThumb's colour tools** (user, 2026-07-21). The
+    starter recipes should cover what gThumb's Enhance/Adjust Colors offered,
+    since those users are the audience: **Enhance Colors** → `-auto-level` /
+    `-normalize`; **Adjust Colors** → `-modulate <bright,sat,hue>` +
+    `-brightness-contrast` + `-gamma`; **Histogram equalize** → `-equalize`.
+    This is the concrete case where "a Lua script emulates gThumb" is literally
+    true — as a *recipe*, not a sort script (E1 has no pixel access; colour
+    needs the magick helper). The user already expects these to "come in with
+    ImageMagick," i.e. E3, so no core work is implied.
 - **Preview on a proxy, never the original.** The preview pipeline runs the
   recipe on a downscaled proxy (~1024px, cached per image) so a slider drag is
   a subsecond subprocess, debounced like the thumbnail scheduler (§13
@@ -1432,6 +1441,15 @@ custom similarity metrics; aesthetic/quality scoring.
 infrastructure extensions build *on*, FTS5 when it needs scale; Date Taken
 sort (a built-in fact, blocked only on the enrichment callback, V-12);
 Find Duplicates' current exact/pHash clustering; everything indexing.
+
+**Wanted core viewer feature, deferred — a histogram panel** (user,
+2026-07-21: "we will eventually need a Histogram, I'm sure. Just not right
+now."). Explicitly *not* scripting: it is a live analysis display of the
+image the viewer already holds decoded, so it reads that texture's pixels —
+nothing a sandboxed Lua script (no pixel access) or a batch helper could
+provide. gThumb-style dockable RGB/value panel in the viewer sidebar. No
+work scheduled; captured so it is not mistaken for extension territory when
+it comes up.
 
 ### 16.6 Phases & acceptance
 
