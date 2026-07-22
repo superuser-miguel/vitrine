@@ -689,10 +689,33 @@ impl VitrineWindow {
             });
         }
         if lo <= hi {
-            imp.visible_center.set((lo + hi) / 2);
+            imp.visible_center.set(self.viewport_center_position(lo, hi));
             self.prefetch_range(lo, hi);
         }
         self.pump_loads();
+    }
+
+    /// Estimate the model position at the centre of the *on-screen* viewport.
+    /// GtkGridView binds far more cells than fit on screen on first realize
+    /// (~225 for a ~10-cell viewport, V-25), so the midpoint of the bound range
+    /// can sit ~100 positions below the fold — and decode order would chase it,
+    /// filling off-screen cells while the visible top stays blank. The
+    /// vadjustment tracks what is actually on screen, so map its centre
+    /// proportionally onto the model; fall back to the bound-range midpoint
+    /// while the scroll geometry isn't ready.
+    fn viewport_center_position(&self, lo: u32, hi: u32) -> u32 {
+        let bound_mid = (lo + hi) / 2;
+        let Some(n) = self.model().map(|m| m.n_items()).filter(|&n| n > 0) else {
+            return bound_mid;
+        };
+        let adj = self.imp().grid_scroller.vadjustment();
+        let (upper, page) = (adj.upper(), adj.page_size());
+        if page <= 0.0 || upper <= page {
+            // Geometry not ready, or everything fits on screen anyway.
+            return bound_mid;
+        }
+        let frac = ((adj.value() + page / 2.0) / upper).clamp(0.0, 1.0);
+        ((frac * n as f64) as u32).min(n - 1)
     }
 
     /// Add a load request to the bounded scheduler's queue (coalescing re-binds of
