@@ -583,7 +583,10 @@ mod tests {
     /// editing it without re-checking fails the gate.
     #[test]
     fn the_shipped_example_script_works() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/scripts/natural-sort.lua");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/scripts/natural-sort.lua"
+        );
         let src = std::fs::read_to_string(path).expect("shipped example is missing");
         let host = ScriptHost::new().unwrap();
         host.load_str("natural-sort", &src)
