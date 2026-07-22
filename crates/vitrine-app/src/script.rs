@@ -416,6 +416,21 @@ mod tests {
         host
     }
 
+    /// Load one shipped example from `docs/scripts/` into a fresh host, so a
+    /// test can pin the order it exists to produce. Mirrors the path in
+    /// `the_shipped_example_script_works` — editing a file without re-checking
+    /// its order then fails here rather than shipping a broken copy-paste.
+    fn load_shipped(file: &str) -> ScriptHost {
+        let path = format!("{}/../../docs/scripts/{}", env!("CARGO_MANIFEST_DIR"), file);
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("shipped script {file} is missing: {e}"));
+        let stem = file.strip_suffix(".lua").unwrap_or(file);
+        let host = ScriptHost::new().expect("host");
+        host.load_str(stem, &src)
+            .unwrap_or_else(|e| panic!("shipped script {file} must load: {e}"));
+        host
+    }
+
     /// E1's headline acceptance criterion (§16.6): a natural-sort script must
     /// order `img_2` before `img_10`, which plain lexicographic ordering gets
     /// backwards.
@@ -611,6 +626,155 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(host.sort_key(1, &unenriched).unwrap(), SortKey::Num(1234.0));
+    }
+
+    /// Every `*.lua` we ship in `docs/scripts/` must load and every order it
+    /// registers must return a usable key. Unlike the per-script tests below,
+    /// this sweeps the directory, so a newly added example is covered against
+    /// syntax errors, `nil`/non-scalar keys and runaway loops the moment it
+    /// lands — without anyone remembering to write a test for it.
+    #[test]
+    fn every_shipped_script_loads_and_keys() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/scripts");
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .expect("docs/scripts is missing")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "lua"))
+            .collect();
+        files.sort();
+        // Guard against a glob that silently matches nothing — the starter pack
+        // is natural-sort plus four, so anything less means the pack moved and
+        // this test is now testing air.
+        assert!(
+            files.len() >= 5,
+            "expected the shipped starter pack, found {} script(s)",
+            files.len()
+        );
+
+        // One item that touches every fact a shipped key may read, enriched so
+        // even `date_taken`-reading keys take their real branch.
+        let sample = ItemFacts {
+            name: "img_2.jpg".into(),
+            path: "/albums/trip/img_2.jpg".into(),
+            size: 4096,
+            mtime: 1_700_000_000,
+            content_type: "image/jpeg".into(),
+            content_hash: "abc".into(),
+            rating: 4,
+            orientation: 1,
+            date_taken: Some(1_699_000_000),
+        };
+
+        for path in files {
+            let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+            let src = std::fs::read_to_string(&path).unwrap();
+            let host = ScriptHost::new().unwrap();
+            host.load_str(&stem, &src)
+                .unwrap_or_else(|e| panic!("{stem} failed to load: {e}"));
+            let n = host.providers().len();
+            assert!(n > 0, "{stem} registered no sort order");
+            for i in 0..n {
+                host.sort_key(i, &sample)
+                    .unwrap_or_else(|e| panic!("{stem} produced an unusable key: {e}"));
+            }
+        }
+    }
+
+    /// The four starter sort orders each produce the ordering they exist for.
+    /// The sweep above proves they *run*; this pins what they *mean*, so an
+    /// edit that quietly inverts or flattens one fails here.
+    #[test]
+    fn starter_scripts_produce_their_intended_order() {
+        use std::cmp::Ordering::Less;
+
+        let with_type = |ct: &str, name: &str| ItemFacts {
+            name: name.into(),
+            path: format!("/x/{name}"),
+            content_type: ct.into(),
+            ..Default::default()
+        };
+        let at_path = |p: &str| ItemFacts {
+            name: p.rsplit('/').next().unwrap().into(),
+            path: p.into(),
+            ..Default::default()
+        };
+        let sized = |s: i64| ItemFacts {
+            size: s,
+            ..Default::default()
+        };
+        let rated = |r: i32, name: &str| ItemFacts {
+            name: name.into(),
+            path: format!("/x/{name}"),
+            rating: r,
+            ..Default::default()
+        };
+        // Compare two facts through one provider's key.
+        let order = |h: &ScriptHost, a: &ItemFacts, b: &ItemFacts| {
+            h.sort_key(0, a)
+                .unwrap()
+                .cmp_key(&h.sort_key(0, b).unwrap())
+        };
+
+        // by-type: content type groups, natural name within the group.
+        let h = load_shipped("by-type.lua");
+        assert_eq!(
+            order(
+                &h,
+                &with_type("image/jpeg", "b_10.jpg"),
+                &with_type("image/png", "a_2.png")
+            ),
+            Less,
+            "the jpeg group precedes the png group regardless of filename",
+        );
+        assert_eq!(
+            order(
+                &h,
+                &with_type("image/png", "img_2.png"),
+                &with_type("image/png", "img_10.png")
+            ),
+            Less,
+            "natural order within one type",
+        );
+
+        // by-folder: the folder dominates, natural name within it.
+        let h = load_shipped("by-folder.lua");
+        assert_eq!(
+            order(&h, &at_path("/a/z_1.jpg"), &at_path("/b/a_1.jpg")),
+            Less,
+            "folder a precedes folder b whatever the filenames",
+        );
+        assert_eq!(
+            order(&h, &at_path("/a/img_2.jpg"), &at_path("/a/img_10.jpg")),
+            Less,
+            "natural order within one folder",
+        );
+
+        // largest-first: the bigger file sorts earlier.
+        let h = load_shipped("largest-first.lua");
+        assert_eq!(
+            order(&h, &sized(9000), &sized(100)),
+            Less,
+            "9000 before 100 bytes"
+        );
+
+        // best-rated-first: rating descends, name breaks ties, unrated sinks.
+        let h = load_shipped("best-rated-first.lua");
+        assert_eq!(
+            order(&h, &rated(5, "z.jpg"), &rated(3, "a.jpg")),
+            Less,
+            "5 stars before 3 stars regardless of name",
+        );
+        assert_eq!(
+            order(&h, &rated(3, "a.jpg"), &rated(0, "a.jpg")),
+            Less,
+            "rated before unrated",
+        );
+        assert_eq!(
+            order(&h, &rated(5, "img_2.jpg"), &rated(5, "img_10.jpg")),
+            Less,
+            "equal rating falls back to natural name",
+        );
     }
 
     /// The whole point of mlua's `send` feature: the host must be movable to a
