@@ -1467,22 +1467,33 @@ it comes up.
   allocation errors rather than growing unbounded** (`set_memory_limit`);
   **a binary chunk is refused** (`ChunkMode::Text`).*
 
-  **Status 2026-07-21 — partially done, two criteria outstanding.** Landed:
-  the host (`crates/vitrine-app/src/script.rs`, 13 tests), `register_sort`
+  **Status 2026-07-22 — all criteria met.** Landed:
+  the host (`crates/vitrine-app/src/script.rs`, 15 tests), `register_sort`
   wired into a "From Scripts" section of the Sort By menu, off-main key
   computation with a path-keyed memo, error toasts naming the script, and all
-  three ceilings proven by test rather than asserted. Shipped example:
-  `docs/scripts/natural-sort.lua`, itself covered by a test so it cannot rot.
-  Still open, and E1 is not done until both are:
-  - **Hot reload is not implemented.** "Editing the script re-sorts without
-    restart" fails today — scripts load once at startup. Needs a file monitor
-    on the scripts dir calling `load_dir` + `rebuild_script_sort_menu`, and
-    the memo invalidated because a reloaded key function may key differently.
-  - **The 10k stall criterion is unmeasured.** Correctness is covered by unit
-    tests; "no measurable stall regression on a 10k folder" is a §13 feel
-    measurement on real folders and has not been run. The design keeps Lua off
-    both the main loop and the comparator, so the expectation is no regression
-    — but that is a prediction, not a result.
+  three ceilings proven by test rather than asserted. Shipped examples:
+  `docs/scripts/{natural-sort,by-type,by-folder,largest-first,best-rated-first}.lua`,
+  swept by a directory-driven test (`every_shipped_script_loads_and_keys`) plus
+  per-order assertions, so a new example cannot rot.
+  - **Hot reload — done and live-verified (2026-07-22).** A `gio::FileMonitor`
+    on the scripts dir (`watch_scripts_dir`) debounces the editor's save-burst
+    (generation counter + 250 ms) and calls `reload_scripts`, which builds a
+    *fresh* host (so a deleted script's order actually disappears — `load_dir`
+    only replaces same-named registrations), rebuilds the menu, clears the memo
+    (a reloaded key function may key differently), and re-resolves the active
+    sort *by name* (falling back to Name if its script was deleted). Verified in
+    the installed flatpak: adding/removing/breaking scripts drove reloads to the
+    exact expected provider counts (2→3→5→4), the double-add coalesced to one
+    reload, a broken script left the app alive, no panics.
+  - **Stall criterion — measured 2026-07-22, no regression.** Cold
+    `VITRINE_SCROLLTEST` A/B on the 7,545-image folder (the largest real one
+    available; the "10k" of the criterion), Name sort vs `script:Largest
+    first`: worst main-loop stalls **97 ms vs 107 ms**, next-worst 58/34 ms
+    — a single ~100 ms outlier each and tens-of-ms otherwise, within
+    run-to-run noise. The off-main key computation + path-keyed memo design
+    held: keying 7.5k items adds no visible stall. (Caveat per §13's lesson:
+    the metric only *corroborates* — the soak's hand-feel with a script sort
+    active is the real acceptance, and nothing has felt off so far.)
 
   *Memo-key note (decided in implementation):* keys are memoised **by path,
   not by content hash**, against the grain of everything else in Vitrine. A

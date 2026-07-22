@@ -479,3 +479,45 @@ Tell me:
 - or "Add VDBG for drop events"
 
 I can make the changes so logs become actionable. What do you want to trace first (drag or tagging)?
+
+---
+
+## 2026-07-22 — Cold-start thumbnail decode order (notes, not a bug)
+
+**Context.** `--cold` run over `~/Pictures/Instagram/hayleytothemax` (7,493 images),
+log `Troubleshoot/vitrine-debug_2026-07-22_11-06-50.log`. Documenting the order
+thumbnails decode in — nothing wrong observed, just characterising it.
+
+**Design (from code, so the log has a "why").**
+- The viewport's `visible_center = (lo+hi)/2` is recomputed each time scrolling
+  settles (`window.rs:692`).
+- The fill queue is ordered by `|pos − center|`, **nearest the centre first**,
+  and **visible cells outrank prefetch** (`window.rs:713–714, 747–751`). So a
+  cold viewport paints from its middle outward, not top-to-bottom.
+- On settle it then prefetches a margin into the RAM cache — but an
+  **asymmetric** one: `PREFETCH_AHEAD = 64`, `PREFETCH_BEHIND = 16`
+  (`window.rs:138–139`). A 4:1 downward bias, on the bet that you scroll down.
+
+**Empirical (this run).**
+- 3,900 fills, **3,851 cold decodes** (`hit=false`) — expected under `--cold`.
+- **3,136 visible / 764 prefetch** (`visible=false`) — ~20% of the work was
+  read-ahead beyond the viewport.
+- Distinct `center=` values (99, 112, ~2000, ~4288, ~12673) mark the scroll
+  positions visited during the session.
+- Order at a fresh centre (99): `98 99 100 101 102 103` then `85 104 105 106
+  107 83 108 …` — i.e. fill the cells around the centre, then **fan outward,
+  reaching further below than above**. That downward reach is `PREFETCH_AHEAD`
+  (64) vs `PREFETCH_BEHIND` (16) showing up directly in the trace.
+
+**Subjective (Miguel):** _<what caught your eye — fill in>_
+
+**Status:** behaviour-as-designed; logged for the record. No follow-up flagged.
+
+**Addendum (2026-07-22, later):** the "centre" this note describes turned out
+to be poisoned on cold opens — GtkGridView binds ~225 cells for a ~10-cell
+viewport, so `(lo+hi)/2` of the *bound* range put the centre ~100 positions
+below the fold and the visible top decoded near-last. That became **V-25**
+(fixed: centre now derived from the vadjustment; verified 112 → 2). The
+center-out fan and the 64/16 prefetch asymmetry described above are unchanged
+and still as-designed — they just fan out from the *true* viewport centre now.
+See ISSUES.md V-25 (and V-26 for the related filmstrip-contention fix).

@@ -394,6 +394,65 @@ then settled to 480MB. The viewer path was already defensive per-image
 several best-effort-unscaled frames at once: no heavy lane on `full`, plus
 the prefetch/arrival double decode.
 
+### V-25 · Cold grid open decodes off-screen cells before the visible top · `MEASURED` (2026-07-22 A/B) · **FIXED — VERIFIED (2026-07-22, ab-openpos A/B)**
+
+The months-old "sluggish open / feels like it opened in the middle." It is
+**not** an open-position bug — the grid provably opens at `vadj=0`
+(`VDBG-GRIDHOME`); a `scroll_to(0)`-on-populate fix was written and reverted
+as a phantom. See memory `vitrine-decode-openpos-investigation`.
+
+Actual mechanism — **over-bind poisons the decode centre**. On initial
+realize `GtkGridView` binds ~225 cells (pos 0–224) for a viewport that truly
+shows ~10 (240px icons, 1100×720 window). `flush_pending` set
+`visible_center = (lo+hi)/2` of the *bound* range = **112**, and
+`pop_best_load` fills nearest-to-centre — so the ~10 actually-visible top
+cells sat ~100 away and decoded near-last while the decoder ground through
+off-screen cells. Measured hands-off cold A/B (Name sort vs
+`script:Largest first`): both open at exactly c112 → sort-independent,
+`center` never leaves 112, 225 `visible=true` binds per run.
+
+> **Fixed 2026-07-22** — option (a) of the two candidates: derive the centre
+> from the **scroll geometry**, not bound-cell positions. New
+> `viewport_center_position()` maps the vadjustment's centre
+> (`(value + page/2) / upper`) proportionally onto the model; falls back to
+> the bound-range midpoint while geometry isn't ready or everything fits on
+> screen. Immune to over-binding by construction, and scroll-follow behaviour
+> is unchanged (the vadjustment is current by the time the 90ms flush fires).
+>
+> **VERIFIED 2026-07-22** with `ab-openpos.sh` (hands-off cold A/B, 7780-file
+> folder, VITRINE_NOCACHE): opening centre dropped 112 → **2** in both cases
+> (Name sort and `script:Largest first`), and the first 12 completions were
+> all pos 0–13 — the visible top fills first. One distinct centre per
+> hands-off window (no drift).
+
+Separate open question (not this fix): why GtkGridView over-binds ~225 cells
+for a ~10-cell viewport at all — that's wasted bind work regardless of order.
+
+### V-26 · Grid decodes keep competing with the filmstrip while the viewer is open · `MEASURED` (2026-07-22) · **FIXED — VERIFIED (2026-07-22, VITRINE_OPEN A/B + OPENFOLDER resume test)**
+
+The cross-subsystem gap flagged in use ("once in the filmstrip those decodes
+should be important"). The filmstrip's own *ordering* was already right (it
+centres on the shown image via the hadjustment + `film_center_hint`), but
+grid and filmstrip loads funnel into the same `decode_gate()` (4–8 permits,
+decode.rs) — and the grid's `pump_loads` kept up to 24 futures in flight
+with no "viewer is on top, stand down" signal, while the filmstrip is capped
+at 8. Roughly 3:1 of the gate went to cells nobody could see.
+
+Measured: cold run with `VITRINE_OPEN=0` (viewer up from populate, hands-off
+12s) → the invisible grid still completed all **289** `GRIDFILL` decodes
+while the filmstrip did 205 binds against it.
+
+> **Fixed 2026-07-22:** `pump_loads` returns without spawning while the
+> viewer page is on top (`viewer_is_visible()`, nav-stack visible-page tag).
+> The queue is kept — nothing is dropped; in-flight futures just drain. A
+> `visible_page` notify on the nav view re-pumps when the browser returns.
+>
+> **VERIFIED 2026-07-22:** same `VITRINE_OPEN=0` run on the fixed build —
+> `GRIDFILL` **289 → 0** with the viewer up the whole 12s, `FILMBIND`
+> identical (205) both runs, no panics/CRITICALs. Resume path proven with the
+> `VITRINE_OPENFOLDER` flow (open dir B while in viewer → pops to browser):
+> **97** grid fills after the pop, so the visible-page notify re-pumps.
+
 ---
 
 ## Tier 3 — UI/UX. Observed in use.
