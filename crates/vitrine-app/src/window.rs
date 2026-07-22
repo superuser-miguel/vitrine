@@ -305,6 +305,13 @@ mod imp {
         /// Which provider `script_keys` was computed for, so a stale memo from
         /// a previous sort is never read as if it belonged to this one.
         pub script_keys_for: Rc<Cell<Option<u32>>>,
+        /// Keeps the scripts-directory monitor alive — dropping it ends the
+        /// hot-reload watch. `None` if the directory could not be watched.
+        pub scripts_monitor: RefCell<Option<gio::FileMonitor>>,
+        /// Debounce generation for reloads: an editor emits a burst of events
+        /// per save, so each event bumps this and schedules a delayed reload
+        /// that fires only if it is still the latest (§16.6 hot reload).
+        pub scripts_reload_gen: Rc<Cell<u64>>,
         /// Selection model the grid renders.
         pub selection: RefCell<Option<gtk::MultiSelection>>,
         /// The grid view (its factory is rebuilt when the icon size changes).
@@ -386,6 +393,8 @@ mod imp {
                 script_host: RefCell::new(None),
                 script_keys: Rc::new(RefCell::new(HashMap::new())),
                 script_keys_for: Rc::new(Cell::new(None)),
+                scripts_monitor: RefCell::new(None),
+                scripts_reload_gen: Rc::new(Cell::new(0)),
                 selection: RefCell::new(None),
                 grid_view: RefCell::new(None),
                 icon_index: std::cell::Cell::new(DEFAULT_ICON),
@@ -3460,14 +3469,146 @@ impl VitrineWindow {
         let errors = host.load_dir(&Self::scripts_dir());
         *self.imp().script_host.borrow_mut() = Some(host);
 
-        // §16.6: a script error surfaces as a toast naming the script.
+        self.report_script_load_errors(errors);
+        self.rebuild_script_sort_menu();
+
+        // E1's last acceptance criterion: editing a script re-sorts without a
+        // restart. Set up once, here; the monitor lives on `imp`.
+        self.watch_scripts_dir();
+    }
+
+    /// §16.6: a script error surfaces as a toast naming the script, never a
+    /// crash. Capped so a directory of broken scripts cannot bury the user in
+    /// toasts. Shared by the initial load and every hot reload.
+    fn report_script_load_errors(&self, errors: Vec<crate::script::ScriptError>) {
         for e in errors.iter().take(3) {
             self.toast(&format!("Script “{}” failed: {}", e.script, e.message));
         }
         if errors.len() > 3 {
             self.toast(&format!("{} more scripts failed to load", errors.len() - 3));
         }
+    }
+
+    /// Watch the scripts directory so an edit re-sorts without a restart
+    /// (§16.6). Called once from `setup_scripts`; the monitor is stored on
+    /// `imp` to stay alive for the window's lifetime.
+    fn watch_scripts_dir(&self) {
+        let dir = Self::scripts_dir();
+        // Create it if absent: it gives the monitor something to watch and,
+        // incidentally, shows the user where scripts go. No portal is needed —
+        // this is our own data dir (§16.1 decision 4).
+        let _ = std::fs::create_dir_all(&dir);
+
+        let monitor = match gio::File::for_path(&dir)
+            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("VDBG-SCRIPT scripts dir not watchable: {e}");
+                return;
+            }
+        };
+
+        monitor.connect_changed(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |_, _, _, event| {
+                use gio::FileMonitorEvent as Ev;
+                // React once a change has settled, or a file has appeared or
+                // vanished; ignore in-progress writes and attribute touches so
+                // one save becomes one reload.
+                if !matches!(
+                    event,
+                    Ev::ChangesDoneHint
+                        | Ev::Created
+                        | Ev::Deleted
+                        | Ev::Renamed
+                        | Ev::MovedIn
+                        | Ev::MovedOut
+                ) {
+                    return;
+                }
+                // Coalesce the editor's burst: bump the generation and let only
+                // the last event's delayed reload survive the guard below.
+                let generation = window.imp().scripts_reload_gen.get().wrapping_add(1);
+                window.imp().scripts_reload_gen.set(generation);
+                glib::timeout_add_local_once(
+                    std::time::Duration::from_millis(250),
+                    glib::clone!(
+                        #[weak]
+                        window,
+                        move || {
+                            if window.imp().scripts_reload_gen.get() == generation {
+                                window.reload_scripts();
+                            }
+                        }
+                    ),
+                );
+            }
+        ));
+
+        *self.imp().scripts_monitor.borrow_mut() = Some(monitor);
+    }
+
+    /// Rebuild the script tier from disk after the scripts directory changed.
+    ///
+    /// A *fresh* host is built rather than reloading into the old one, so a
+    /// deleted script's sort order actually disappears — `load_dir` only
+    /// replaces same-named registrations and cannot know a file is gone.
+    fn reload_scripts(&self) {
+        let imp = self.imp();
+
+        // The active script sort is remembered by *name*, resolved against the
+        // old host before it is swapped out: a reload may renumber providers,
+        // and the file backing the current sort may even be the one that went.
+        let active_name = match imp.sort_state.get().field {
+            SortField::Script(i) => self.script_provider_name(i),
+            _ => None,
+        };
+
+        let host = match crate::script::ScriptHost::new() {
+            Ok(h) => Arc::new(h),
+            Err(e) => {
+                eprintln!("VDBG-SCRIPT host unavailable on reload: {e}");
+                return;
+            }
+        };
+        let errors = host.load_dir(&Self::scripts_dir());
+        *imp.script_host.borrow_mut() = Some(host);
+        self.report_script_load_errors(errors);
         self.rebuild_script_sort_menu();
+
+        if crate::debug::enabled() {
+            let n = imp
+                .script_host
+                .borrow()
+                .as_ref()
+                .map_or(0, |h| h.providers().len());
+            eprintln!("VDBG-SCRIPT reloaded: {n} provider(s)");
+        }
+
+        // The memo held keys computed by the *old* key functions — the very
+        // thing a reload changes. Drop it so a stale key is never compared
+        // against a freshly computed one.
+        imp.script_keys.borrow_mut().clear();
+        imp.script_keys_for.set(None);
+
+        let Some(name) = active_name else {
+            // A built-in sort is active; the menu refresh is all that is due.
+            return;
+        };
+        match self.script_index_by_name(&name) {
+            // Re-resolve by name (the index may have moved) and re-sort. This
+            // recomputes even when the index is unchanged — the point is that
+            // the key function itself may now compute differently.
+            Some(idx) => self.set_sort_field(SortField::Script(idx)),
+            // The active sort's script is gone — fall back rather than leaving
+            // the grid pinned to a provider that no longer exists.
+            None => {
+                self.toast(&format!("Sort “{name}” is gone — sorted by name"));
+                self.set_sort_field(SortField::Name);
+            }
+        }
     }
 
     /// Append a section of script-provided sort orders to the Sort By menu,
