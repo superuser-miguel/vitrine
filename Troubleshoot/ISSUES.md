@@ -689,6 +689,22 @@ No way back to the initial "No Folder Open" state without restarting.
 Manual reorder within a collection; bulk remove (blocked on V-01); collection
 thumbnails in the sidebar.
 
+### V-27 · Sidebar underuses its space; tags need discoverability · `OBSERVED` (user, 2026-07-23)
+
+> **User note, down-the-line — captured during soak, not scheduled. Don't fix
+> speculatively.** The Folders **tree** in the sidebar feels **bare** — it reads
+> more like it belongs in a card than earning its own top-level slot. The idea:
+> give that space to **Tags** — a browsable Tags section in the sidebar as a fast
+> way to *discover* existing tags. Today the only route to tags is the **Tag
+> button**, which the user thinks **needs more work**: it *adds* tags fine, but
+> discoverability of what tags already exist is weak. So tags-in-the-sidebar may
+> be the better use of the space; the tree is "ok… but bare."
+
+Two threads, related: (1) the sidebar layout — the folder tree may want to be a
+card, freeing its slot; (2) tag UX — surfacing existing tags for browse/filter,
+not just the add-flow on the Tag button. Touches the shared sidebar (folders /
+collections / bookmarks) and relates to [tag UX: V-09 remove-tag, V-11 filter].
+
 ---
 
 ## Tier 4 — Open questions.
