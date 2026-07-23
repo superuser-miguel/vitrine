@@ -115,7 +115,7 @@
     <li><a href="#wrong"><span class="n">1</span>The confident wrong answer</a></li>
     <li><a href="#probe"><span class="n">2</span>One probe, one number</a></li>
     <li><a href="#lie"><span class="n">3</span>The centre that was never there</a></li>
-    <li><a href="#unproven"><span class="n">4</span>The part I can't prove yet</a></li>
+    <li><a href="#unproven"><span class="n">4</span>The part I couldn't prove — then did</a></li>
   </ol>
 </section>
 
@@ -243,40 +243,51 @@ fn viewport_center_position(&amp;self) -&gt; u32 {
 </section>
 
 <section class="wrap" id="unproven">
-  <h2><span class="num">4</span>The part I can't prove yet</h2>
-  <p class="sub">Where the fix ends and honest uncertainty begins.</p>
+  <h2><span class="num">4</span>The part I couldn't prove — then did</h2>
+  <p class="sub">A fifty-line reproducer, and a number that isn't an accident.</p>
 
-  <p>Everything above is measured and shipped. What follows is the loose thread, and I want to
-    be precise about the seam, because it's the difference between a debugging story and a
-    claim about GTK I haven't earned.</p>
-
-  <p>The fix works because it stopped trusting the bound cells. It did <em>not</em> explain
+  <p>The fix worked because it stopped trusting the bound cells. It did <em>not</em> explain
     <strong>why the bind callback fired across 225 positions for a ten-cell viewport.</strong>
-    That number is an interpretation of my own log — <code>visible=true</code> fills spread
-    uniformly across positions 0–224 over an eleven-second window — and I have not confirmed:</p>
+    That 225 was an interpretation of my own log, and I wasn't going to claim
+    "<code>GtkGridView</code> over-binds twenty times its viewport" from a Vitrine trace — that's
+    the kind of thing a maintainer corrects you on, and rightly. So I built the smallest thing
+    that could settle it: a <a href="repro/gridview-bind.py">~60-line PyGObject grid</a> — a
+    10,000-item <code>StringList</code>, plain label cells, a counter on the factory's bind and
+    unbind — no Rust, no Vitrine, no image decoding. Just: how many cells does it bind at rest?</p>
 
-  <ul>
-    <li>whether that's 225 <em>simultaneous</em> cell widgets, or bind/unbind churn accumulated
-      as the view recycles;</li>
-    <li>whether it's a realize-time transient — a child measured at its natural size before the
-      <code>ScrolledWindow</code> clamps it, a well-known pattern — or something else;</li>
-    <li>whether any of it reproduces outside Vitrine at all.</li>
-  </ul>
+  <p>It binds a <strong>fixed 32 rows</strong>. Not proportional to the viewport — <em>fixed</em>.
+    The count is invariant to window height, cell size and model size, and scales only with the
+    column count, exactly as <code>32 × columns + 1</code>:</p>
 
-  <p>So I'm not going to tell you "<code>GtkGridView</code> over-binds twenty times its
-    viewport." I don't know that. I know that <em>inferring the viewport from bound cells was
-    wrong</em>, and why, and how to fix it — and that's the transferable part. The mechanism
-    underneath is an open question with an obvious answer waiting: a fifty-line reproducer —
-    one grid, a ten-thousand-item model, a counter on the bind callback — would settle it,
-    and either turns this into a real GTK finding worth an issue, or teaches me what I misread.
-    That's the next thing I build. If you've seen this in your own list views, I'd like to know
-    which it was.</p>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>columns</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th></tr></thead>
+    <tbody>
+      <tr><td>cells bound</td><td>33</td><td>65</td><td>97</td><td>129</td><td>161</td><td>193</td><td>225</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Seven columns → <strong>225</strong>. That is Vitrine's number to the digit, because
+    Vitrine's grid caps at <code>MAX_COLUMNS = 7</code> — and the midpoint of that 0–224 band is
+    112, the exact poisoned centre from §3. The mystery number was never mysterious: it was
+    <code>32 × 7 + 1</code>. And <code>total_bind_events == live_bound</code> in the probe, so
+    these are 225 <em>simultaneous</em> live widgets, not recycling churn. For a grid showing
+    three rows, GtkGridView realizes thirty-two — roughly a 10× buffer, held.</p>
+
+  <p>Two honest edges remain. This is host <strong>GTK 4.22</strong> (Vitrine's Flatpak runtime
+    differs — but the exact 225 match says the same behaviour is in it). And I couldn't fit a
+    viewport taller than 32 rows on this display, so whether 32 is a floor or a hard cap
+    <em>above</em> 32 visible rows is untested; for any ordinary thumbnail grid it's a fixed
+    32-row floor. The reproducer is in the repo (<code>docs/repro/</code>) if you want to run it
+    against your own GTK.</p>
 
   <div class="lesson">
     <b>Lesson</b>
-    <p>Ship the fix you verified; flag the cause you didn't. A post that says "here's what I
-      proved, and here's exactly where I stopped proving" is worth more than one that rounds an
-      observation up into a bug report.</p>
+    <p>Flag the cause you didn't prove — then go prove it. The gap between "I observed 225 in my
+      app" and "GtkGridView binds <code>32 × columns + 1</code> in sixty lines of anyone's Python"
+      is the whole difference between a hunch and a finding, and it was one afternoon's work to
+      cross. Don't publish the hunch when the finding is that close.</p>
   </div>
 </section>
 
