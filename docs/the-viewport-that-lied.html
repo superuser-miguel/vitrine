@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The viewport that lied — Vitrine</title>
+<meta name="description" content="A months-old 'it feels sluggish, like it opens in the middle' in a GTK4/Rust image browser — chased through three rebuilds and one confidently wrong fix, then killed by a single line of instrumentation. The bug was the app inferring where you were looking from the wrong thing.">
+<style>
+  :root {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf;
+    --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+      --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6;
+      --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf; --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+    --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6; --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.68 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 40px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: 0; }
+
+  .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
+  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
+  .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
+  .meta { color: var(--muted); font-size: .88rem; margin: 0; }
+
+  h2 { font-size: 1.42rem; letter-spacing: -.01em; margin: 0 0 6px; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5em; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .98rem; }
+  h3 { font-size: 1.02rem; margin: 26px 0 6px; }
+  p { margin: 0 0 15px; }
+
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+        padding: 14px 16px; overflow-x: auto; font-size: .87rem; line-height: 1.5; }
+  code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px;
+         border-radius: 6px; font-size: .92em; }
+  pre code { background: none; padding: 0; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; margin: 0 0 16px; }
+  table { width: 100%; border-collapse: collapse; min-width: 420px; background: var(--surface); }
+  th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  thead th { font-size: .78rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  blockquote { margin: 0 0 15px; padding: 12px 18px; border-left: 3px solid var(--accent);
+               background: color-mix(in srgb, var(--accent) 7%, transparent);
+               border-radius: 0 10px 10px 0; color: var(--text); }
+  blockquote p:last-child { margin: 0; }
+
+  .lesson { background: var(--surface); border: 1px solid var(--border);
+            border-left: 3px solid var(--ok); border-radius: 0 12px 12px 0;
+            padding: 14px 18px; margin: 20px 0 0; }
+  .lesson b { display: block; font-size: .78rem; text-transform: uppercase;
+              letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+  .lesson p { margin: 0; }
+
+  .mine { border-left-color: var(--warn); }
+  ul { padding-left: 22px; margin: 0 0 15px; }
+  li { margin: 0 0 7px; }
+  .toc { list-style: none; padding: 0; margin: 0; }
+  .toc li { margin: 0; border-bottom: 1px solid var(--border); }
+  .toc li:last-child { border: 0; }
+  .toc a { display: block; padding: 10px 0; text-decoration: none; color: var(--text); }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .7em; }
+
+  footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; padding: 26px 0 46px; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <a class="back" href="./">&larr; Vitrine</a>
+  <h1>The viewport that lied</h1>
+  <p class="lede">A months-old feeling — <em>opening a big folder is sluggish, like it
+    starts in the middle</em> — in <a href="./">Vitrine</a>, a GTK4/Rust image browser.
+    It took three rebuilds and one confidently wrong fix to find that the app was lying
+    to itself about where you were looking. The line that ended it printed a single number.</p>
+  <p class="meta">July 2026 · GNOME · Rust · GTK4 · virtualized lists</p>
+</header>
+
+<section class="wrap">
+  <p>Vitrine shows images in a <code>GtkGridView</code> — a virtualized grid, so a folder
+    of 7,493 photos only ever builds a few dozen cell widgets, recycling them as you
+    scroll. Thumbnails decode lazily on a bounded worker, and the decoder is <em>picky
+    about order</em>: it loads the cell nearest the middle of what you're looking at first,
+    then fans outward. Fill the screen you're staring at before the stuff you'd have to
+    scroll to. Sensible.</p>
+  <p>The complaint was old and vague, the way the real ones are: <em>opening a large
+    folder feels slow, and it's like it decodes from the middle instead of the top.</em>
+    Every previous look had ended the same way — "the decoder starts from the centre, that's
+    by design" — and the feeling never went away. This time we measured it, and the tidy
+    explanation fell apart twice before it stood up.</p>
+  <ol class="toc" start="0">
+    <li><a href="#wrong"><span class="n">1</span>The confident wrong answer</a></li>
+    <li><a href="#probe"><span class="n">2</span>One probe, one number</a></li>
+    <li><a href="#lie"><span class="n">3</span>The centre that was never there</a></li>
+    <li><a href="#unproven"><span class="n">4</span>The part I can't prove yet</a></li>
+  </ol>
+</section>
+
+<section class="wrap" id="wrong">
+  <h2><span class="num">1</span>The confident wrong answer</h2>
+  <p class="sub">A fix shipped before a measurement is a guess with a commit hash.</p>
+
+  <p>The decoder logs which cell it fills and where it thinks the viewport is centred. On a
+    cold open of the 7,493-image folder, the very first lines were:</p>
+
+  <pre><code>VDBG-GRIDFILL ms=0   pos=111 center=112 visible=true
+VDBG-GRIDFILL ms=101 pos=112 center=112 visible=true
+VDBG-GRIDFILL ms=109 pos=113 center=112 visible=true</code></pre>
+
+  <p>Position 111, 112, 113 — with the grid five icons wide, that's <strong>row 22</strong>.
+    The decoder opened a fresh folder and immediately started work seventeen rows below the
+    top. The obvious reading: the grid <em>scrolls to the middle of the directory</em> on
+    open, and the decoder is faithfully serving whatever garbage viewport it was handed.</p>
+
+  <p>So I fixed the scroll. After the folder populates, tell the grid to go home:</p>
+
+  <pre><code>// populate(): land on the first item of the sort, not row 22
+grid.scroll_to(0, ListScrollFlags::empty(), None);</code></pre>
+
+  <p>Rebuilt the Flatpak, ran a hands-off cold open, measured. Still <code>center=112</code>.
+    Added a deferred re-issue in case the grid wasn't mapped yet. Rebuilt. Still 112. A third
+    rebuild with a probe on the scroll fix to prove it even ran. It ran. Still 112.</p>
+
+  <div class="lesson mine">
+    <b>Where I went wrong</b>
+    <p>I wrote an elegant fix for a bug I hadn't confirmed existed. <code>scroll_to(0)</code>
+      assumes the grid is somewhere other than the top — and I never checked whether it was.
+      Three rebuilds went into correcting a scroll position that, it turns out, was already
+      correct.</p>
+  </div>
+</section>
+
+<section class="wrap" id="probe">
+  <h2><span class="num">2</span>One probe, one number</h2>
+  <p class="sub">Instrument the assumption, not the symptom.</p>
+
+  <p>The scroll fix logged the scrollbar's value each time it fired, mostly as an afterthought.
+    That afterthought was the whole investigation:</p>
+
+  <pre><code>VDBG-GRIDHOME scroll_to(0) n=7543 vadj=0</code></pre>
+
+  <p><code>vadj=0</code>. The vertical scroll adjustment was at zero — the top — the entire
+    time. The grid <strong>never opened in the middle.</strong> It was at the top, exactly
+    where it should be, while the decoder cheerfully insisted the centre of attention was
+    position 112.</p>
+
+  <p>Two facts that couldn't both be true, and the scroll fix had been quietly assuming the
+    false one. I reverted it. The bug was never <em>where</em> the grid was pointed; it was
+    what the decoder <em>believed</em> about where I was looking — and those had come apart.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>Three rebuilds of theorizing ended the moment one <code>eprintln!</code> printed the
+      number the theory depended on. When a fix doesn't move the needle, don't build a
+      bigger fix — print the assumption underneath it.</p>
+  </div>
+</section>
+
+<section class="wrap" id="lie">
+  <h2><span class="num">3</span>The centre that was never there</h2>
+  <p class="sub">Don't ask the widgets what's visible. Ask the scrollbar.</p>
+
+  <p>So where did 112 come from? The decoder needs to know the centre of the viewport to
+    prioritize around it, and here is how it worked it out — from the cells
+    <code>GtkGridView</code> had handed it via the factory's bind callback:</p>
+
+  <pre><code>// the viewport centre, inferred from the cells GTK bound
+let lo = pending.iter().map(|c| c.position).min().unwrap();
+let hi = pending.iter().map(|c| c.position).max().unwrap();
+visible_center = (lo + hi) / 2;   // &larr; the lie</code></pre>
+
+  <p>It reads like common sense: the visible cells are the ones GTK bound, so their midpoint
+    is the middle of the screen. But a virtualized list binds cells on <em>its</em> schedule,
+    not yours. At default 240&nbsp;px thumbnails in a 1100×720 window only about ten cells are
+    genuinely on screen — yet over the open, the bind callback fired for cells all the way
+    across positions <strong>0 to 224</strong>. Midpoint: 112. The heuristic didn't measure
+    the viewport; it measured GTK's binding behaviour and mistook it for the viewport.</p>
+
+  <p>The consequence is quietly perverse. With the "centre" pinned at 112, the ten cells you
+    can actually see — positions 0 to 11, top-left, exactly where your eyes land — are the
+    <em>furthest</em> from the centre the decoder is optimizing for. They are decoded almost
+    last. The scrollbar is at the top, your eyes are at the top, and the decoder is grinding
+    through off-screen cells first. That is the "sluggish, feels like the middle" — not a
+    scroll position, but a decode order chasing a phantom centre.</p>
+
+  <p>The decoder's ordering was never wrong. It was fed a poisoned number. The fix is to stop
+    inferring the viewport from bound widgets and read it from the thing that actually knows —
+    the scroll adjustment:</p>
+
+  <pre><code>// where the eye actually is: derived from the scrollbar, not the cells
+fn viewport_center_position(&amp;self) -&gt; u32 {
+    let adj = self.grid_scroller.vadjustment();
+    let frac = (adj.value() + adj.page_size() / 2.0) / adj.upper();
+    (frac * n_items as f64).round() as u32
+}</code></pre>
+
+  <p>At <code>vadj=0</code> that resolves to the top, where it belongs. To keep the change
+    honest it was verified the same hands-off way the bug was found — an A/B of two cold
+    opens, one on a built-in sort and one on a Lua script sort, to confirm the fix wasn't
+    sort-dependent:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>Before</th><th>After</th></tr></thead>
+    <tbody>
+      <tr><td>Opening decode centre</td><td>pos 112</td><td>pos 2</td></tr>
+      <tr><td>First 12 cells decoded</td><td>pos 104&ndash;121</td><td>pos 0&ndash;13</td></tr>
+      <tr><td>Sort-dependent?</td><td>no (112 either way)</td><td>no</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>Bound list items are an implementation detail of the virtualization, not a description
+      of the viewport. If you need to know what the user can see in a <code>GtkListView</code>
+      or <code>GtkGridView</code>, ask the scroll adjustment — value, page size, upper — not
+      the set of cells that happen to be alive.</p>
+  </div>
+</section>
+
+<section class="wrap" id="unproven">
+  <h2><span class="num">4</span>The part I can't prove yet</h2>
+  <p class="sub">Where the fix ends and honest uncertainty begins.</p>
+
+  <p>Everything above is measured and shipped. What follows is the loose thread, and I want to
+    be precise about the seam, because it's the difference between a debugging story and a
+    claim about GTK I haven't earned.</p>
+
+  <p>The fix works because it stopped trusting the bound cells. It did <em>not</em> explain
+    <strong>why the bind callback fired across 225 positions for a ten-cell viewport.</strong>
+    That number is an interpretation of my own log — <code>visible=true</code> fills spread
+    uniformly across positions 0–224 over an eleven-second window — and I have not confirmed:</p>
+
+  <ul>
+    <li>whether that's 225 <em>simultaneous</em> cell widgets, or bind/unbind churn accumulated
+      as the view recycles;</li>
+    <li>whether it's a realize-time transient — a child measured at its natural size before the
+      <code>ScrolledWindow</code> clamps it, a well-known pattern — or something else;</li>
+    <li>whether any of it reproduces outside Vitrine at all.</li>
+  </ul>
+
+  <p>So I'm not going to tell you "<code>GtkGridView</code> over-binds twenty times its
+    viewport." I don't know that. I know that <em>inferring the viewport from bound cells was
+    wrong</em>, and why, and how to fix it — and that's the transferable part. The mechanism
+    underneath is an open question with an obvious answer waiting: a fifty-line reproducer —
+    one grid, a ten-thousand-item model, a counter on the bind callback — would settle it,
+    and either turns this into a real GTK finding worth an issue, or teaches me what I misread.
+    That's the next thing I build. If you've seen this in your own list views, I'd like to know
+    which it was.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>Ship the fix you verified; flag the cause you didn't. A post that says "here's what I
+      proved, and here's exactly where I stopped proving" is worth more than one that rounds an
+      observation up into a bug report.</p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>Where it ended</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>Before</th><th>After</th></tr></thead>
+    <tbody>
+      <tr><td>Opening decode centre (7.5k folder)</td><td>pos 112</td><td>pos 2</td></tr>
+      <tr><td>Where the visible top cells decoded</td><td>near last</td><td>first</td></tr>
+      <tr><td>Rebuilds spent on the wrong fix</td><td>3</td><td>&mdash;</td></tr>
+      <tr><td>Lines of instrumentation that ended it</td><td>&mdash;</td><td>1</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>The feeling had been real for months and the cause had been misfiled just as long — a
+    perception blamed on the decoder, when the decoder was only ever obeying a number computed
+    from the wrong thing. The whole fix is a function that asks the scrollbar instead of the
+    cells. The whole lesson is to print the number your theory rests on before you write the
+    fix that rests on your theory.</p>
+</section>
+
+<footer class="wrap">
+  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p><a href="debugging-vitrine.html">Six bugs in an image browser</a>
+     · <a href="duplicates-that-arent.html">The duplicate that was one file</a>
+     · <a href="flatpak-document-portal.html">What the document portal actually does</a>
+     · <a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a>
+     · <a href="./">Project page</a></p>
+</footer>
+
+</body>
+</html>
