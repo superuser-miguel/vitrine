@@ -17,6 +17,7 @@ const GROUP_ROOTS: &str = "Roots";
 const KEY_COUNT: &str = "count";
 const GROUP_CACHE: &str = "Cache";
 const KEY_CACHE_MB: &str = "thumbnail-mb";
+const KEY_REMOVABLE_MB: &str = "removable-mb";
 const GROUP_SORT: &str = "Sort";
 const KEY_SORT_FIELD: &str = "field";
 const KEY_SORT_DESC: &str = "descending";
@@ -24,6 +25,11 @@ const GROUP_BOOKMARKS: &str = "Bookmarks";
 
 /// Default thumbnail-cache budget (MB) — matches the historical prune default.
 pub const DEFAULT_CACHE_MB: u64 = 8192;
+
+/// Default persistent budget (MB) for thumbnails of removable/remote sources
+/// (USB, network). A *separate* budget so browsing local files never evicts
+/// USB/remote thumbnails; set to 0 to disable the tier (PLAN §16.5, Flavor 1).
+pub const DEFAULT_REMOVABLE_MB: u64 = 8192;
 
 /// A sidebar bookmark: a user-editable display name and its target folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +115,23 @@ impl Settings {
     /// Set the thumbnail-cache budget in MB.
     pub fn set_cache_mb(&self, mb: u64) {
         self.key_file.set_uint64(GROUP_CACHE, KEY_CACHE_MB, mb);
+        self.save();
+    }
+
+    /// Persistent cache budget (MB) for removable/remote thumbnails; 0 disables
+    /// the tier. Unlike `cache_mb`, a stored 0 is honoured (means disabled) —
+    /// only an unset key falls back to [`DEFAULT_REMOVABLE_MB`].
+    pub fn removable_cache_mb(&self) -> u64 {
+        self.key_file
+            .uint64(GROUP_CACHE, KEY_REMOVABLE_MB)
+            .unwrap_or(DEFAULT_REMOVABLE_MB)
+    }
+
+    // Consumer is the Preferences slider (follow-up); the getter + default +
+    // VITRINE_REMOVABLE_MB already drive the tier without it.
+    #[allow(dead_code)]
+    pub fn set_removable_cache_mb(&self, mb: u64) {
+        self.key_file.set_uint64(GROUP_CACHE, KEY_REMOVABLE_MB, mb);
         self.save();
     }
 

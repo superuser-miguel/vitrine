@@ -138,7 +138,10 @@ fn cache_group(dialog: &adw::PreferencesDialog) -> adw::PreferencesGroup {
     adjustment.connect_value_changed(|adj| {
         Settings::load().set_cache_mb(adj.value() as u64);
     });
-    dialog.connect_closed(|_| crate::thumbnails::prune_private_cache());
+    dialog.connect_closed(|_| {
+        crate::thumbnails::prune_private_cache();
+        crate::thumbnails::prune_removable_cache();
+    });
 
     group.add(&row);
     group

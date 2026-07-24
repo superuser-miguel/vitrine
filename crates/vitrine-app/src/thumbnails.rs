@@ -86,6 +86,97 @@ fn private_dir() -> PathBuf {
     glib::user_cache_dir().join("thumbnails")
 }
 
+/// Persistent cache for removable/remote (USB, network) thumbnails — a *separate*
+/// dir from `private_dir` so local browsing's LRU prune never evicts them
+/// (PLAN §16.5, Flavor 1). Budgeted independently via `removable_cache_mb`.
+fn removable_dir() -> PathBuf {
+    glib::user_cache_dir().join("removable-thumbnails")
+}
+
+/// The removable-tier budget in MB (`VITRINE_REMOVABLE_MB` overrides Preferences).
+fn removable_budget_mb() -> u64 {
+    std::env::var("VITRINE_REMOVABLE_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| crate::settings::Settings::load().removable_cache_mb())
+}
+
+/// Whether the removable/remote tier is enabled (budget > 0). Read once — a
+/// budget change takes effect on restart, which keeps this off the hot path.
+fn removable_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| removable_budget_mb() > 0)
+}
+
+/// Typical auto-mount roots for removable media.
+fn is_removable_path(path: &str) -> bool {
+    path.starts_with("/run/media/") || path.starts_with("/media/") || path.starts_with("/mnt/")
+}
+
+/// Cheap, synchronous heuristic on the raw URI: network (GVFS) schemes, or a
+/// real `file://` path under a removable mount root.
+fn is_removable_uri(uri: &str) -> bool {
+    const NET: &[&str] = &[
+        "smb://", "sftp://", "ftp://", "dav://", "davs://", "nfs://", "mtp://",
+        "gphoto2://", "afp://", "google-drive://",
+    ];
+    if NET.iter().any(|s| uri.starts_with(s)) {
+        return true;
+    }
+    matches!(uri.strip_prefix("file://"), Some(path) if is_removable_path(path))
+}
+
+/// A document-portal URI: `file:///run/user/<UID>/doc/<doc-id>/…`. Inside the
+/// Flatpak sandbox, a removable drive granted through the file chooser appears
+/// here — the real `/run/media/…` location hidden behind the doc id.
+fn is_doc_portal_uri(uri: &str) -> bool {
+    matches!(
+        uri.strip_prefix("file:///run/user/")
+            .and_then(|rest| rest.split_once('/')),
+        Some((_uid, rest)) if rest.starts_with("doc/")
+    )
+}
+
+/// Resolve a document-portal file to its real host path via the FUSE mount's
+/// `user.document-portal.host-path` xattr (gio drops the `user.` prefix). This is
+/// what lets us see that a portal-granted folder actually lives on a USB.
+fn doc_portal_host_path(file: &gio::File) -> Option<String> {
+    let info = file
+        .query_info(
+            "xattr::document-portal.host-path",
+            gio::FileQueryInfoFlags::NONE,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    info.attribute_string("xattr::document-portal.host-path")
+        .map(|s| s.to_string())
+}
+
+/// Whether this source lives on removable/remote media, resolving through the
+/// document portal when needed (PLAN §16.5, Flavor 1). The xattr query runs only
+/// for doc-portal paths, so ordinary local/direct files pay nothing.
+fn is_removable_source(file: &gio::File, uri: &str) -> bool {
+    if is_removable_uri(uri) {
+        return true;
+    }
+    if is_doc_portal_uri(uri) {
+        if let Some(host) = doc_portal_host_path(file) {
+            let removable = is_removable_path(&host);
+            // One-shot signal that portal→host-path resolution fired inside the
+            // sandbox (the uncertain part). VITRINE_DEBUG only.
+            if removable && crate::debug::enabled() {
+                use std::sync::atomic::{AtomicBool, Ordering};
+                static LOGGED: AtomicBool = AtomicBool::new(false);
+                if !LOGGED.swap(true, Ordering::Relaxed) {
+                    eprintln!("VDBG-REMOVABLE portal folder → removable host path: {host}");
+                }
+            }
+            return removable;
+        }
+    }
+    false
+}
+
 /// A weak reference used only to obtain a GSK renderer after decoding.
 pub fn renderer_source(widget: &impl IsA<gtk::Widget>) -> glib::WeakRef<gtk::Widget> {
     widget.clone().upcast::<gtk::Widget>().downgrade()
@@ -106,9 +197,21 @@ pub async fn load(
 ) -> Option<gdk::Texture> {
     let bucket = ThumbBucket::for_target(target_px);
     let uri = file.uri().to_string();
+    // Removable/remote sources get a persistent, separately-budgeted tier so
+    // their thumbnails survive local browsing's LRU eviction (PLAN §16.5).
+    let removable = removable_enabled() && is_removable_source(&file, &uri);
 
     // VITRINE_NOCACHE forces the cold path (skip cache reads → always decode).
     if !crate::debug::force_decode() {
+        // Our persistent removable/remote copy first, when applicable.
+        if removable {
+            if let Some(texture) =
+                read_cache(removable_dir(), &uri, bucket, source_mtime, true).await
+            {
+                crate::debug::cache_hit();
+                return Some(texture);
+            }
+        }
         // Shared cache is GNOME's — read but never re-touch it.
         if let Some(texture) = read_cache(shared_dir(), &uri, bucket, source_mtime, false).await {
             crate::debug::cache_hit();
@@ -147,7 +250,7 @@ pub async fn load(
                     crate::debug::since_start_ms()
                 );
             }
-            store(&uri, source_mtime, bucket, &thumb, is_shareable(&file));
+            store(&uri, source_mtime, bucket, &thumb, is_shareable(&file), removable);
             Some(thumb)
         }
         None => None,
@@ -280,7 +383,8 @@ pub async fn warm_cache(file: &gio::File, source_mtime: i64, frame: &gdk::Textur
         return;
     };
     let uri = file.uri().to_string();
-    let roots = roots_for(is_shareable(file));
+    let removable = removable_enabled() && is_removable_source(file, &uri);
+    let roots = roots_for(is_shareable(file), removable);
     // Awaited (not fire-and-forget) and unbounded, unlike `store`: warm thumbnails
     // are already small (no full-res RSS risk), and enrichment's own bounded
     // concurrency paces these — so every indexed image actually gets warmed rather
@@ -357,19 +461,13 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Prune the app-private disk cache to the configured budget (see
-/// [`crate::settings`]), evicting the least-recently-used files. Runs off the
-/// main thread; best-effort.
-pub fn prune_private_cache() {
-    // Budget in MB: VITRINE_CACHE_CAP_MB (dev override) wins, else the user's
-    // configured cache size from Preferences.
-    let cap = std::env::var("VITRINE_CACHE_CAP_MB")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or_else(|| crate::settings::Settings::load().cache_mb())
-        .saturating_mul(1024 * 1024);
+/// Prune a disk thumbnail cache dir to `cap` bytes (LRU eviction). Runs off the
+/// main thread; best-effort. `cap == 0` prunes nothing (a disabled tier).
+fn prune_dir(root: PathBuf, cap: u64) {
+    if cap == 0 {
+        return;
+    }
     std::thread::spawn(move || {
-        let root = private_dir();
         let mut files: Vec<PathBuf> = Vec::new();
         let mut facts: Vec<(u64, i64)> = Vec::new();
         for bucket in ["normal", "large", "x-large", "xx-large"] {
@@ -397,6 +495,24 @@ pub fn prune_private_cache() {
     });
 }
 
+/// Prune the app-private disk cache to the configured budget (see
+/// [`crate::settings`]), evicting the least-recently-used files.
+pub fn prune_private_cache() {
+    // VITRINE_CACHE_CAP_MB (dev override) wins, else the user's configured size.
+    let cap = std::env::var("VITRINE_CACHE_CAP_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| crate::settings::Settings::load().cache_mb())
+        .saturating_mul(1024 * 1024);
+    prune_dir(private_dir(), cap);
+}
+
+/// Prune the persistent removable/remote cache to its own (larger) budget. A 0
+/// budget means the tier is disabled — nothing to prune.
+pub fn prune_removable_cache() {
+    prune_dir(removable_dir(), removable_budget_mb().saturating_mul(1024 * 1024));
+}
+
 /// Write `texture` to the thumbnail cache(s), tagged with the freedesktop
 /// `Thumb::URI`/`Thumb::MTime` metadata. Fire-and-forget: PNG **encode and disk
 /// write happen on a worker thread** (both are pure CPU/IO and were a major
@@ -404,10 +520,14 @@ pub fn prune_private_cache() {
 /// the shared cache when `shareable` (real-path files, contributing to Nautilus).
 /// The cache roots a thumbnail is written to: always the app-private cache, plus
 /// the shared freedesktop cache when the file is shareable (a real host path).
-fn roots_for(shareable: bool) -> Vec<PathBuf> {
-    let mut roots = vec![private_dir()];
+fn roots_for(shareable: bool, removable: bool) -> Vec<PathBuf> {
+    // Removable/remote decodes go to the persistent removable tier; everything
+    // else to the LRU-pruned private cache. Either may also write the shared
+    // freedesktop cache (Nautilus interop) when the path is a real host path.
+    let primary = if removable { removable_dir() } else { private_dir() };
     let shared = shared_dir();
-    if shareable && shared != private_dir() {
+    let mut roots = vec![primary.clone()];
+    if shareable && shared != primary {
         roots.push(shared);
     }
     roots
@@ -447,6 +567,7 @@ fn store(
     bucket: ThumbBucket,
     texture: &gdk::Texture,
     shareable: bool,
+    removable: bool,
 ) {
     // Bound in-flight disk writes: a fast cold scroll produces thumbnails faster
     // than they can be PNG-encoded + written, and unbounded fire-and-forget encode
@@ -463,10 +584,66 @@ fn store(
 
     let texture = texture.clone(); // gdk::Texture is Send
     let uri = uri.to_string();
-    let roots = roots_for(shareable);
+    let roots = roots_for(shareable, removable);
 
     gio::spawn_blocking(move || {
         write_thumb(&texture, &uri, source_mtime, bucket, &roots);
         PENDING.fetch_sub(1, Ordering::Relaxed);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The removable/remote heuristic (PLAN §16.5, Flavor 1): network schemes
+    /// and typical auto-mount roots are "removable"; local + portal paths are not.
+    #[test]
+    fn removable_uri_classification() {
+        for u in [
+            "smb://nas/photos/x.jpg",
+            "sftp://host/x.jpg",
+            "mtp://phone/DCIM/x.jpg",
+            "google-drive://acct/x",
+            "file:///run/media/me/USB/x.jpg",
+            "file:///media/usb/x.jpg",
+            "file:///mnt/backup/x.jpg",
+        ] {
+            assert!(is_removable_uri(u), "{u} should be removable");
+        }
+        for u in [
+            "file:///home/me/Pictures/x.jpg",
+            "file:///run/user/1000/doc/abcd/x.jpg", // portal path — resolved separately
+            "resource:///icons/x.png",
+        ] {
+            assert!(!is_removable_uri(u), "{u} should NOT be removable");
+        }
+    }
+
+    /// Document-portal URIs are recognised so their real host path can be
+    /// resolved (via xattr) and classified — vs. plain local/removable paths.
+    #[test]
+    fn doc_portal_uri_detection() {
+        assert!(is_doc_portal_uri("file:///run/user/1000/doc/16ecde37/photo.jpg"));
+        assert!(is_doc_portal_uri("file:///run/user/1000/doc/abc/sub/photo.jpg"));
+        assert!(!is_doc_portal_uri("file:///run/media/me/USB/photo.jpg"));
+        assert!(!is_doc_portal_uri("file:///home/me/x.jpg"));
+        assert!(!is_doc_portal_uri("file:///run/user/1000/other/x.jpg"));
+    }
+
+    /// Removable decodes route to their own persistent dir (so local browsing's
+    /// LRU prune can't evict them); local decodes stay in the private cache.
+    #[test]
+    fn roots_route_removable_to_its_own_dir() {
+        let rem = roots_for(false, true);
+        assert_eq!(rem[0], removable_dir());
+        assert!(!rem.contains(&private_dir()));
+
+        let local = roots_for(false, false);
+        assert_eq!(local[0], private_dir());
+        assert!(!local.contains(&removable_dir()));
+
+        // Shareable (real host path) also writes the shared freedesktop cache.
+        assert!(roots_for(true, true).contains(&shared_dir()));
+    }
 }
