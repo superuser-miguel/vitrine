@@ -317,6 +317,11 @@ mod imp {
         /// per save, so each event bumps this and schedules a delayed reload
         /// that fires only if it is still the latest (§16.6 hot reload).
         pub scripts_reload_gen: Rc<Cell<u64>>,
+        /// Precomputed fuzzy quick-find scores (path key → best score across the
+        /// item's name and path), rebuilt on each query change. Read by the grid
+        /// filter (match iff present) and the sorter (rank by score), so neither
+        /// calls the matcher in its hot path — the script-key memo pattern.
+        pub fuzzy_scores: Rc<RefCell<HashMap<String, i64>>>,
         /// Selection model the grid renders.
         pub selection: RefCell<Option<gtk::MultiSelection>>,
         /// The grid view (its factory is rebuilt when the icon size changes).
@@ -401,6 +406,7 @@ mod imp {
                 script_keys_for: Rc::new(Cell::new(None)),
                 scripts_monitor: RefCell::new(None),
                 scripts_reload_gen: Rc::new(Cell::new(0)),
+                fuzzy_scores: Rc::new(RefCell::new(HashMap::new())),
                 selection: RefCell::new(None),
                 grid_view: RefCell::new(None),
                 icon_index: std::cell::Cell::new(DEFAULT_ICON),
@@ -490,9 +496,10 @@ impl VitrineWindow {
         // Filter (min-rating + tag) closest to the store, then sort. Both read
         // per-item facts already stamped onto the item — no DB hit per item.
         let filter_state = imp.filter_state.clone();
-        // One reusable matcher (smart-case, fzf-style subsequence scoring). Its
-        // `&self` match API is what lets it live in this shared `Fn` closure.
-        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+        // Fuzzy matches are precomputed into `fuzzy_scores` on query change, so
+        // this filter reads plain data (a match iff the item is scored) instead
+        // of calling the matcher per item — the same pattern as script keys.
+        let fuzzy_scores = imp.fuzzy_scores.clone();
         let filter = gtk::CustomFilter::new(move |obj| {
             let Some(item) = obj.downcast_ref::<ImageObject>() else {
                 return true;
@@ -506,11 +513,11 @@ impl VitrineWindow {
                     return false;
                 }
             }
-            if let Some(term) = &state.fuzzy {
-                use fuzzy_matcher::FuzzyMatcher;
-                if matcher.fuzzy_match(&item.display_name(), term).is_none() {
-                    return false;
-                }
+            // Query active but this item unscored → not a match.
+            if state.fuzzy.is_some()
+                && !fuzzy_scores.borrow().contains_key(&script_memo_key(item))
+            {
+                return false;
             }
             true
         });
@@ -521,9 +528,15 @@ impl VitrineWindow {
         // (§16.2: the comparator never enters Lua).
         let script_keys = imp.script_keys.clone();
         let script_keys_for = imp.script_keys_for.clone();
+        // A fuzzy query overrides the chosen sort with best-match-first ranking.
+        let sort_filter_state = imp.filter_state.clone();
+        let sort_fuzzy_scores = imp.fuzzy_scores.clone();
         let sorter = gtk::CustomSorter::new(move |a, b| {
             let a = a.downcast_ref::<ImageObject>().unwrap();
             let b = b.downcast_ref::<ImageObject>().unwrap();
+            if sort_filter_state.borrow().fuzzy.is_some() {
+                return compare_by_fuzzy_score(a, b, &sort_fuzzy_scores.borrow());
+            }
             let state = state.get();
             if let SortField::Script(idx) = state.field {
                 // A memo belonging to a different provider is not an answer to
@@ -1359,7 +1372,11 @@ impl VitrineWindow {
                 let term = text.trim();
                 window.imp().filter_state.borrow_mut().fuzzy =
                     (!term.is_empty()).then(|| term.to_string());
+                // Rescore, refilter, then re-sort: a query ranks by match score;
+                // clearing it restores the chosen sort.
+                window.recompute_fuzzy_scores(term);
                 window.refilter();
+                window.apply_sort_state(window.imp().sort_state.get());
             }
         ));
         // Esc in the entry clears the term and closes the bar, back to the grid.
@@ -1521,6 +1538,35 @@ impl VitrineWindow {
     fn refilter(&self) {
         if let Some(filter) = self.imp().filter.borrow().as_ref() {
             filter.changed(gtk::FilterChange::Different);
+        }
+    }
+
+    /// Precompute fuzzy scores for every item against `term` (empty clears),
+    /// matching name and path and keeping the higher score, memoised by path.
+    /// The grid filter and sorter then read plain data. Runs on the main thread
+    /// — a few ms over ~7k items, and GtkSearchEntry already debounces; offload
+    /// to a worker like `recompute_script_keys` if it ever stalls on a very
+    /// large library.
+    fn recompute_fuzzy_scores(&self, term: &str) {
+        use fuzzy_matcher::FuzzyMatcher;
+        let imp = self.imp();
+        let mut scores = imp.fuzzy_scores.borrow_mut();
+        scores.clear();
+        let term = term.trim();
+        if term.is_empty() {
+            return;
+        }
+        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
+        for i in 0..imp.store.n_items() {
+            let Some(obj) = imp.store.item(i).and_downcast::<ImageObject>() else {
+                continue;
+            };
+            let name_score = matcher.fuzzy_match(&obj.display_name(), term);
+            let path = obj.file().path().map(|p| p.to_string_lossy().into_owned());
+            let path_score = path.as_deref().and_then(|p| matcher.fuzzy_match(p, term));
+            if let Some(best) = name_score.into_iter().chain(path_score).max() {
+                scores.insert(script_memo_key(&obj), best);
+            }
         }
     }
 
@@ -1793,6 +1839,9 @@ impl VitrineWindow {
         if previous.as_ref() == Some(&new) {
             return;
         }
+        // A new location resets quick-find — its scores are per-view; a stale
+        // query would filter the new view against the old folder's names.
+        imp.search_entry.set_text("");
         if !imp.navigating_back.get() {
             if let Some(previous) = previous {
                 imp.history.borrow_mut().push(previous);
@@ -4636,6 +4685,29 @@ fn compare_by_script_key(
 
 /// Compare two items for the grid sorter: the chosen field, then a case-folded
 /// name tiebreak for a stable order, all reversed together when descending.
+/// Order by precomputed fuzzy score — best (highest) first, name tiebreak. An
+/// unscored item sorts last (the filter removes non-matches, so this only guards
+/// a race where the store changed under an active query).
+fn compare_by_fuzzy_score(
+    a: &ImageObject,
+    b: &ImageObject,
+    scores: &HashMap<String, i64>,
+) -> gtk::Ordering {
+    use std::cmp::Ordering;
+    let sa = scores.get(&script_memo_key(a)).copied().unwrap_or(i64::MIN);
+    let sb = scores.get(&script_memo_key(b)).copied().unwrap_or(i64::MIN);
+    let ord = sb.cmp(&sa).then_with(|| {
+        a.display_name()
+            .to_lowercase()
+            .cmp(&b.display_name().to_lowercase())
+    });
+    match ord {
+        Ordering::Less => gtk::Ordering::Smaller,
+        Ordering::Equal => gtk::Ordering::Equal,
+        Ordering::Greater => gtk::Ordering::Larger,
+    }
+}
+
 fn compare_images(a: &ImageObject, b: &ImageObject, state: SortState) -> gtk::Ordering {
     use std::cmp::Ordering;
     let by_name = || {
