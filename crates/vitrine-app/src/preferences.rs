@@ -141,6 +141,7 @@ fn cache_group(dialog: &adw::PreferencesDialog) -> adw::PreferencesGroup {
     dialog.connect_closed(|_| {
         crate::thumbnails::prune_private_cache();
         crate::thumbnails::prune_removable_cache();
+        crate::thumbnails::prune_content_cache();
     });
 
     group.add(&row);

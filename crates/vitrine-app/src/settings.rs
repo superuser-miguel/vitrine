@@ -18,6 +18,7 @@ const KEY_COUNT: &str = "count";
 const GROUP_CACHE: &str = "Cache";
 const KEY_CACHE_MB: &str = "thumbnail-mb";
 const KEY_REMOVABLE_MB: &str = "removable-mb";
+const KEY_CONTENT_MB: &str = "content-mb";
 const GROUP_SORT: &str = "Sort";
 const KEY_SORT_FIELD: &str = "field";
 const KEY_SORT_DESC: &str = "descending";
@@ -30,6 +31,10 @@ pub const DEFAULT_CACHE_MB: u64 = 8192;
 /// (USB, network). A *separate* budget so browsing local files never evicts
 /// USB/remote thumbnails; set to 0 to disable the tier (PLAN §16.5, Flavor 1).
 pub const DEFAULT_REMOVABLE_MB: u64 = 8192;
+
+/// Default budget (MB) for the content-hash thumbnail tier (PLAN §16.5,
+/// Flavor 2). Deduplicated by content so it's efficient; 0 disables it.
+pub const DEFAULT_CONTENT_MB: u64 = 4096;
 
 /// A sidebar bookmark: a user-editable display name and its target folder.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +137,20 @@ impl Settings {
     #[allow(dead_code)]
     pub fn set_removable_cache_mb(&self, mb: u64) {
         self.key_file.set_uint64(GROUP_CACHE, KEY_REMOVABLE_MB, mb);
+        self.save();
+    }
+
+    /// Content-hash tier budget (MB); 0 disables. Unset → [`DEFAULT_CONTENT_MB`].
+    pub fn content_cache_mb(&self) -> u64 {
+        self.key_file
+            .uint64(GROUP_CACHE, KEY_CONTENT_MB)
+            .unwrap_or(DEFAULT_CONTENT_MB)
+    }
+
+    // Consumer is the Preferences slider (follow-up).
+    #[allow(dead_code)]
+    pub fn set_content_cache_mb(&self, mb: u64) {
+        self.key_file.set_uint64(GROUP_CACHE, KEY_CONTENT_MB, mb);
         self.save();
     }
 

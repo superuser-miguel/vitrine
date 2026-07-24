@@ -177,6 +177,98 @@ fn is_removable_source(file: &gio::File, uri: &str) -> bool {
     false
 }
 
+// ---- Content-hash tier (PLAN §16.5, Flavor 2) --------------------------------
+// A thumbnail cache keyed by the file's BLAKE3 content hash instead of its path,
+// so the same bytes reuse one thumbnail regardless of path, drive, or mtime —
+// duplicates, renames, and backups all hit. **The hash is the validation**: same
+// content ⇒ same key ⇒ correct thumbnail, so there is no mtime check. The hash is
+// already stamped on each grid item (`ImageObject::content_hash`), so the lookup
+// costs a field read, not a file read. Only Vitrine's own caches join this scheme
+// — the shared freedesktop tier stays URI-keyed (spec).
+
+/// Content cache dir, keyed by BLAKE3. Deduplicated by content, so it holds one
+/// entry per unique image however many paths point at it.
+fn content_dir() -> PathBuf {
+    glib::user_cache_dir().join("content-thumbnails")
+}
+
+/// The content tier's budget in MB (`VITRINE_CONTENT_MB` overrides Preferences).
+fn content_budget_mb() -> u64 {
+    std::env::var("VITRINE_CONTENT_MB")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or_else(|| crate::settings::Settings::load().content_cache_mb())
+}
+
+/// Whether the content tier is enabled (budget > 0). Read once (restart to change).
+fn content_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| content_budget_mb() > 0)
+}
+
+fn content_path(hash: &str, bucket: ThumbBucket) -> PathBuf {
+    content_dir().join(bucket.dir()).join(format!("{hash}.png"))
+}
+
+/// Read the content-keyed thumbnail for `hash`, if present. **No mtime check** —
+/// the hash guarantees the bytes. Off the main thread; returns the as-decoded
+/// thumbnail (the caller applies any rotate/crop edit).
+pub async fn read_content(hash: &str, target_px: u32) -> Option<gdk::Texture> {
+    if !content_enabled() || hash.is_empty() {
+        return None;
+    }
+    let path = content_path(hash, ThumbBucket::for_target(target_px));
+    let tex = gio::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).ok()?;
+        gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()
+    })
+    .await
+    .ok()
+    .flatten();
+    if tex.is_some() {
+        crate::debug::cache_hit();
+        if crate::debug::enabled() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!("VDBG-CONTENT hit — content-keyed reuse (path-independent)");
+            }
+        }
+    }
+    tex
+}
+
+/// Store a decoded thumbnail under its content hash (fire-and-forget, worker).
+/// Skips if a file is already there — the hash is stable, so present ⇒ current.
+pub fn store_content(hash: &str, target_px: u32, texture: &gdk::Texture) {
+    if !content_enabled() || hash.is_empty() {
+        return;
+    }
+    let path = content_path(hash, ThumbBucket::for_target(target_px));
+    let texture = texture.clone(); // gdk::Texture is Send
+    gio::spawn_blocking(move || {
+        if path.exists() {
+            return;
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let wrote = texture.save_to_png(&path).is_ok();
+        if wrote && crate::debug::enabled() {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static LOGGED: AtomicBool = AtomicBool::new(false);
+            if !LOGGED.swap(true, Ordering::Relaxed) {
+                eprintln!("VDBG-CONTENT wrote — content tier active");
+            }
+        }
+    });
+}
+
+/// Prune the content tier to its budget; 0 = disabled, nothing to prune.
+pub fn prune_content_cache() {
+    prune_dir(content_dir(), content_budget_mb().saturating_mul(1024 * 1024));
+}
+
 /// A weak reference used only to obtain a GSK renderer after decoding.
 pub fn renderer_source(widget: &impl IsA<gtk::Widget>) -> glib::WeakRef<gtk::Widget> {
     widget.clone().upcast::<gtk::Widget>().downgrade()

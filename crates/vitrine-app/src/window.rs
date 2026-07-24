@@ -846,16 +846,29 @@ impl VitrineWindow {
         let result = if cached_hit {
             cached
         } else {
-            let renderer = crate::thumbnails::renderer_source(self);
-            let loaded = crate::thumbnails::load(
-                req.item.file(),
-                req.item.mtime(),
-                req.load_size,
-                req.item.size(),
-                renderer,
-            )
-            .await;
-            let loaded = match loaded {
+            // Content-hash tier (Flavor 2): an as-decoded thumbnail keyed by
+            // BLAKE3, valid regardless of path / mtime / drive. Miss → the URI
+            // waterfall + decode, then back-fill the content tier from the result.
+            let hash = req.item.content_hash();
+            let base = match crate::thumbnails::read_content(&hash, req.load_size).await {
+                Some(tex) => Some(tex),
+                None => {
+                    let renderer = crate::thumbnails::renderer_source(self);
+                    let loaded = crate::thumbnails::load(
+                        req.item.file(),
+                        req.item.mtime(),
+                        req.load_size,
+                        req.item.size(),
+                        renderer,
+                    )
+                    .await;
+                    if let Some(tex) = &loaded {
+                        crate::thumbnails::store_content(&hash, req.load_size, tex);
+                    }
+                    loaded
+                }
+            };
+            let loaded = match base {
                 Some(tex) => crate::thumbnails::transform_cpu(tex, orientation, crop).await,
                 None => None,
             };
