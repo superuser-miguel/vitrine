@@ -1451,8 +1451,8 @@ provide. gThumb-style dockable RGB/value panel in the viewer sidebar. No
 work scheduled; captured so it is not mistaken for extension territory when
 it comes up.
 
-**Wanted future feature, deferred — a content-aware / removable-media thumbnail
-cache** (user, 2026-07-24). Today all three thumbnail tiers (RAM `SizedLru`,
+**Content-aware / removable-media thumbnail cache — Flavor 1 SHIPPED, Flavor 2
+future** (user, 2026-07-24). Today all three thumbnail tiers (RAM `SizedLru`,
 shared freedesktop cache, private disk cache) are keyed by **file URI** and
 validated by **mtime** (`is_current` = `thumbnail_mtime >= source_mtime`,
 `thumbnail_cache.rs`). So a duplicate/backup of the same bytes on a different
@@ -1474,8 +1474,20 @@ full image over a slow link, and where the private cache's LRU eviction
    once). The shared freedesktop tier can never participate (spec is URI-keyed).
 Third option: write `.sh_thumbnails/` onto the media itself (the spec's
 travelling thumbnails) — zero local cost, but writes to slow/possibly-RO media;
-the user's "spare 10–20 GB locally" framing prefers flavor 1/2. No work
-scheduled; captured with the reasoning so the design is grounded when it comes up.
+the user's "spare 10–20 GB locally" framing prefers flavor 1/2.
+
+**Flavor 1 — SHIPPED 2026-07-24 (`d5c9b3a`), verified with real USB drives.** A
+separate `removable-thumbnails` cache dir with its own budget
+(`DEFAULT_REMOVABLE_MB = 8192`) and its own `prune_dir` wrapper, so local
+browsing's LRU never evicts it; reads check it first, writes (incl. the
+enrichment warm-cache) route there. **Detection diverged from the sketch below:**
+`find_enclosing_mount` is useless inside the Flatpak, because a portal-granted USB
+appears as `file:///run/user/<uid>/doc/<id>/…` — the FUSE mount hides
+`/run/media`. So detection = a URI/scheme heuristic **plus document-portal
+resolution**: read the real host path from the FUSE mount's
+`user.document-portal.host-path` xattr (gio `xattr::document-portal.host-path`)
+and classify *that*. Follow-ups: a Preferences slider (the setter is
+`#[allow(dead_code)]` until then), and **Flavor 2** (content-hash keyed) below.
 
 *Verdict: **core, not extension** — hot-path, needs the decode pipeline + the
 index (`content_hash`) + gio mount info, produces no shareable artifact. The
