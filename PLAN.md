@@ -1451,6 +1451,69 @@ provide. gThumb-style dockable RGB/value panel in the viewer sidebar. No
 work scheduled; captured so it is not mistaken for extension territory when
 it comes up.
 
+**Wanted future feature, deferred — a content-aware / removable-media thumbnail
+cache** (user, 2026-07-24). Today all three thumbnail tiers (RAM `SizedLru`,
+shared freedesktop cache, private disk cache) are keyed by **file URI** and
+validated by **mtime** (`is_current` = `thumbnail_mtime >= source_mtime`,
+`thumbnail_cache.rs`). So a duplicate/backup of the same bytes on a different
+drive, a moved/renamed file, or a restore that resets mtimes all **re-decode** —
+even though `content_hash` (BLAKE3) already knows they're identical. That's the
+asymmetry: **annotations are dedup-aware (content-keyed), thumbnails are not
+(path-keyed).** Restore in place with timestamps preserved (`rsync -a`) and
+thumbnails are reused; a sloppy copy that stamps files "now" re-decodes all.
+
+Strongest motivator: **USB/remote drives**, where re-decode means re-reading the
+full image over a slow link, and where the private cache's LRU eviction
+(`prune_private_cache`) quietly drops thumbnails between mounts. Two flavors:
+1. **Persistent generous tier for removable/remote sources** — detect via gio
+   mount info (`File::find_enclosing_mount`), cache in a separate dir with a big
+   opt-in budget and no eviction. Solves stable-mount remount. Simple.
+2. **Content-hash keyed (the BLAKE3 payoff)** — survives remount-at-a-different-
+   path and cross-drive duplicates by reusing the hash already computed; needs
+   the file indexed so the hash is known without re-reading (un-indexed files pay
+   once). The shared freedesktop tier can never participate (spec is URI-keyed).
+Third option: write `.sh_thumbnails/` onto the media itself (the spec's
+travelling thumbnails) — zero local cost, but writes to slow/possibly-RO media;
+the user's "spare 10–20 GB locally" framing prefers flavor 1/2. No work
+scheduled; captured with the reasoning so the design is grounded when it comes up.
+
+*Verdict: **core, not extension** — hot-path, needs the decode pipeline + the
+index (`content_hash`) + gio mount info, produces no shareable artifact. The
+only "optional" part is the budget/toggle (a preference, not a seam). Same call
+as the histogram.*
+
+**Implementation sketch.** Today `thumbnails::load()` tries RAM → shared
+freedesktop (URI) → private (URI) → decode. This adds tiers and changes the key.
+
+- **Flavor 1 — persistent removable tier (URI-keyed, smaller, index-free).**
+  Classify the source **once per folder-open** (not per file): `File::
+  find_enclosing_mount()` → removable / network mount? (fallback: `/run/media`,
+  `smb://`/`sftp://`/`mtp://`). Add a `removable_dir()` cache with its **own
+  generous budget and no shared eviction**, so browsing local files can't evict
+  USB thumbnails the way `prune_private_cache` does today. Still URI-keyed +
+  mtime-validated. Fixes "USB re-decodes because LRU dropped it" for stable
+  mounts — the quick win.
+- **Flavor 2 — content-hash tier (BLAKE3, bigger, the real feature).** Address
+  by content: `content_dir()/<bucket>/<blake3>.png`. On load, get the file's
+  `content_hash` from the index (cheap `path → hash` read, `idx_files_hash`
+  already exists, **no file I/O**), then check for that thumbnail — hit reuses it
+  **regardless of URI / drive / mtime**. **Validation is the hash itself** — no
+  `is_current` mtime check (same bytes = same hash = right thumbnail; a changed
+  file maps to a new entry, old one orphaned + evicted). **Populated by
+  enrichment**, which already decodes + hashes every file — this *is* perf-item
+  #3 ("warm the cache during indexing"), so build the two together. Un-indexed
+  files fall through to the URI tiers and pay once; next mount they're hits.
+- **Combined lookup order:** RAM → content-hash (if hash known) → shared
+  freedesktop (URI) → removable/private (URI) → decode → (enrichment backfills
+  the content cache).
+- **Caveats:** index coupling on the load path (keep the DB read off-main —
+  already `spawn_blocking`); the content tier needs its own LRU/budget + an
+  orphan sweep; the shared freedesktop tier stays URI-keyed (spec, can't join);
+  removable detection edge cases (bind/overlay mounts, portal paths).
+- **Sequencing:** Flavor 1 first (contained, index-free); Flavor 2 is the real
+  feature and shares the enrichment hook with cache-warming — do them as one
+  effort, not twice.
+
 ### 16.6 Phases & acceptance
 
 - **E0 — seam freeze.** This section reviewed + merged; `vitrine.api_version`
