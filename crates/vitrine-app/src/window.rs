@@ -116,6 +116,9 @@ pub struct FilterState {
     tag_hashes: Option<HashSet<String>>,
     /// The selected tag's name (for building a smart-collection predicate).
     tag_name: Option<String>,
+    /// Fuzzy quick-find term (V-11), matched against each item's display name.
+    /// View-only — deliberately not persisted into smart collections.
+    fuzzy: Option<String>,
 }
 
 /// Gio attributes fetched per child when enumerating a folder.
@@ -256,6 +259,8 @@ mod imp {
         pub filter_clear: TemplateChild<gtk::Button>,
         #[template_child]
         pub filter_save: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub search_entry: TemplateChild<gtk::SearchEntry>,
 
         /// The grid filter (min-rating + tag); `changed()` re-runs it.
         pub filter: RefCell<Option<gtk::CustomFilter>>,
@@ -378,6 +383,7 @@ mod imp {
                 tag_filter: Default::default(),
                 filter_clear: Default::default(),
                 filter_save: Default::default(),
+                search_entry: Default::default(),
                 filter: RefCell::new(None),
                 filter_state: Rc::new(RefCell::new(FilterState::default())),
                 tag_names: RefCell::new(Vec::new()),
@@ -484,6 +490,9 @@ impl VitrineWindow {
         // Filter (min-rating + tag) closest to the store, then sort. Both read
         // per-item facts already stamped onto the item — no DB hit per item.
         let filter_state = imp.filter_state.clone();
+        // One reusable matcher (smart-case, fzf-style subsequence scoring). Its
+        // `&self` match API is what lets it live in this shared `Fn` closure.
+        let matcher = fuzzy_matcher::skim::SkimMatcherV2::default();
         let filter = gtk::CustomFilter::new(move |obj| {
             let Some(item) = obj.downcast_ref::<ImageObject>() else {
                 return true;
@@ -494,6 +503,12 @@ impl VitrineWindow {
             }
             if let Some(hashes) = &state.tag_hashes {
                 if !hashes.contains(&item.content_hash()) {
+                    return false;
+                }
+            }
+            if let Some(term) = &state.fuzzy {
+                use fuzzy_matcher::FuzzyMatcher;
+                if matcher.fuzzy_match(&item.display_name(), term).is_none() {
                     return false;
                 }
             }
@@ -583,6 +598,9 @@ impl VitrineWindow {
                     (true, Key::plus | Key::equal | Key::KP_Add) => window.change_icon(1),
                     (true, Key::minus | Key::KP_Subtract) => window.change_icon(-1),
                     (true, Key::_0 | Key::KP_0) => window.reset_icon(),
+                    // Quick-find (V-11): reveal the filter bar, focus the search box.
+                    (true, Key::f) => window.focus_search(),
+                    (false, Key::slash) => window.focus_search(),
                     (_, Key::Delete) => window.delete_or_remove_selection(),
                     // The keyboard route to "select nothing".
                     (_, Key::Escape) => window.clear_selection(),
@@ -1324,12 +1342,37 @@ impl VitrineWindow {
                 let imp = window.imp();
                 imp.rating_filter.set_selected(0);
                 imp.tag_filter.set_selected(0);
+                imp.search_entry.set_text("");
             }
         ));
         imp.filter_save.connect_clicked(glib::clone!(
             #[weak(rename_to = window)]
             self,
             move |_| window.save_filter_as_collection()
+        ));
+        // Fuzzy quick-find (V-11): live-filter the grid by name as you type.
+        imp.search_entry.connect_search_changed(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |entry| {
+                let text = entry.text();
+                let term = text.trim();
+                window.imp().filter_state.borrow_mut().fuzzy =
+                    (!term.is_empty()).then(|| term.to_string());
+                window.refilter();
+            }
+        ));
+        // Esc in the entry clears the term and closes the bar, back to the grid.
+        imp.search_entry.connect_stop_search(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            move |entry| {
+                entry.set_text("");
+                window.imp().filter_button.set_active(false);
+                if let Some(grid) = window.imp().grid_view.borrow().as_ref() {
+                    grid.grab_focus();
+                }
+            }
         ));
         // Refresh the tag list from the index whenever the bar is opened.
         imp.filter_revealer
@@ -1468,6 +1511,13 @@ impl VitrineWindow {
     }
 
     /// Re-run the grid filter (after criteria or ratings change).
+    /// Reveal the filter bar and focus the fuzzy quick-find entry (Ctrl+F, `/`).
+    fn focus_search(&self) {
+        let imp = self.imp();
+        imp.filter_button.set_active(true); // filter_revealer's reveal-child binds to this
+        imp.search_entry.grab_focus();
+    }
+
     fn refilter(&self) {
         if let Some(filter) = self.imp().filter.borrow().as_ref() {
             filter.changed(gtk::FilterChange::Different);

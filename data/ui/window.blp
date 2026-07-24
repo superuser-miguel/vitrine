@@ -324,6 +324,11 @@ template $VitrineWindow: Adw.ApplicationWindow {
                   "toolbar",
                 ]
 
+                Gtk.SearchEntry search_entry {
+                  placeholder-text: _("Find by name…");
+                  width-request: 240;
+                }
+
                 Gtk.Label {
                   label: _("Rating");
                   styles ["dim-label"]

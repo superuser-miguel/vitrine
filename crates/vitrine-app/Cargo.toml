@@ -30,4 +30,9 @@ async-channel = "2.5.0"
 # mallopt(M_MMAP_THRESHOLD) at startup — see main.rs; Linux-only app (GNOME).
 libc = "0.2"
 mlua = { version = "0.12.0", features = ["lua54", "send", "vendored"] }
+# fzf-style fuzzy matching for the quick-find (V-11): SkimMatcherV2 is smart-case
+# subsequence scoring. Pure Rust (house rule 5). Its `&self` match API is what
+# lets one matcher live inside the shared grid `CustomFilter` closure — nucleo's
+# matcher needs `&mut` + a scratch buffer, awkward for an `Fn`.
+fuzzy-matcher = "0.3"
 # ashpd (XDG portals) is added when the extra-roots chooser lands.
