@@ -1442,6 +1442,24 @@ infrastructure extensions build *on*, FTS5 when it needs scale; Date Taken
 sort (a built-in fact, blocked only on the enrichment callback, V-12);
 Find Duplicates' current exact/pHash clustering; everything indexing.
 
+**The rule, sharpened (competitive analysis 2026-07-24, see
+`COMPETITIVE-LANDSCAPE.md`):**
+- **Interactive & about the image you're looking at** (histogram, GPS map, crop,
+  search, ratings) → **core**.
+- **Batch & produces files** (RAW develop, convert, watermark, resize) →
+  **extension** — E2/E3, wrapping `darktable-cli` / `rawtherapee-cli` (develop
+  engines Vitrine never writes) and ImageMagick (the Magick window).
+- **ML / heavy** (face recognition, auto-tag) → **E4** (WASM/ONNX).
+
+That doc maps Vitrine against darktable / RawTherapee / digiKam / AfterShot and
+lands the positioning: **the fast, modern-format front-of-house that culls and
+organizes at GTK4 speed, keeps metadata portable (content-hash + XMP), and calls
+in the heavy tools as opt-in extensions.** Notable concrete leads from it: a
+`darktable-cli` "develop with style X" batch (E2); watermarking + gThumb colour
+recipes (E3, ImageMagick); **XMP round-trip** so ratings/tags sync with
+darktable/digiKam (small, high-leverage); and — the one thing nobody else on
+Linux does well — modern-format (AVIF/JXL/HEIF) browsing, which is already ours.
+
 **Wanted core viewer feature, deferred — a histogram panel** (user,
 2026-07-21: "we will eventually need a Histogram, I'm sure. Just not right
 now."). Explicitly *not* scripting: it is a live analysis display of the
