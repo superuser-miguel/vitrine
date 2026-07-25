@@ -12,6 +12,13 @@ method note).
    position vs viewport centre, visible-cell vs prefetch, cache hit.
    ✅ `VDBG-FILM ms= pos= center=` — every filmstrip completion.
    (`VDBG-FILL ms= bytes=` remains the size/latency line.)
+2. ✅ `VDBG-LOAD pos= src= showing= hash=` (added 2026-07-24, diagnosed V-28) —
+   per grid load: where the texture came from (`ram`/`content`/`disk`/`FAIL`),
+   whether a cell was still showing the item at completion, and whether the
+   content hash was enriched. `src=… showing=false` = decoded into RAM but
+   painted to nobody — the V-28 smoking gun. Note: bind-time RAM hits never
+   reach this line (they paint synchronously); `src=ram` here means a *queued*
+   load found RAM warm, which is rare by design.
 
 ## Filmstrip (bugs found + fixed 2026-07-18 — regression cases, all verified)
 F1. ✅ **Fill order**: cold 3k-item folder, open viewer mid-folder. VDBG-FILM
@@ -28,6 +35,33 @@ F3. ✅ **Viewport signal**: `film_center()` = hadjustment-derived centre, with 
 Pitfall for future assertions: "last cells bound before a rest" ≈ on-screen
 only at the strip's ends — elsewhere it's GTK's overscan tail. Assert on the
 region around the selection / known scroll target instead.
+
+## Queue invariant (2026-07-24, V-28 — supersedes the F2 cap mechanics)
+The grid's bind journal and the strip's `film_queue` are now **deduped per
+cell** (a rebind replaces that cell's entry) and their count caps are gone —
+the bound-cell pool is the natural bound. Rationale: GTK binds ~200 positions
+ahead of the viewport, so after a fling the on-screen rows are *never* the
+newest binds; any newest-N cap evicts exactly them, and no path repaints a
+bound-but-blank cell. F2's distance-trim had the same hole from the other side
+(cap 96 < pool ~200: trimmed *live* overscan entries starved on a short drag).
+F1/F2/F3 remain valid as regression cases; their old cap-policy rationale is
+historical. Full postmortem: ISSUES.md V-28.
+G1. ✅ **Post-fling rest paint (grid)**: warm-session fling deep into a 3k
+    folder (SOAK scroll-grid is a valid synthetic — 24×60 ms steps stay under
+    the 90 ms debounce), stop dead, hands off. The resting viewport's GRIDFILL
+    completions must be `visible=true`, radiating from `center`; prefetch
+    (`visible=false`) confined to the `PREFETCH_BEHIND/AHEAD` margins.
+    (Verified 2026-07-24 on `_v28_fling`: center=2998 filled center-out
+    `visible=true`, 16 trailing prefetches. Broken signature: viewport
+    completes `visible=false`-only, then a dead window with `queued=0`.)
+F4. **Strip slow-drag starvation guard** (the case F2's sweep missed): open
+    viewer mid-folder, wait for the bind wave to drain, then drag the strip
+    slowly by ~half a page and rest. Cells entering the viewport must paint
+    (union of FILMBIND `hit=true` and VDBG-FILM completions covers the new
+    visible range). Pre-fix, entries beyond the 96 nearest were trimmed live
+    and those cells arrived bound-but-blank with no re-queue path.
+    (Indirect verification 2026-07-24: single open-viewer bind wave drains
+    **205** VDBG-FILM completions — impossible under the old 96 cap.)
 
 ## Test cases (each: cold open via SOAK+NOCACHE, assert on VDBG-FILL)
 2. **Time-to-visible-complete** ("grid LCP"): settle → every visible cell has a

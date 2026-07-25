@@ -40,9 +40,9 @@ const ZOOM_MAX: f64 = 20.0;
 const SPINNER_GRACE: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// Max in-flight filmstrip thumbnail loads (bounds a fast filmstrip fling).
+/// The queue itself needs no cap: it is deduped per cell, so the strip's
+/// bound-cell pool is its natural bound.
 const FILM_INFLIGHT: usize = 8;
-/// Cap on queued filmstrip loads; oldest (scrolled-past) dropped.
-const FILM_QUEUE_CAP: usize = 96;
 
 type TextureCache = Rc<RefCell<SizedLru<String, gdk::Texture>>>;
 
@@ -506,24 +506,18 @@ impl VitrineViewer {
         // bind (a fast filmstrip fling would otherwise pile up thousands).
         {
             let mut q = self.imp().film_queue.borrow_mut();
-            q.push((list_item.downgrade(), item.clone(), list_item.position()));
-            if q.len() > FILM_QUEUE_CAP {
-                // First shed entries whose cell died or recycled to another item
-                // (they'd be skipped at pump time anyway, but they occupy cap
-                // space and used to push *live* requests out — blank cells).
-                q.retain(|(weak, it, _)| {
-                    weak.upgrade()
-                        .and_then(|li| li.item().and_downcast::<ImageObject>())
-                        .as_ref()
-                        == Some(it)
-                });
-            }
-            if q.len() > FILM_QUEUE_CAP {
-                // Still over: keep the requests nearest the visible strip (same
-                // policy as the grid's load queue), never the oldest-vs-newest.
-                let center = self.film_center();
-                q.sort_by_key(|(_, _, pos)| (*pos as i64 - center).unsigned_abs());
-                q.truncate(FILM_QUEUE_CAP);
+            // One entry per cell: a rebind replaces that cell's previous entry,
+            // so the queue is bounded by the strip's cell pool and needs no
+            // count cap. The old 96-cap could trim *live* overscan entries; a
+            // short drag then brought those cells on screen already bound —
+            // blank, with no re-queue path (the strip twin of the grid's V-28).
+            let entry = (list_item.downgrade(), item.clone(), list_item.position());
+            match q
+                .iter_mut()
+                .find(|(weak, _, _)| weak.upgrade().as_ref() == Some(list_item))
+            {
+                Some(slot) => *slot = entry,
+                None => q.push(entry),
             }
         }
         self.pump_filmstrip();

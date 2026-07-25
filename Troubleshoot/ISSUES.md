@@ -453,6 +453,56 @@ while the filmstrip did 205 binds against it.
 > `VITRINE_OPENFOLDER` flow (open dir B while in viewer → pops to browser):
 > **97** grid fills after the pop, so the visible-page notify re-pumps.
 
+### V-28 · After a hard fling, the visible cells stay blank for minutes while their thumbnails sit in the RAM cache · `MEASURED` (2026-07-24, 17:27 log) · **FIXED · VERIFIED (2026-07-25, USB HDD + NVMe, ~6 h dogfood)**
+
+The grid twin of the filmstrip's F2 ("cap dropped oldest entries — could be
+on-screen", fixed 2026-07-18). `connect_bind` journals every cache-missing bind
+into `pending`, capped at the *newest 400*. GridView binds rows ~200 positions
+**ahead** of the viewport during a fling, plus rebind churn at settle — so the
+on-screen rows are never among the newest binds, and the cap evicted exactly
+them. The debounce flush then saw live entries only for the below-fold overbind
+block: it painted ~160 cells nobody could see, prefetched a token
+`PREFETCH_BEHIND=16` backwards, and never painted the viewport. Cell-less
+prefetches from later nudge-scrolls decoded the hole into the RAM cache
+(`VDBG-LOAD src=content showing=false`) — cached, applied to nobody. No path
+repaints a bound-but-blank cell, so the blanks persist until a real rebind.
+
+Measured (17-27-38 log, fling to pos ≈2924): flush painted `visible=true` only
+2931–3094 (below fold); viewport 2870–2930 completed `visible=false` only; then
+a **54 s dead window** (zero completions, `queued=0`, textures in RAM) until the
+user scrolled at s=66. Diagnosis was cornered by the completion *order*: the
+pump drains centre-out, and the centre-most entries were already cell-less —
+so the cell requests were gone before the queue was built, not dropped later.
+
+> **Fixed 2026-07-24:** three changes.
+> 1. `pending` is deduped **per cell** (a rebind replaces that cell's entry),
+>    so the journal is bounded by the cell pool and the count cap is gone —
+>    eviction of on-screen binds is structurally impossible.
+> 2. `flush_pending` updates `visible_center` *before* enqueuing (the overflow
+>    trim in `enqueue_load` ranked against the stale pre-fling centre).
+> 3. Latent, found en route: `grid_cell::bind()` looked up the RAM cache
+>    without the `edit_key` suffix the loader stores under — rotated/cropped
+>    items could never paint from RAM at bind time.
+>
+> Re-test: fling a >3k folder, stop dead, don't touch — every visible cell
+> must paint within ~1–2 s (all content-tier hits); `VDBG-GRIDFILL` for the
+> resting viewport must be `visible=true`.
+>
+> **Verified 2026-07-25:** the fling test held across a USB HDD and the NVMe
+> drive over ~6 h of dogfooding — no empty cells. A temporary per-load probe
+> (`VDBG-LOAD pos/src/showing/hash`) was implemented to corner the
+> `showing=false` starvation quoted above, and has been removed now that the
+> completion-order diagnosis is settled and the fix is confirmed.
+>
+> **Filmstrip follow-up (same day):** the strip had a live latent twin its F2
+> fix didn't close — `FILM_QUEUE_CAP=96` is smaller than the strip's ~200-cell
+> bind pool, so the distance trim could drop *live* overscan entries; a short
+> drag then brought those cells on screen already bound — blank, no re-queue
+> path (F2's sweep verification only asserted open-screen and sweep-end rest
+> points, where binds are always fresh). `film_queue` is now deduped per cell
+> and the count cap is removed; pool size is the bound, `FILM_INFLIGHT=8` and
+> centre-first popping are unchanged.
+
 ---
 
 ## Tier 3 — UI/UX. Observed in use.

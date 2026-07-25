@@ -514,8 +514,7 @@ impl VitrineWindow {
                 }
             }
             // Query active but this item unscored → not a match.
-            if state.fuzzy.is_some()
-                && !fuzzy_scores.borrow().contains_key(&script_memo_key(item))
+            if state.fuzzy.is_some() && !fuzzy_scores.borrow().contains_key(&script_memo_key(item))
             {
                 return false;
             }
@@ -700,18 +699,29 @@ impl VitrineWindow {
     fn flush_pending(&self) {
         let imp = self.imp();
         let pending: Vec<_> = imp.pending.borrow_mut().drain(..).collect();
-        let (mut lo, mut hi) = (u32::MAX, 0u32);
         let load_size = self.icon_px().max(256);
-        for (weak_cell, item, position) in pending {
-            // Skip cells that recycled to a different item while we debounced.
-            let live = weak_cell
-                .upgrade()
-                .is_some_and(|c| c.item().as_ref() == Some(&item));
-            if !live {
-                continue;
-            }
-            lo = lo.min(position);
-            hi = hi.max(position);
+        // Skip cells that recycled to a different item while we debounced.
+        let live: Vec<_> = pending
+            .into_iter()
+            .filter(|(weak_cell, item, _)| {
+                weak_cell
+                    .upgrade()
+                    .is_some_and(|c| c.item().as_ref() == Some(item))
+            })
+            .collect();
+        let (mut lo, mut hi) = (u32::MAX, 0u32);
+        for (_, _, position) in &live {
+            lo = lo.min(*position);
+            hi = hi.max(*position);
+        }
+        // Update the viewport centre *before* enqueuing: enqueue_load's overflow
+        // trim ranks by distance to it, and the pre-fling value would rank the
+        // just-bound visible cells farthest and drop them first.
+        if lo <= hi {
+            imp.visible_center
+                .set(self.viewport_center_position(lo, hi));
+        }
+        for (weak_cell, item, position) in live {
             self.enqueue_load(LoadRequest {
                 cell: Some(weak_cell),
                 item,
@@ -720,7 +730,6 @@ impl VitrineWindow {
             });
         }
         if lo <= hi {
-            imp.visible_center.set(self.viewport_center_position(lo, hi));
             self.prefetch_range(lo, hi);
         }
         self.pump_loads();
@@ -1096,13 +1105,20 @@ impl VitrineWindow {
                 if cell.bind(&item, &cache) {
                     let position = list_item.position();
                     let mut pending = window.imp().pending.borrow_mut();
-                    pending.push((cell.downgrade(), item, position));
-                    // During a long fling keep only the most recent binds — older
-                    // ones have scrolled off and would be skipped at flush anyway
-                    // (this stops the debounce queue ballooning to thousands).
-                    if pending.len() > 400 {
-                        let drop = pending.len() - 400;
-                        pending.drain(0..drop);
+                    // One journal entry per cell: a rebind replaces that cell's
+                    // previous entry, so the journal is bounded by the cell pool
+                    // and stays small without a count cap. The old newest-400 cap
+                    // evicted exactly the on-screen rows after a fling — GridView
+                    // binds ~200 positions ahead of the viewport, so the visible
+                    // rows are never the newest binds — leaving them permanently
+                    // blank while their thumbnails sat in the RAM cache (V-28).
+                    let entry = (cell.downgrade(), item, position);
+                    match pending
+                        .iter_mut()
+                        .find(|(w, _, _)| w.upgrade().is_some_and(|c| c == cell))
+                    {
+                        Some(slot) => *slot = entry,
+                        None => pending.push(entry),
                     }
                     drop(pending);
                     window.schedule_flush();

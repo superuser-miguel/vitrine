@@ -121,7 +121,10 @@ impl VitrineGridCell {
         );
         *imp.rating_handler.borrow_mut() = Some(handler);
 
-        let key = crate::thumbnails::ram_key(&item.file().uri(), self.load_size());
+        // Same key the loader stores under — without the edit suffix, rotated or
+        // cropped items could never paint from RAM at bind time.
+        let key = crate::thumbnails::ram_key(&item.file().uri(), self.load_size())
+            + &crate::thumbnails::edit_key(item.orientation(), item.crop());
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             self.show_texture(&texture);
             return false;
