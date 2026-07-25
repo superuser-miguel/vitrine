@@ -117,8 +117,16 @@ fn is_removable_path(path: &str) -> bool {
 /// real `file://` path under a removable mount root.
 fn is_removable_uri(uri: &str) -> bool {
     const NET: &[&str] = &[
-        "smb://", "sftp://", "ftp://", "dav://", "davs://", "nfs://", "mtp://",
-        "gphoto2://", "afp://", "google-drive://",
+        "smb://",
+        "sftp://",
+        "ftp://",
+        "dav://",
+        "davs://",
+        "nfs://",
+        "mtp://",
+        "gphoto2://",
+        "afp://",
+        "google-drive://",
     ];
     if NET.iter().any(|s| uri.starts_with(s)) {
         return true;
@@ -266,7 +274,10 @@ pub fn store_content(hash: &str, target_px: u32, texture: &gdk::Texture) {
 
 /// Prune the content tier to its budget; 0 = disabled, nothing to prune.
 pub fn prune_content_cache() {
-    prune_dir(content_dir(), content_budget_mb().saturating_mul(1024 * 1024));
+    prune_dir(
+        content_dir(),
+        content_budget_mb().saturating_mul(1024 * 1024),
+    );
 }
 
 /// A weak reference used only to obtain a GSK renderer after decoding.
@@ -342,7 +353,14 @@ pub async fn load(
                     crate::debug::since_start_ms()
                 );
             }
-            store(&uri, source_mtime, bucket, &thumb, is_shareable(&file), removable);
+            store(
+                &uri,
+                source_mtime,
+                bucket,
+                &thumb,
+                is_shareable(&file),
+                removable,
+            );
             Some(thumb)
         }
         None => None,
@@ -602,7 +620,10 @@ pub fn prune_private_cache() {
 /// Prune the persistent removable/remote cache to its own (larger) budget. A 0
 /// budget means the tier is disabled — nothing to prune.
 pub fn prune_removable_cache() {
-    prune_dir(removable_dir(), removable_budget_mb().saturating_mul(1024 * 1024));
+    prune_dir(
+        removable_dir(),
+        removable_budget_mb().saturating_mul(1024 * 1024),
+    );
 }
 
 /// Write `texture` to the thumbnail cache(s), tagged with the freedesktop
@@ -616,7 +637,11 @@ fn roots_for(shareable: bool, removable: bool) -> Vec<PathBuf> {
     // Removable/remote decodes go to the persistent removable tier; everything
     // else to the LRU-pruned private cache. Either may also write the shared
     // freedesktop cache (Nautilus interop) when the path is a real host path.
-    let primary = if removable { removable_dir() } else { private_dir() };
+    let primary = if removable {
+        removable_dir()
+    } else {
+        private_dir()
+    };
     let shared = shared_dir();
     let mut roots = vec![primary.clone()];
     if shareable && shared != primary {
@@ -716,8 +741,12 @@ mod tests {
     /// resolved (via xattr) and classified — vs. plain local/removable paths.
     #[test]
     fn doc_portal_uri_detection() {
-        assert!(is_doc_portal_uri("file:///run/user/1000/doc/16ecde37/photo.jpg"));
-        assert!(is_doc_portal_uri("file:///run/user/1000/doc/abc/sub/photo.jpg"));
+        assert!(is_doc_portal_uri(
+            "file:///run/user/1000/doc/16ecde37/photo.jpg"
+        ));
+        assert!(is_doc_portal_uri(
+            "file:///run/user/1000/doc/abc/sub/photo.jpg"
+        ));
         assert!(!is_doc_portal_uri("file:///run/media/me/USB/photo.jpg"));
         assert!(!is_doc_portal_uri("file:///home/me/x.jpg"));
         assert!(!is_doc_portal_uri("file:///run/user/1000/other/x.jpg"));
