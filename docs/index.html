@@ -204,6 +204,13 @@ flatpak run io.github.superuser_miguel.Vitrine</code></pre>
   <p class="sub">Notes from building it.</p>
   <div class="grid">
     <div class="card">
+      <h3><a href="is-this-file-on-a-usb.html">Is this file on a USB?</a></h3>
+      <p>A slow external drive shouldn't re-decode its thumbnails every visit — but caching
+        them means knowing a file is on removable media, and inside a Flatpak sandbox
+        <code>/run/media</code> is invisible and the path is an opaque doc id. One extended
+        attribute, <code>document-portal.host-path</code>, answers it.</p>
+    </div>
+    <div class="card">
       <h3><a href="blank-cells-warm-cache.html">Blank cells, warm cache</a></h3>
       <p>Fling a big folder to a dead stop and the visible thumbnails stay blank for a
         minute — while their decoded textures sit warm in the RAM cache the whole time.

@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Is this file on a USB? — Vitrine</title>
+<meta name="description" content="Vitrine caches thumbnails so a slow USB drive doesn't re-decode every image every visit — but that needs the app to know a file is on removable media. Inside a Flatpak sandbox, where /run/media is invisible and portal paths are opaque doc ids, that's a question you're not supposed to be able to answer. One extended attribute answers it.">
+<style>
+  :root {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf;
+    --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+      --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6;
+      --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf; --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+    --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6; --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.68 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 40px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: 0; }
+
+  .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
+  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
+  .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
+  .meta { color: var(--muted); font-size: .88rem; margin: 0; }
+
+  h2 { font-size: 1.42rem; letter-spacing: -.01em; margin: 0 0 6px; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5em; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .98rem; }
+  h3 { font-size: 1.02rem; margin: 26px 0 6px; }
+  p { margin: 0 0 15px; }
+
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+        padding: 14px 16px; overflow-x: auto; font-size: .87rem; line-height: 1.5; }
+  code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px;
+         border-radius: 6px; font-size: .92em; }
+  pre code { background: none; padding: 0; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; margin: 0 0 16px; }
+  table { width: 100%; border-collapse: collapse; min-width: 420px; background: var(--surface); }
+  th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  thead th { font-size: .78rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  blockquote { margin: 0 0 15px; padding: 12px 18px; border-left: 3px solid var(--accent);
+               background: color-mix(in srgb, var(--accent) 7%, transparent);
+               border-radius: 0 10px 10px 0; color: var(--text); }
+  blockquote p:last-child { margin: 0; }
+
+  .lesson { background: var(--surface); border: 1px solid var(--border);
+            border-left: 3px solid var(--ok); border-radius: 0 12px 12px 0;
+            padding: 14px 18px; margin: 20px 0 0; }
+  .lesson b { display: block; font-size: .78rem; text-transform: uppercase;
+              letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+  .lesson p { margin: 0; }
+
+  .mine { border-left-color: var(--warn); }
+  ul { padding-left: 22px; margin: 0 0 15px; }
+  li { margin: 0 0 7px; }
+  .toc { list-style: none; padding: 0; margin: 0; }
+  .toc li { margin: 0; border-bottom: 1px solid var(--border); }
+  .toc li:last-child { border: 0; }
+  .toc a { display: block; padding: 10px 0; text-decoration: none; color: var(--text); }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .7em; }
+
+  footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; padding: 26px 0 46px; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <a class="back" href="./">&larr; Vitrine</a>
+  <h1>Is this file on a USB?</h1>
+  <p class="lede"><a href="./">Vitrine</a> caches thumbnails so a slow USB drive doesn't
+    re-decode every image on every visit — but to do that it has to <em>know</em> a file
+    lives on removable media. Inside a Flatpak sandbox, where <code>/run/media</code> is
+    invisible and the path you're handed is an opaque doc id, that's a question you're not
+    supposed to be able to answer. One extended attribute answers it cleanly.</p>
+  <p class="meta">July 2026 · GNOME · Flatpak · Rust · portals</p>
+</header>
+
+<section class="wrap">
+  <p>This is a companion to <a href="flatpak-document-portal.html">What the document
+    portal actually does</a> — that one tours the portal in general; this one is a single,
+    practical question it makes surprisingly hard, and the tidy answer. If you've ever
+    wanted a sandboxed app to treat a slow external drive differently from local disk,
+    this is the missing piece.</p>
+  <ol class="toc" start="0">
+    <li><a href="#why"><span class="n">1</span>Why a USB needs its own cache</a></li>
+    <li><a href="#easy"><span class="n">2</span>The easy 90%: a path heuristic</a></li>
+    <li><a href="#blind"><span class="n">3</span>The sandbox is blindfolded</a></li>
+    <li><a href="#xattr"><span class="n">4</span>The one extended attribute</a></li>
+    <li><a href="#trees"><span class="n">5</span>Two <code>/run</code> trees people conflate</a></li>
+  </ol>
+</section>
+
+<section class="wrap" id="why">
+  <h2><span class="num">1</span>Why a USB needs its own cache</h2>
+  <p class="sub">A cache miss on local disk is cheap. A cache miss on a USB is a full re-read over the bus.</p>
+
+  <p>Vitrine's thumbnails are keyed by <strong>file URI</strong> and validated by
+    <strong>mtime</strong>. That's a fine, boring scheme for local files. But the private
+    thumbnail cache is LRU-pruned, and ordinary local browsing evicts from it
+    <em>constantly</em>. When an evicted thumbnail belongs to a file on a USB drive,
+    regenerating it means <strong>reading the whole image back over the bus</strong> just
+    to downscale it — the expensive read is the source read, not the decode.</p>
+
+  <p>On a fast NVMe you'd never notice. On a <strong>2012 WD My Passport</strong> —
+    spinning platter, USB 2, exactly the worst case — you notice every time. So the fix is
+    to give removable media a cache that local browsing can't touch:</p>
+
+  <ul>
+    <li>a separate <code>removable-thumbnails/</code> directory,</li>
+    <li>with its <strong>own budget</strong> (8&nbsp;GB by default) and its
+      <strong>own prune</strong>,</li>
+    <li>so no amount of local browsing can evict a removable thumbnail.</li>
+  </ul>
+
+  <p>First visit to a folder on the drive pays the slow decode tax once; every visit after
+    is instant, and it survives unplug/replug. All of which depends on one classification
+    at decode time: <em>is this source on removable media?</em> Get that wrong and the
+    whole tier is pointless.</p>
+</section>
+
+<section class="wrap" id="easy">
+  <h2><span class="num">2</span>The easy 90%: a path heuristic</h2>
+  <p class="sub">For an unsandboxed app, the path tells you everything.</p>
+
+  <p>Outside a sandbox the answer is right there in the URI. Removable media auto-mounts
+    under a predictable root, and network shares announce themselves in the scheme:</p>
+
+  <pre><code>file:///run/media/&lt;user&gt;/&lt;drive-label&gt;/photo.jpg   → removable
+smb://server/share/photo.jpg                        → network
+sftp://host/path/photo.jpg                          → network
+/home/&lt;user&gt;/Pictures/photo.jpg                     → local</code></pre>
+
+  <p>A prefix check on <code>/run/media/</code> plus a short list of network schemes
+    (<code>smb://</code>, <code>sftp://</code>, <code>ftp://</code>, <code>nfs://</code>,
+    <code>mtp://</code>, and friends) is enough for a direct-filesystem app. Vitrine keeps
+    exactly this heuristic as the fast path — and for a native (non-Flatpak) build, it's
+    the whole story.</p>
+
+  <p>Then you sandbox the app, and the path stops telling the truth.</p>
+</section>
+
+<section class="wrap" id="blind">
+  <h2><span class="num">3</span>The sandbox is blindfolded</h2>
+  <p class="sub">The portal's whole job is to <em>not</em> show you the host path — so the heuristic can't fire.</p>
+
+  <p>A Flatpak sandbox has no <code>/run/media</code>. When the user grants a folder on a
+    USB through the file chooser, the <strong>document portal</strong> re-exports it
+    through a FUSE mount, and every file underneath arrives looking like this:</p>
+
+  <pre><code>file:///run/user/&lt;UID&gt;/doc/&lt;opaque-doc-id&gt;/photo.jpg</code></pre>
+
+  <p>The real <code>/run/media/…</code> location is <strong>hidden behind the doc id</strong>
+    — on purpose. That's the portal doing its job: the app gets access to the bytes without
+    being told where on the host they live. Which means both obvious approaches fail:</p>
+
+  <ul>
+    <li>The <strong>path heuristic can't fire</strong> — there's no <code>/run/media</code>
+      anywhere in that URI, just <code>/run/user/&lt;uid&gt;/doc/…</code>.</li>
+    <li><code>File.find_enclosing_mount()</code> — the thing you reach for first — is
+      <strong>useless here</strong>. It returns the <code>fuse.portal</code> mount, which
+      is the same for a USB, a network share, and a file in your home folder. It describes
+      the portal, not the drive.</li>
+  </ul>
+
+  <div class="lesson mine">
+    <b>Where the obvious approach dead-ends</b>
+    <p><code>find_enclosing_mount()</code> feels like the designed answer — "which mount is
+      this file on?" — and it compiles, runs, and returns something plausible. It just
+      always returns the portal. If you're going to trust it, log what it actually says for
+      a USB file first; it says <code>fuse.portal</code>, every time.</p>
+  </div>
+</section>
+
+<section class="wrap" id="xattr">
+  <h2><span class="num">4</span>The one extended attribute</h2>
+  <p class="sub">The portal hides the host path from the URI — and hands it back as an xattr.</p>
+
+  <p>The document-portal FUSE mount exposes the real host path as an <strong>extended
+    attribute</strong> on each file. From the shell:</p>
+
+  <pre><code>$ getfattr -n user.document-portal.host-path granted-file.jpg
+# file: granted-file.jpg
+user.document-portal.host-path="/run/media/me/MY-USB/photo.jpg"</code></pre>
+
+  <p>There it is — the real location, the one the URI wouldn't give you. From gio the
+    attribute is spelled <code>xattr::document-portal.host-path</code> (gio drops the
+    <code>user.</code> namespace prefix), and the whole resolver is a dozen lines:</p>
+
+  <pre><code>fn doc_portal_host_path(file: &amp;gio::File) -&gt; Option&lt;String&gt; {
+    let info = file
+        .query_info(
+            "xattr::document-portal.host-path",
+            gio::FileQueryInfoFlags::NONE,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    info.attribute_string("xattr::document-portal.host-path")
+        .map(|s| s.to_string())
+}</code></pre>
+
+  <p>So the full classification is a heuristic with a sandbox-aware fallback, and the
+    ordering matters for cost: check the cheap URI heuristic first; only if the URI is a
+    <code>/run/user/&lt;uid&gt;/doc/…</code> path do you pay for the xattr query, and then
+    classify the <em>host</em> path it returns:</p>
+
+  <pre><code>fn is_removable_source(file: &amp;gio::File, uri: &amp;str) -&gt; bool {
+    if is_removable_uri(uri) {
+        return true;                       // /run/media, smb://, … — free
+    }
+    if is_doc_portal_uri(uri) {            // only doc-portal paths pay for this
+        if let Some(host) = doc_portal_host_path(file) {
+            return is_removable_path(&amp;host);   // classify the *real* path
+        }
+    }
+    false
+}</code></pre>
+
+  <p>Ordinary local files never touch the xattr path, so they pay nothing. And the part
+    that actually needed proving — that a <em>sandboxed</em> process can read this attribute
+    at all — checks out: on a real USB, from inside the Flatpak, the query returns the
+    <code>/run/media/…</code> host path and the <code>removable-thumbnails/</code> cache
+    fills. It works.</p>
+
+  <p>There's also a D-Bus route — <code>org.freedesktop.portal.Documents.Info(doc_id)</code>
+    returns the host path too — but the xattr is cheaper: one <code>getxattr</code> on a
+    file you already have open, no round-trip to a service.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>When a sandbox hides something from the obvious API, check whether it's re-exposed
+      somewhere deliberate. The portal <em>can't</em> put the host path in the URI without
+      defeating itself — but it will hand it to code that asks by name.
+      <code>document-portal.host-path</code> is that name.</p>
+  </div>
+</section>
+
+<section class="wrap" id="trees">
+  <h2><span class="num">5</span>Two <code>/run</code> trees people conflate</h2>
+  <p class="sub">They both start with <code>/run</code> and both involve a mount, and that's where the resemblance ends.</p>
+
+  <p>The whole confusion comes down to two unrelated paths under <code>/run</code> that are
+    easy to mistake for each other:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Path</th><th>What it is</th></tr></thead>
+    <tbody>
+      <tr><td><code>/run/media/&lt;user&gt;/&lt;label&gt;/…</code></td><td>the real removable auto-mount</td></tr>
+      <tr><td><code>/run/user/&lt;UID&gt;/doc/&lt;doc-id&gt;/…</code></td><td>the document-portal FUSE view</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Different base dirs entirely: one under <code>/run/media</code> keyed by username, the
+    other under <code>/run/user</code> keyed by numeric UID with a literal <code>doc</code>
+    segment and an opaque id. The xattr is the bridge from the second back to the first —
+    and only the second kind needs the bridge.</p>
+
+  <p>With classification solved, the rest of the feature is plumbing: removable decodes are
+    routed to the <code>removable-thumbnails/</code> dir with its own budget and prune,
+    reads check it first, and a slow drive is fast on its second visit. The one non-obvious
+    line in the whole thing is the attribute name.</p>
+
+  <h3>The follow-up: stop keying on the path at all</h3>
+  <p>There's a deeper fix hiding here. Keying the cache by <em>path</em> means a drive that
+    remounts at a different doc id — or a different <code>/run/media</code> label — looks
+    like a fresh drive and re-decodes. Vitrine's next tier keys thumbnails by
+    <strong>content hash</strong> (BLAKE3) instead, so a thumbnail survives a remount and
+    even dedupes the same photo across two different drives. That's a
+    <a href="blank-cells-warm-cache.html">separate story</a> — but it's the reason the
+    path-based removable tier is a floor, not the ceiling.</p>
+
+  <div class="lesson">
+    <b>Rule of thumb</b>
+    <p>"Is this file on removable media?" has a free answer for a native app (the path) and
+      a one-xattr answer for a sandboxed one (<code>document-portal.host-path</code>). What
+      it doesn't have is a <em>portable-across-remounts</em> answer — for that you stop
+      asking about location and start asking about content.</p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>The whole trick, in one line</h2>
+  <p>Everything above reduces to this: a sandboxed app can't see <code>/run/media</code>,
+    but it can ask any portal-granted file for <code>xattr::document-portal.host-path</code>
+    and get the real location back. Query it only for <code>/run/user/&lt;uid&gt;/doc/…</code>
+    paths so local files pay nothing, classify the host path it returns, and route
+    removable decodes to a cache local browsing can't evict. Sandboxed apps are
+    <em>supposed</em> not to know host paths — which is exactly what makes "how do I tell
+    this is a USB" a real question, and the host-path xattr the clean answer.</p>
+</section>
+
+<footer class="wrap">
+  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p><a href="flatpak-document-portal.html">What the document portal actually does</a>
+     · <a href="blank-cells-warm-cache.html">Blank cells, warm cache</a>
+     · <a href="the-viewport-that-lied.html">The viewport that lied</a>
+     · <a href="duplicates-that-arent.html">The duplicate that was one file</a>
+     · <a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a>
+     · <a href="./">Project page</a></p>
+</footer>
+
+</body>
+</html>
