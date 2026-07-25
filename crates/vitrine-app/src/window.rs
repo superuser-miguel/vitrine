@@ -272,6 +272,8 @@ mod imp {
         /// The tag popover's entry + existing-tag chip box (rebuilt on open).
         pub tag_entry: RefCell<Option<gtk::Entry>>,
         pub tag_flowbox: RefCell<Option<gtk::FlowBox>>,
+        /// Tag popover mode: false = add tag to selection, true = remove from it.
+        pub tag_remove_mode: std::cell::Cell<bool>,
 
         /// Background library indexer (created in `constructed`). Owns the one
         /// writer `Db`; the UI only enqueues folders and reads progress.
@@ -394,6 +396,7 @@ mod imp {
                 tag_names: RefCell::new(Vec::new()),
                 tag_entry: RefCell::new(None),
                 tag_flowbox: RefCell::new(None),
+                tag_remove_mode: std::cell::Cell::new(false),
                 indexer: RefCell::new(None),
                 read_db: RefCell::new(None),
                 current_folder: RefCell::new(None),
@@ -1233,7 +1236,41 @@ impl VitrineWindow {
         let entry = gtk::Entry::builder()
             .placeholder_text(gettextrs::gettext("Tag selection… (Enter)"))
             .build();
+
+        // Add / Remove segmented toggle. The mode decides whether Enter and a
+        // chip-click apply the tag to the selection or strip it from it — the
+        // one place tags can be taken off en masse (the sidebar does one image).
+        let mode_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        mode_box.add_css_class("linked");
+        mode_box.set_halign(gtk::Align::Center);
+        let add_toggle = gtk::ToggleButton::builder()
+            .label(gettextrs::gettext("Add"))
+            .active(true)
+            .build();
+        let remove_toggle = gtk::ToggleButton::builder()
+            .label(gettextrs::gettext("Remove"))
+            .group(&add_toggle)
+            .build();
+        mode_box.append(&add_toggle);
+        mode_box.append(&remove_toggle);
+        content.append(&mode_box);
         content.append(&entry);
+
+        remove_toggle.connect_toggled(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[weak]
+            entry,
+            move |btn| {
+                let remove = btn.is_active();
+                window.imp().tag_remove_mode.set(remove);
+                entry.set_placeholder_text(Some(&if remove {
+                    gettextrs::gettext("Remove tag from selection… (Enter)")
+                } else {
+                    gettextrs::gettext("Tag selection… (Enter)")
+                }));
+            }
+        ));
 
         let flowbox = gtk::FlowBox::builder()
             .selection_mode(gtk::SelectionMode::None)
@@ -1251,12 +1288,13 @@ impl VitrineWindow {
         popover.set_child(Some(&content));
         imp.tag_button.set_popover(Some(&popover));
 
-        // Enter applies the typed tag.
+        // Enter applies (or removes) the typed tag, per the current mode.
         entry.connect_activate(glib::clone!(
             #[weak(rename_to = window)]
             self,
             move |entry| {
-                window.apply_tag_to_selection(&entry.text());
+                let add = !window.imp().tag_remove_mode.get();
+                window.tag_selection(&entry.text(), add);
                 entry.set_text("");
             }
         ));
@@ -1286,14 +1324,18 @@ impl VitrineWindow {
                 flowbox.invalidate_filter();
             }
         ));
-        // Rebuild the chips (with fresh counts) each time the popover opens.
+        // Rebuild the chips (with fresh counts) each time the popover opens, and
+        // reset to Add mode so a remove is always a deliberate per-open choice.
         popover.connect_show(glib::clone!(
             #[weak(rename_to = window)]
             self,
             #[weak]
             entry,
+            #[weak]
+            add_toggle,
             move |_| {
                 entry.set_text("");
+                add_toggle.set_active(true);
                 window.rebuild_tag_chips();
                 entry.grab_focus();
             }
@@ -1324,34 +1366,48 @@ impl VitrineWindow {
             chip.connect_clicked(glib::clone!(
                 #[weak(rename_to = window)]
                 self,
-                move |_| window.apply_tag_to_selection(&name)
+                move |_| {
+                    let add = !window.imp().tag_remove_mode.get();
+                    window.tag_selection(&name, add);
+                }
             ));
             flowbox.insert(&chip, -1);
         }
     }
 
-    /// Apply `name` to the current grid selection (batch write, one transaction).
-    fn apply_tag_to_selection(&self, name: &str) {
+    /// Add (`add = true`) or remove (`add = false`) `name` on the current grid
+    /// selection — one batched write on the writer thread. Removal is scoped to
+    /// the selection, so it never touches the tag's use on other images.
+    fn tag_selection(&self, name: &str, add: bool) {
         let name = name.trim();
         if name.is_empty() {
             return;
         }
         let hashes = self.selected_hashes();
-        crate::debug::tag_action("add", name, hashes.len());
+        crate::debug::tag_action(if add { "add" } else { "remove" }, name, hashes.len());
         if hashes.is_empty() {
             self.toast(&self.no_hashes_message("tag"));
             return;
         }
         let accepted = match self.imp().indexer.borrow().as_ref() {
-            Some(indexer) => indexer.annotator().tag(name, &hashes, true),
+            Some(indexer) => indexer.annotator().tag(name, &hashes, add),
             None => false,
         };
         self.toast(&if !accepted {
-            "Couldn’t tag — the index writer isn’t running".to_string()
-        } else {
+            if add {
+                "Couldn’t tag — the index writer isn’t running".to_string()
+            } else {
+                "Couldn’t remove tag — the index writer isn’t running".to_string()
+            }
+        } else if add {
             match hashes.len() {
                 1 => format!("Tagged 1 image “{name}”"),
                 n => format!("Tagged {n} images “{name}”"),
+            }
+        } else {
+            match hashes.len() {
+                1 => format!("Removed “{name}” from 1 image"),
+                n => format!("Removed “{name}” from {n} images"),
             }
         });
         self.imp().tag_button.popdown();
