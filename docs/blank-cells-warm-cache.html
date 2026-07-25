@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blank cells, warm cache — Vitrine</title>
+<meta name="description" content="After a hard fling in a GTK4/Rust image browser, the visible thumbnails stay blank for a minute while their decoded textures sit finished in the RAM cache. The culprit: a load queue capped at its newest 400 binds — and a virtualized grid that binds so far ahead of the viewport that the rows you're staring at are the oldest, and the first evicted.">
+<style>
+  :root {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf;
+    --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+      --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6;
+      --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+    }
+  }
+  :root[data-theme="light"] {
+    --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
+    --border: #e6e2f0; --accent: #7c4dd6; --accent-2: #6a2bbf; --ok: #2e9e5b; --no: #c7c1d6; --warn: #c2410c;
+  }
+  :root[data-theme="dark"] {
+    --bg: #16131d; --surface: #1f1b29; --text: #ece8f5; --muted: #a89fbe;
+    --border: #2c2638; --accent: #a066e6; --accent-2: #8b5cf6; --ok: #57d98a; --no: #443c56; --warn: #fb923c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.68 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+  section { padding: 40px 0; border-bottom: 1px solid var(--border); }
+  section:last-of-type { border-bottom: 0; }
+
+  .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
+  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
+  .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
+  .meta { color: var(--muted); font-size: .88rem; margin: 0; }
+
+  h2 { font-size: 1.42rem; letter-spacing: -.01em; margin: 0 0 6px; }
+  h2 .num { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .5em; }
+  .sub { color: var(--muted); margin: 0 0 20px; font-size: .98rem; }
+  h3 { font-size: 1.02rem; margin: 26px 0 6px; }
+  p { margin: 0 0 15px; }
+
+  pre { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+        padding: 14px 16px; overflow-x: auto; font-size: .87rem; line-height: 1.5; }
+  code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px;
+         border-radius: 6px; font-size: .92em; }
+  pre code { background: none; padding: 0; }
+
+  .tablewrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; margin: 0 0 16px; }
+  table { width: 100%; border-collapse: collapse; min-width: 420px; background: var(--surface); }
+  th, td { padding: 10px 14px; text-align: right; border-bottom: 1px solid var(--border); font-variant-numeric: tabular-nums; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  thead th { font-size: .78rem; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  tbody tr:last-child td { border-bottom: 0; }
+
+  blockquote { margin: 0 0 15px; padding: 12px 18px; border-left: 3px solid var(--accent);
+               background: color-mix(in srgb, var(--accent) 7%, transparent);
+               border-radius: 0 10px 10px 0; color: var(--text); }
+  blockquote p:last-child { margin: 0; }
+
+  .lesson { background: var(--surface); border: 1px solid var(--border);
+            border-left: 3px solid var(--ok); border-radius: 0 12px 12px 0;
+            padding: 14px 18px; margin: 20px 0 0; }
+  .lesson b { display: block; font-size: .78rem; text-transform: uppercase;
+              letter-spacing: .05em; color: var(--muted); margin-bottom: 4px; }
+  .lesson p { margin: 0; }
+
+  .mine { border-left-color: var(--warn); }
+  ul { padding-left: 22px; margin: 0 0 15px; }
+  li { margin: 0 0 7px; }
+  .toc { list-style: none; padding: 0; margin: 0; }
+  .toc li { margin: 0; border-bottom: 1px solid var(--border); }
+  .toc li:last-child { border: 0; }
+  .toc a { display: block; padding: 10px 0; text-decoration: none; color: var(--text); }
+  .toc a:hover { color: var(--accent); }
+  .toc .n { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: .7em; }
+
+  footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; padding: 26px 0 46px; }
+  footer p { margin: 6px 0; }
+</style>
+</head>
+<body>
+
+<header class="hero wrap">
+  <a class="back" href="./">&larr; Vitrine</a>
+  <h1>Blank cells, warm cache</h1>
+  <p class="lede">Fling a folder of thousands hard, let go, and don't touch it — and in
+    <a href="./">Vitrine</a> the whole screen of thumbnails stays <em>blank for a full
+    minute</em>. Not decoding. Blank. The catch: their thumbnails were already decoded,
+    sitting finished in the RAM cache the whole time. This is the same
+    <code>GtkGridView</code> over-bind from <a href="the-viewport-that-lied.html">last
+    time</a> — back through a different door.</p>
+  <p class="meta">July 2026 · GNOME · Rust · GTK4 · virtualized lists</p>
+</header>
+
+<section class="wrap">
+  <p>A quick recap of the machinery, because the whole bug lives in the gap between two
+    parts of it. Vitrine's grid is a virtualized <code>GtkGridView</code>: thousands of
+    photos, a few dozen live cell widgets, recycled as you scroll. When a cell is bound
+    to an image whose thumbnail isn't in the RAM cache, the app journals a
+    <em>load request</em> for that cell into a queue. A debounced flush drains the queue
+    onto a bounded decode worker, centre-of-viewport first.</p>
+  <p>That queue had a cap. It kept its <strong>newest 400</strong> requests and dropped
+    the rest — the kind of bound you add without much thought, so a berserk scroll can't
+    grow an unbounded backlog. It is exactly the wrong bound, and it took a fling, a
+    stopwatch, and one wrong suspect to see why.</p>
+  <ol class="toc" start="0">
+    <li><a href="#suspect"><span class="n">1</span>The wrong suspect</a></li>
+    <li><a href="#dead"><span class="n">2</span>Fifty-four seconds of nothing</a></li>
+    <li><a href="#cap"><span class="n">3</span>The cap that keeps the wrong 400</a></li>
+    <li><a href="#order"><span class="n">4</span>The queue was drained centre-first — into no one</a></li>
+    <li><a href="#fix"><span class="n">5</span>The bound is the pool, not a number</a></li>
+  </ol>
+</section>
+
+<section class="wrap" id="suspect">
+  <h2><span class="num">1</span>The wrong suspect</h2>
+  <p class="sub">The newest code is not the guiltiest code, however much it feels it.</p>
+
+  <p>The blank-cell reports arrived days after I'd shipped a new cache tier — a
+    content-hash layer that lets an identical photo reuse one decoded thumbnail across
+    folders and drives. New code, new persistence, new timing. Of course I suspected it.
+    It <em>felt</em> like a caching bug: the cells that stayed blank were exactly the ones
+    a cache was supposed to fill.</p>
+
+  <p>Rather than read the new tier's code and talk myself into a story, I ran it as an
+    experiment. Two identical fling sessions on the same folder, one with the content tier
+    on and one with it off, both logging every load completion:</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>content tier ON</th><th>content tier OFF</th></tr></thead>
+    <tbody>
+      <tr><td>load completions</td><td>532</td><td>542</td></tr>
+      <tr><td>failed loads</td><td>0</td><td>0</td></tr>
+      <tr><td>blank on-screen band</td><td>same block</td><td>same block</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>Identical. The new tier changed <em>where</em> a thumbnail came from and changed
+    nothing about the blanks. It had exonerated itself in one A/B, and the bug was older
+    and lower than the code I'd been staring at.</p>
+
+  <div class="lesson mine">
+    <b>Where I nearly went wrong</b>
+    <p>I spent the first hour reading the freshest module in the tree because recency reads
+      as guilt. The A/B cost ten minutes and pointed the other way. Suspect the new code if
+      you like — but test the suspicion before you read it line by line, or you'll find a
+      plausible culprit whether or not it's the real one.</p>
+  </div>
+</section>
+
+<section class="wrap" id="dead">
+  <h2><span class="num">2</span>Fifty-four seconds of nothing</h2>
+  <p class="sub">The most damning log line is often the one that isn't there.</p>
+
+  <p>With the tier cleared, I flung a 7,300-image folder to a dead stop around
+    position&nbsp;2924 and watched the load log. The debounce fired, a burst of completions
+    scrolled past, and then&mdash;nothing. For fifty-four seconds the log was silent:
+    <code>queued=0</code>, zero completions, no decode activity at all, while roughly two
+    rows of thumbnails sat blank in front of me. It only broke when I nudged the scrollbar
+    at the 66-second mark, which bound the cells afresh and painted them instantly.</p>
+
+  <p>Silent is the tell. A slow decode logs progress; a stuck worker logs a full queue.
+    This logged an <em>empty</em> queue and idle workers — the app believed it had nothing
+    left to do, in front of a screen with everything left to do. So I looked at which
+    positions the flush actually served, and the numbers were quietly absurd:</p>
+
+  <pre><code># fling stops with the viewport resting on ~2870&ndash;2930
+VDBG-LOAD pos=2931 src=disk showing=true    # painted...
+VDBG-LOAD pos=3050 src=disk showing=true    # ...below the fold
+VDBG-LOAD pos=2892 src=content showing=false   # viewport cell — applied to no one
+VDBG-LOAD pos=2905 src=content showing=false   # viewport cell — applied to no one</code></pre>
+
+  <p>The flush painted about 160 cells at positions <strong>2931&ndash;3094</strong> —
+    a full screen's worth, all <em>below</em> the resting viewport, all
+    <code>showing=true</code>. The cells you could actually see, 2870&ndash;2930, did get
+    decoded — but every one completed <code>showing=false</code>: finished, dropped into
+    the RAM cache, and applied to <em>no cell</em>. The pixels existed. They just had
+    nowhere to land.</p>
+
+  <blockquote><p>A bound cell that never received its load request is never repainted.
+    Nothing in the pipeline goes back to ask "is there a live cell here that's still
+    blank?" — the request was the only thing that would have told it, and the request was
+    gone.</p></blockquote>
+</section>
+
+<section class="wrap" id="cap">
+  <h2><span class="num">3</span>The cap that keeps the wrong 400</h2>
+  <p class="sub">A virtualized list binds ahead of you — so what you're looking at is the oldest news.</p>
+
+  <p>Two facts had to be reconciled. The viewport's own cells were decoded but landed
+    nowhere (their requests were gone), while cells a full screen below got served
+    perfectly. What decides which requests survive to the flush? The cap: keep the newest
+    400, drop the oldest. So the question became — during a fling, are the viewport's
+    requests the <em>newest</em> or the <em>oldest</em> in that journal?</p>
+
+  <p>This is where <a href="the-viewport-that-lied.html">the last post</a> comes back to
+    collect. That one ended at a 60-line reproducer proving <code>GtkGridView</code> keeps
+    a bind buffer far larger than the viewport — a fixed <code>32 × columns + 1</code> live
+    cells, ten-ish times what's on screen. At rest that buffer straddles the viewport. But
+    <em>in motion</em> it sits <strong>ahead</strong> of you, in the direction of travel:
+    as the fling races toward 2924, GTK is already binding cells at 3050, 3090, well past
+    where you'll stop. Those far-ahead binds happen <em>last</em>, so they are the newest
+    entries in the journal. The rows you're braking to a stop on were bound earlier — they
+    are the <em>oldest</em>.</p>
+
+  <pre><code>              journal (capped: keep newest 400, drop oldest)
+   oldest ───────────────────────────────────────────── newest
+   [ 2870..2930 ]         [ ...settle churn... ]      [ 3050..3094 ]
+     the viewport                                       far below the fold
+     ▲ dropped off the back                             ▲ kept
+     the cells your eyes are on                         the cells no one can see</code></pre>
+
+  <p>So "keep the newest 400" is precisely "keep the cells the toolkit bound furthest
+    ahead of the fling, and throw away the ones under the user's eyes." The flush then did
+    exactly as told: it painted the 160 below-the-fold survivors, reached the end of the
+    queue, saw <code>queued=0</code>, and went to sleep. The viewport stayed blank not
+    despite the cap but <em>because</em> of it.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>Recency is a terrible eviction key for a cell-request queue, because in a virtualized
+      list "recently bound" means "bound ahead of where the user is heading," not "near what
+      the user sees." A newest-<em>N</em> cap on such a queue evicts the viewport first, every
+      time it matters most.</p>
+  </div>
+</section>
+
+<section class="wrap" id="order">
+  <h2><span class="num">4</span>The queue was drained centre-first — into no one</h2>
+  <p class="sub">The completion order told me the requests were gone before the queue was built, not dropped after.</p>
+
+  <p>One thing still had to be ruled out: maybe the viewport requests <em>were</em> in the
+    queue and got starved during the drain — outraced by other work rather than evicted
+    before it. The completion order settles it. The decode pump drains
+    <strong>centre-out</strong>: it serves the request nearest the viewport centre first,
+    then fans outward — the same priority discipline from the last post. If the viewport's
+    requests had been in the queue, they'd have been served <em>first</em>, not never.</p>
+
+  <p>They weren't served at all. The centre-most positions produced no completions,
+    <code>showing=true</code> or otherwise — they simply weren't in the queue to drain.
+    Their entries had already fallen off the back of the cap before the flush assembled the
+    queue. The <code>showing=false</code> completions in the log were a separate, sadder
+    thing: cell-less prefetch requests from earlier in the fling, decoding the same
+    positions into the RAM cache, applied to nobody. That's how the paradox held —
+    <em>warm cache, blank screen</em> — the pixels got made by prefetch and had no cell to
+    go to, while the real cells' requests had been thrown away.</p>
+
+  <p>That last diagnostic — a per-load probe printing <code>pos</code>, <code>src</code>,
+    and crucially <code>showing</code> — existed only to corner this bug. Once the
+    completion order proved the requests were evicted rather than starved, it had done its
+    job and came back out. It's the smallest kind of instrumentation: one line that answers
+    one question, deleted the moment the question is answered.</p>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>When work is missing, the <em>order</em> of what did complete tells you whether it was
+      starved or never queued. A centre-first pump that skips the centre isn't losing a race —
+      it never had the entry. That distinction is the difference between tuning the scheduler
+      and fixing the queue.</p>
+  </div>
+</section>
+
+<section class="wrap" id="fix">
+  <h2><span class="num">5</span>The bound is the pool, not a number</h2>
+  <p class="sub">A cell-request queue is already bounded — by the number of cells.</p>
+
+  <p>The cap was solving a problem the queue doesn't have. There is no unbounded backlog to
+    fear, because there are only ever a few hundred live cells; a request that can't map
+    back to a live cell is worthless anyway. So the fix is to stop counting and start
+    keying. The journal is now <strong>deduped per cell</strong> — a rebind replaces that
+    cell's entry instead of appending a new one — and the count cap is gone. The queue's
+    size is bounded by the cell pool, which is the only bound that was ever correct.
+    Evicting an on-screen request is now structurally impossible: an on-screen cell is a
+    live cell, and every live cell owns exactly one slot.</p>
+
+  <pre><code>// before: append, then trim to the newest 400 — evicts the oldest (== the viewport)
+pending.push(LoadRequest { position, cell });
+if pending.len() &gt; 400 { pending.drain(0..pending.len() - 400); }
+
+// after: one slot per cell; a rebind refreshes it; no count cap
+pending.insert(cell.id(), LoadRequest { position, cell });</code></pre>
+
+  <p>Two more things surfaced in the same few lines, both worth naming plainly:</p>
+  <ul>
+    <li><strong>A stale centre.</strong> The flush computed the viewport centre for its
+      priority ordering <em>after</em> it had already enqueued, so the first drain ranked
+      against the pre-fling centre. Moved the centre update ahead of the enqueue. Small, but
+      it's the difference between fanning out from where you stopped and where you started.</li>
+    <li><strong>A latent RAM miss.</strong> At bind time a cell looked up the RAM cache
+      under a key that omitted the edit suffix (orientation + crop) the loader actually
+      stores under — so a rotated or cropped image could never repaint from RAM on bind, only
+      by redecoding. Unrelated to the fling, exposed by staring at the same code path. Fixed.</li>
+  </ul>
+
+  <h3>The same bug, a third time</h3>
+  <p>The grid's filmstrip had the identical disease with a smaller number:
+    <code>FILM_QUEUE_CAP = 96</code>, against a strip that binds ~200 cells. A short drag
+    could bring on screen a cell that had already been bound and then trimmed off the cap —
+    blank, with no path to re-queue it. Same shape, same fix: deduped per cell, cap removed,
+    the bound pool <em>is</em> the bound. This is the third time this class of bug has been
+    fixed in Vitrine — the filmstrip had a first version of it patched back in the spring —
+    which is exactly why it's now written down as an invariant rather than a fix:</p>
+
+  <blockquote><p><strong>Never put a count cap on a queue of cell requests.</strong> The
+    toolkit binds far ahead of the viewport, so a count cap always evicts the rows on
+    screen first. Dedup per cell; let the pool be the bound. Count caps are legitimate only
+    for <em>cell-less</em> work — prefetch, background writes — where losing an entry costs
+    a cache warm, never a blank cell.</p></blockquote>
+
+  <div class="lesson">
+    <b>Lesson</b>
+    <p>When the same bug shows up a third time in different clothes, the deliverable isn't the
+      third fix — it's the sentence that stops a fourth. "Never count-cap a cell-request queue"
+      now lives in the architecture notes, next to the reproducer that explains why.</p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>Where it ended</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th></th><th>Before</th><th>After</th></tr></thead>
+    <tbody>
+      <tr><td>Visible cells after a hard fling</td><td>blank ~54&nbsp;s</td><td>paint in ~1&ndash;2&nbsp;s</td></tr>
+      <tr><td>What the flush served</td><td>160 cells below the fold</td><td>the viewport, centre-first</td></tr>
+      <tr><td>Queue eviction key</td><td>newest 400</td><td>one slot per live cell</td></tr>
+      <tr><td>Times this class of bug fixed</td><td>3</td><td>&mdash; (now an invariant)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p>Verified the way the bug was found: flung to a dead stop across a USB hard drive and an
+    NVMe over an afternoon of real use — no blank cells, every rested viewport painting from
+    the content tier within a second or two. The thumbnails had always been there, warm in
+    the cache. The only bug was a queue that threw away the requests for the cells you were
+    looking at, because a virtualized grid had bound them a little too early to count as
+    new.</p>
+</section>
+
+<footer class="wrap">
+  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p><a href="the-viewport-that-lied.html">The viewport that lied</a>
+     · <a href="debugging-vitrine.html">Six bugs in an image browser</a>
+     · <a href="duplicates-that-arent.html">The duplicate that was one file</a>
+     · <a href="flatpak-document-portal.html">What the document portal actually does</a>
+     · <a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a>
+     · <a href="./">Project page</a></p>
+</footer>
+
+</body>
+</html>
