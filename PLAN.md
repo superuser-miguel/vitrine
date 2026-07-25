@@ -1159,6 +1159,23 @@ velocity-adaptive prefetch margins (`PREFETCH_AHEAD/BEHIND`); gate size
 thumbs); cancel decodes for cells flung far past (admission already bails via
 the cell re-check; only the ≤8 in-flight glycin decodes are uncancellable).
 
+**Scheduler invariant, learned twice (2026-07-24, V-28; first paid for in the
+filmstrip's F2, 2026-07-18): never put a count cap on a *cell-request* queue.**
+GTK binds ~200 positions ahead of the viewport, so after a fling the on-screen
+rows are never among the newest binds — a newest-N cap evicts exactly them
+(grid: blank viewport for minutes with the thumbnails sitting in RAM), and a
+distance-trim smaller than the bound-cell pool drops live overscan entries
+that later scroll in bound-but-blank (strip). There is no repaint path for a
+bound cell whose request is lost; prefetch completions cache but paint nobody.
+Both queues are now **deduped per cell** (a rebind replaces that cell's entry)
+with count caps removed — the pool is the bound. Count caps remain legitimate
+for *cell-less* work (`store()`'s MAX_PENDING; prefetches): losing those costs
+a cache warm, never a blank cell. One residual, parked: `LOAD_QUEUE_CAP` (512)
+trims by distance regardless of entry kind. Today it never bites cell requests
+(journal ≤ pool ~250 + ~80 prefetch margin ≈ 330), but if a small-icon layout
+ever pushes the bound pool past ~430, make the trim drop cell-less entries
+first. Postmortem: ISSUES.md V-28.
+
 ### 13.3 Measurement we still need
 
 **User-reported test case (2026-07-17): thumbnail *render order* in the viewport.**
