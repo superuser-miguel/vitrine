@@ -159,6 +159,22 @@ mod imp {
         #[template_child]
         pub meta_orientation_row: TemplateChild<adw::ActionRow>,
 
+        #[template_child]
+        pub histogram_button: TemplateChild<gtk::ToggleButton>,
+        #[template_child]
+        pub histogram_revealer: TemplateChild<gtk::Revealer>,
+        #[template_child]
+        pub histogram_area: TemplateChild<gtk::DrawingArea>,
+        /// Bins currently painted by `histogram_area`'s draw func.
+        pub hist_current: RefCell<Option<std::rc::Rc<crate::histogram::Histogram>>>,
+        /// Computed bins keyed by the viewer texture-cache key (uri + edit_key),
+        /// so re-viewing an image is a map lookup, not a re-tally.
+        #[allow(clippy::type_complexity)]
+        pub hist_cache:
+            RefCell<std::collections::HashMap<String, std::rc::Rc<crate::histogram::Histogram>>>,
+        /// Keys with a tally in flight, to dedupe concurrent computes.
+        pub hist_inflight: RefCell<std::collections::HashSet<String>>,
+
         /// Read-only index connection, opened lazily to look up metadata for the
         /// shown image (the writer lives on the indexer thread).
         pub read_db: RefCell<Option<Db>>,
@@ -272,6 +288,12 @@ mod imp {
                 meta_date_row: Default::default(),
                 meta_camera_row: Default::default(),
                 meta_orientation_row: Default::default(),
+                histogram_button: Default::default(),
+                histogram_revealer: Default::default(),
+                histogram_area: Default::default(),
+                hist_current: RefCell::new(None),
+                hist_cache: RefCell::new(std::collections::HashMap::new()),
+                hist_inflight: RefCell::new(std::collections::HashSet::new()),
                 read_db: RefCell::new(None),
                 annotator: RefCell::new(None),
                 current_hash: RefCell::new(None),
@@ -326,6 +348,7 @@ mod imp {
             obj.setup_review();
             obj.setup_tags();
             obj.setup_metadata();
+            obj.setup_histogram();
         }
     }
 
@@ -1577,6 +1600,9 @@ impl VitrineViewer {
             self.set_wait_state(Some(uri));
             self.ensure_loaded(&item);
         }
+        // Cheap if the texture is cached (lookup/compute); a no-op while it's
+        // still decoding — `ensure_loaded`'s landing calls back here.
+        self.refresh_histogram();
         self.prefetch(pos);
     }
 
@@ -1651,6 +1677,9 @@ impl VitrineViewer {
                 if waited_on {
                     viewer.set_wait_state(None);
                     viewer.set_texture(&texture);
+                    // Texture just landed for the shown image — tally now if the
+                    // histogram panel is open.
+                    viewer.refresh_histogram();
                 }
             }
         ));
@@ -1803,6 +1832,95 @@ impl VitrineViewer {
                 Err(e) => glib::g_warning!("vitrine", "viewer read db: {e}"),
             }
         }
+    }
+
+    // --- histogram ------------------------------------------------------------
+
+    /// Wire the histogram panel: the DrawingArea paints whatever bins are
+    /// current, and revealing the panel triggers a tally for the shown image.
+    /// All compute is off-thread and cached; drawing is a cheap Cairo pass.
+    fn setup_histogram(&self) {
+        let imp = self.imp();
+
+        imp.histogram_area.set_draw_func(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |_, cr, w, h| {
+                if let Some(hist) = v.imp().hist_current.borrow().as_ref() {
+                    crate::histogram::draw(hist, cr, w as f64, h as f64);
+                }
+            }
+        ));
+
+        // Revealing the panel tallies the current image (cheap if cached).
+        imp.histogram_button.connect_toggled(glib::clone!(
+            #[weak(rename_to = v)]
+            self,
+            move |btn| {
+                if btn.is_active() {
+                    v.refresh_histogram();
+                }
+            }
+        ));
+    }
+
+    /// Recompute (or reuse) the histogram for the current image, but only while
+    /// the panel is open. No-ops when the viewer texture isn't decoded yet — the
+    /// decode landing (`ensure_loaded`) calls back here.
+    fn refresh_histogram(&self) {
+        let imp = self.imp();
+        if !imp.histogram_button.is_active() {
+            return;
+        }
+        let pos = self.current_position();
+        let Some(item) = self.item_at(pos) else {
+            return;
+        };
+        let key = item.file().uri().to_string()
+            + &crate::thumbnails::edit_key(item.orientation(), item.crop());
+
+        // Cached bins: paint immediately.
+        if let Some(hist) = imp.hist_cache.borrow().get(&key).cloned() {
+            imp.hist_current.replace(Some(hist));
+            imp.histogram_area.queue_draw();
+            return;
+        }
+        // Need the decoded viewer texture; if it isn't ready yet, bail — the
+        // decode landing will call back here once it is.
+        let Some(texture) = imp.cache.borrow_mut().get(&key).cloned() else {
+            return;
+        };
+        // Dedupe concurrent tallies of the same key.
+        if !imp.hist_inflight.borrow_mut().insert(key.clone()) {
+            return;
+        }
+        glib::spawn_future_local(glib::clone!(
+            #[weak(rename_to = viewer)]
+            self,
+            async move {
+                let hist = std::rc::Rc::new(crate::histogram::compute(texture).await);
+                let imp = viewer.imp();
+                imp.hist_inflight.borrow_mut().remove(&key);
+                {
+                    // Bins are ~4 KB each; keep the map from growing without bound.
+                    let mut cache = imp.hist_cache.borrow_mut();
+                    if cache.len() >= 512 {
+                        cache.clear();
+                    }
+                    cache.insert(key.clone(), hist.clone());
+                }
+                // Paint only if this is still the shown image.
+                let cur = viewer.current_position();
+                if let Some(item) = viewer.item_at(cur) {
+                    let cur_key = item.file().uri().to_string()
+                        + &crate::thumbnails::edit_key(item.orientation(), item.crop());
+                    if cur_key == key {
+                        imp.hist_current.replace(Some(hist));
+                        imp.histogram_area.queue_draw();
+                    }
+                }
+            }
+        ));
     }
 
     // --- review (rating + comment) -------------------------------------------

@@ -8,6 +8,7 @@
 mod debug;
 mod decode;
 mod grid_cell;
+mod histogram;
 mod image_object;
 mod index;
 mod preferences;

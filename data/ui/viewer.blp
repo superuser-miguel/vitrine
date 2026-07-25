@@ -390,6 +390,37 @@ template $VitrineViewer: Adw.NavigationPage {
             subtitle-selectable: true;
           }
         }
+
+        // Live luminance + RGB readout over the shown texture. Hidden by default
+        // (the toggle reveals it), so it costs nothing until asked for.
+        Adw.PreferencesGroup {
+          title: _("Histogram");
+
+          [header-suffix]
+          Gtk.ToggleButton histogram_button {
+            icon-name: "view-reveal-symbolic";
+            tooltip-text: _("Show histogram");
+            valign: center;
+
+            styles [
+              "flat",
+            ]
+          }
+
+          Gtk.Revealer histogram_revealer {
+            reveal-child: bind histogram_button.active;
+            transition-type: slide_down;
+
+            Gtk.DrawingArea histogram_area {
+              content-height: 128;
+              margin-top: 6;
+
+              styles [
+                "card",
+              ]
+            }
+          }
+        }
       };
     };
 
