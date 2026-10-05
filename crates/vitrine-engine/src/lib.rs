@@ -25,6 +25,9 @@
 //! - Phase 1: LRU texture-cache eviction policy is hosted here so it is
 //!   testable without GTK.
 
+// House rule: the engine is pure Rust over its dependencies — no `unsafe`, ever.
+#![forbid(unsafe_code)]
+
 pub mod annotations;
 pub mod backup;
 pub mod cache_evict;
