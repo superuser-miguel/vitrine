@@ -15,6 +15,14 @@ phase's acceptance criteria pass. Within a phase, keep commits small and topical
 
 ## Status & North Star (@ `v1.0-stable`, 2026-07-16)
 
+> **Current status (2026-10-05): v0.3.0 released** — the first release on the
+> signed hosted repo (`superuser-miguel/vitrine-repo`, published by
+> `build-aux/publish-repo.sh`), with the `.flatpak` bundle on GitHub Releases as
+> the offline fallback. Releases so far: 0.1.0 (07-18), 0.2.0 (07-21), 0.3.0
+> (10-05, after a soak from 07-22). Commits and tags are GPG-signed from 0.3.0
+> on. Open defects live in `Troubleshoot/ISSUES.md`. The text below is the
+> July baseline, kept for its rationale.
+
 **North Star.** Fast, *smooth* browsing of large image libraries — where
 Nautilus / Loupe / gThumb get sluggish on tens of thousands of images, Vitrine
 stays fluid. The bar is **browser-level thumbnail scrolling**: a browser renders a
@@ -1477,7 +1485,7 @@ recipes (E3, ImageMagick); **XMP round-trip** so ratings/tags sync with
 darktable/digiKam (small, high-leverage); and — the one thing nobody else on
 Linux does well — modern-format (AVIF/JXL/HEIF) browsing, which is already ours.
 
-**Wanted core viewer feature, deferred — a histogram panel** (user,
+**Core viewer feature — a histogram panel. SHIPPED 2026-07-25 (`5de1764`), in Image Properties.** Original note (user,
 2026-07-21: "we will eventually need a Histogram, I'm sure. Just not right
 now."). Explicitly *not* scripting: it is a live analysis display of the
 image the viewer already holds decoded, so it reads that texture's pixels —
@@ -1487,7 +1495,7 @@ work scheduled; captured so it is not mistaken for extension territory when
 it comes up.
 
 **Content-aware / removable-media thumbnail cache — Flavor 1 SHIPPED, Flavor 2
-future** (user, 2026-07-24). Today all three thumbnail tiers (RAM `SizedLru`,
+cut 1 SHIPPED (`b5702e0`)** (user, 2026-07-24). Today all three thumbnail tiers (RAM `SizedLru`,
 shared freedesktop cache, private disk cache) are keyed by **file URI** and
 validated by **mtime** (`is_current` = `thumbnail_mtime >= source_mtime`,
 `thumbnail_cache.rs`). So a duplicate/backup of the same bytes on a different

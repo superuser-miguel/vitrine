@@ -710,7 +710,7 @@ fix speculatively — re-test once V-03 instrumentation lands.
 Originally: only rating + single-tag filter. Wants filename / path / tag / comment / EXIF.
 Engine has a `Query` struct to extend. FTS5 if it needs to scale.
 
-### V-12 · Sort lacks Date Taken and Rating · `OBSERVED` · **Rating FIXED; Date Taken deferred**
+### V-12 · Sort lacks Date Taken and Rating · `OBSERVED` · **FIXED** — Rating 2026-07-20; Date Taken later in `c4d62d8` (re-sorts once enrichment stamps it)
 
 > **2026-07-20.** Rating sort added — `rating()` was already on `ImageObject` and
 > already stamped at folder-open, so it cost one match arm and one menu entry.
@@ -740,8 +740,8 @@ No way back to the initial "No Folder Open" state without restarting.
 
 ### V-14 · Collection polish · `OBSERVED`
 
-Manual reorder within a collection; bulk remove (blocked on V-01); collection
-thumbnails in the sidebar.
+Manual reorder within a collection; collection thumbnails in the sidebar.
+*(Bulk remove from a collection has since shipped — `remove_selection_from_catalog`; V-01 is fixed.)*
 
 ### V-27 · Sidebar underuses its space; tags need discoverability · `OBSERVED` (user, 2026-07-23)
 
