@@ -114,7 +114,7 @@ simply almost never *start*.
 > ~2 = not. Fallback if it fails: disable rubber-band, which makes drag reliable
 > at the cost of rubber-band multi-select. That is a UX trade for the user to make.
 
-### V-22 · Trash failure is silent, and dedup corrupts the index on it · `CONFIRMED` code + `OBSERVED` in test (2026-07-21) · **FIXED (untested)**
+### V-22 · Trash failure is silent, and dedup corrupts the index on it · `CONFIRMED` code + `OBSERVED` in test (2026-07-21) · **FIXED — verified in use** (2026-07-21 afternoon pass; the failure-toast wording itself was never seen)
 
 > **Fixed 2026-07-21, same day.** Both paths now count the async results:
 > `trash_selected` toasts what actually moved (failures toast their own error;
@@ -600,7 +600,7 @@ plus a migration collapsing the existing 17,050 pairs. `path` keeps its current
 meaning — the path the sandbox can actually open — so nothing breaks. Bonus: the
 Properties card could show a real folder instead of `/run/user/1000/doc/…`.
 
-### V-21 · Grid selection is louder than the images · `CONFIRMED` · **FIXED (untested)**
+### V-21 · Grid selection is louder than the images · `CONFIRMED` · **FIXED — verified in use** (2026-07-21 afternoon pass)
 
 There was no selection styling at all, so Adwaita's default applied: a selected
 `gridview > child` gets the **solid** accent background. Across a multi-selection
@@ -701,9 +701,13 @@ handles `false` → `db.remove_tag(...)`. The UI only ever passes `true`
 May be fully explained by V-04 + V-05 rather than being a distinct defect. Do not
 fix speculatively — re-test once V-03 instrumentation lands.
 
-### V-11 · No global search · `OBSERVED`
+### V-11 · No global search · `OBSERVED` · **PARTLY FIXED** — fuzzy find by name + path shipped
 
-Only rating + single-tag filter today. Wants filename / path / tag / comment / EXIF.
+> **2026-07-24.** Fuzzy quick-find in the filter bar: cut 1 matches names
+> (`bc777e5`), cut 2 ranks by score and matches the path too (`21db695`). Search
+> by tag / comment / EXIF is still open — the rest of this entry stands.
+
+Originally: only rating + single-tag filter. Wants filename / path / tag / comment / EXIF.
 Engine has a `Query` struct to extend. FTS5 if it needs to scale.
 
 ### V-12 · Sort lacks Date Taken and Rating · `OBSERVED` · **Rating FIXED; Date Taken deferred**
