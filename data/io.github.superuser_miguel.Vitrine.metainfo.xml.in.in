@@ -48,6 +48,32 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.3.0" date="2026-10-05">
+      <description>
+        <p>
+          Faster on big and removable libraries, quicker to find things in,
+          and the first release on Vitrine's own signed update channel:
+          install from the .flatpakref once and later versions arrive with
+          flatpak update.
+        </p>
+        <p>New in this release:</p>
+        <ul>
+          <li>Find by name: type in the filter bar and the grid narrows to fuzzy matches on file name and path.</li>
+          <li>A histogram in Image Properties.</li>
+          <li>Thumbnails for USB and network drives are kept between sessions, and recognised again by content even when the drive mounts somewhere else.</li>
+          <li>Custom sort orders written as small Lua scripts, reloaded live as you edit them.</li>
+          <li>Remove a tag from a whole selection at once, from the grid's Tag popover.</li>
+        </ul>
+        <p>Fixed in this release:</p>
+        <ul>
+          <li>The window can be tiled to half the screen again.</li>
+          <li>After a fast scroll, thumbnails no longer stay blank while already cached.</li>
+          <li>Opening a large folder decodes the visible thumbnails first.</li>
+          <li>The grid stops competing with the viewer and filmstrip while an image is open.</li>
+          <li>Enriching folders of very large images no longer freezes the app.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-07-21">
       <description>
         <p>
