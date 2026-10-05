@@ -56,7 +56,7 @@ Ordered roughly safest/most-modern → most-powerful/most-coupled:
    collection (digiKam / Lightroom style). Builds directly on #1. Likely the
    highest-value "querying" feature for a large library, and squarely on-brand
    for the modernity North Star.
-3. **Read-only query from the Lua scripting API (E2).** Expose something like
+3. **Read-only query from the Lua scripting API (a host-API addition on the E1 seam).** Expose something like
    `vitrine.query{ tags = {...}, min_rating = 4 }` returning matching images for
    batch actions — the *open-ended glue* home Lua actually belongs in (after the
    native fuzzy find obsoleted the sort/search script demo). Read-only queries
@@ -112,7 +112,7 @@ indefinitely.
 The scanner already ignores sidecars (extension whitelist) — invisible by
 design until P2. The real work is small: when indexing `photo.jpg`, also read
 the adjacent `photo.jpg.json` as **one more enricher on the existing
-background enrichment pass** (same machinery as the histogram; NULLS-LAST
+background enrichment pass** (NULLS-LAST
 tolerance for late data already exists — no new architecture). It fills two
 hash-keyed tables:
 
