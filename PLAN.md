@@ -1511,7 +1511,7 @@ Third option: write `.sh_thumbnails/` onto the media itself (the spec's
 travelling thumbnails) — zero local cost, but writes to slow/possibly-RO media;
 the user's "spare 10–20 GB locally" framing prefers flavor 1/2.
 
-**Flavor 1 — SHIPPED 2026-07-24 (`d5c9b3a`), verified with real USB drives.** A
+**Flavor 1 — SHIPPED 2026-07-24 (`a988929`), verified with real USB drives.** A
 separate `removable-thumbnails` cache dir with its own budget
 (`DEFAULT_REMOVABLE_MB = 8192`) and its own `prune_dir` wrapper, so local
 browsing's LRU never evicts it; reads check it first, writes (incl. the

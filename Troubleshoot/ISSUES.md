@@ -704,7 +704,7 @@ fix speculatively — re-test once V-03 instrumentation lands.
 ### V-11 · No global search · `OBSERVED` · **PARTLY FIXED** — fuzzy find by name + path shipped
 
 > **2026-07-24.** Fuzzy quick-find in the filter bar: cut 1 matches names
-> (`bc777e5`), cut 2 ranks by score and matches the path too (`21db695`). Search
+> (`adb3409`), cut 2 ranks by score and matches the path too (`a790697`). Search
 > by tag / comment / EXIF is still open — the rest of this entry stands.
 
 Originally: only rating + single-tag filter. Wants filename / path / tag / comment / EXIF.
@@ -785,7 +785,7 @@ Two causes, both in `data/ui/window.blp`, and both invisible in a diff:
 1. **No `Adw.Breakpoint` anywhere in the file.** An `AdwNavigationSplitView`
    never collapses without one, so `min-sidebar-width` (180, the default — the
    blp only sets *max*) is permanently added to the window's minimum.
-2. **`width-request: 240` on `search_entry`**, added by `bc777e5` (V-11 cut 1,
+2. **`width-request: 240` on `search_entry`**, added by `adb3409` (V-11 cut 1,
    2026-07-24 01:39). `GtkRevealer`'s slide-down transition collapses **height
    only**, so the hidden filter bar still imposes its full width — that one
    property cost **+254px** of window minimum against **184px** of headroom.

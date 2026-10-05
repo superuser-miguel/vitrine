@@ -5,7 +5,7 @@
 //! drag-to-edge appear to do nothing while fullscreen still works (fullscreen
 //! ignores minimum sizes). On a 1920px screen the half-tile is 960px.
 //!
-//! That is exactly how V-29 shipped. `bc777e5` added a `width-request: 240` to
+//! That is exactly how V-29 shipped. `adb3409` added a `width-request: 240` to
 //! the filter bar's search entry — four innocent lines — which pushed the
 //! window's minimum from 776px to 1030px, 70px past the limit. Two properties
 //! of GTK made it invisible:
@@ -33,7 +33,7 @@ use std::path::PathBuf;
 /// so laying out at a 960px half-tile costs `min-sidebar-width` (180) plus the
 /// content's own minimum (~596 for this toolbar) = ~776px. That leaves ~184px
 /// of headroom before the half-tile is overrun again; 120 keeps a margin inside
-/// it. `bc777e5` asked for 240 in one widget, which this rejects.
+/// it. `adb3409` asked for 240 in one widget, which this rejects.
 ///
 /// Re-measure before raising it: the true figure is `Gtk.Widget.measure()` on
 /// the built tree, and the shipped window reports it over the Wayland protocol
