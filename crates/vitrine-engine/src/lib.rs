@@ -34,6 +34,7 @@ pub mod cache_evict;
 pub mod collections;
 pub mod db;
 pub mod dedup;
+pub mod exclusions;
 pub mod exif;
 pub mod files;
 pub mod hash;
@@ -51,6 +52,7 @@ pub use annotations::{compose_orientation, OrientOp};
 pub use collections::{Collection, CollectionKind};
 pub use db::Db;
 pub use dedup::DuplicateCluster;
+pub use exclusions::{CachePurge, IndexExclusions};
 pub use exif::{parse_exif, ExifData};
 pub use files::{
     drop_unreachable, is_portal_document_path, prefer_durable_paths, Enrichment, FileRecord,

@@ -561,6 +561,45 @@ Consequences, all silent:
 
 ---
 
+### V-31 · Thumbnail caches were indexed as library images · `MEASURED` (2026-10-05, in the DB) · **FIXED (untested)**
+
+On **2026-07-21** a scan reached `~/.cache/thumbnails/**` and
+`~/.var/app/io.github.superuser_miguel.Vitrine/cache/thumbnails/**` and indexed
+them: **148,962 `files` rows**, all `missing=0`, none tagged. The scanner had no
+notion of a cache directory — any root (or opened folder) above one walked
+straight in, and every MD5-named PNG became an "image" that hashes, enriches,
+searches and dedups like a photo.
+
+> **Fixed 2026-10-05 (untested in the app):**
+> - **The rule** (`vitrine_engine::exclusions::IndexExclusions`, unit-tested):
+>   exclude `~/.cache`, the app's `$XDG_CACHE_HOME` (`~/.var/app/<id>/cache`
+>   under Flatpak), every `~/.var/app/*/cache`, and — anywhere — a file laid
+>   out like a freedesktop thumbnail (`…/thumbnails|.sh_thumbnails/<bucket>/
+>   <32 hex>.png`).
+> - **Where it applies:** the scanner walk prunes excluded dirs whole (one
+>   check, not 147k); `Indexer::request`/`request_background` drop an excluded
+>   folder (`VDBG-INDEX skip-cache-folder`); deletion reconcile leaves rows
+>   under excluded paths alone (not looked at ≠ gone). **Browsing a cache
+>   folder still shows its images** — they are just never indexed, so they
+>   can't be tagged/rated there (the existing "needs the image indexed" toast).
+> - **The purge:** once per DB (`meta` key `maintenance.cache-rows-purged.v1`),
+>   on the writer thread before any scan. It plans first — a cache row is
+>   deleted unless its `content_hash` carries an annotation (tag, rating,
+>   comment, collection item, orientation, crop) that **no non-cache row also
+>   holds** — then takes a `VACUUM INTO` safety copy next to the DB
+>   (`index-backup-pre-cache-purge-<YYYYMMDD-HHMMSS>.sqlite`), then deletes in
+>   one transaction. Annotation rows are never touched. Backup failure ⇒ no
+>   delete, retried next launch. Logged as `VDBG-PURGE` (counts before/after)
+>   plus one `g_message`. Tested against temp DBs.
+>
+> **Re-test (rebuild first):** launch with `VITRINE_DEBUG=1`; expect one
+> `VDBG-PURGE … to_delete≈148962` then `deleted=… after=…`, the backup file
+> beside `index.sqlite`, and on a second launch no `VDBG-PURGE` line.
+> `sqlite3 index.sqlite "SELECT count(*) FROM files WHERE path LIKE '%/.cache/%'
+> OR path LIKE '%/.var/app/%/cache/%'"` → 0 (or only annotated anchors).
+
+---
+
 ## Tier 3 — UI/UX. Observed in use.
 
 ### V-18 · No gesture clears a selection · `CONFIRMED` · **FIXED — verified in use** (user, 2026-10-05: works, has for a while)

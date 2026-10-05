@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::db::Db;
+use crate::exclusions::IndexExclusions;
 use crate::files::FileRecord;
 
 /// Image file extensions the scanner indexes (lowercase, no dot).
@@ -47,10 +48,13 @@ pub fn is_image_path(path: &Path) -> bool {
 }
 
 /// Recursively list image files under `root` (following the tree, skipping
-/// unreadable entries). Order is filesystem-dependent.
-pub fn walk_images(root: &Path) -> Vec<ScannedFile> {
+/// unreadable entries). Order is filesystem-dependent. Excluded paths (caches,
+/// V-31) are pruned as whole subtrees, so a `~/.cache` under the root costs one
+/// check, not a walk of every thumbnail in it.
+pub fn walk_images(root: &Path, exclusions: &IndexExclusions) -> Vec<ScannedFile> {
     WalkDir::new(root)
         .into_iter()
+        .filter_entry(|e| !exclusions.excludes(e.path()))
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file() && is_image_path(e.path()))
         .filter_map(|e| {
@@ -93,9 +97,20 @@ impl Db {
     /// Mark as missing every non-missing file under `root` not in `seen`.
     /// Returns how many were flagged. This is the "deleted" arm of a rescan.
     pub fn reconcile_deleted(&self, root: &str, seen: &HashSet<String>) -> rusqlite::Result<usize> {
+        self.reconcile_deleted_excluding(root, seen, &IndexExclusions::none())
+    }
+
+    /// [`Db::reconcile_deleted`], leaving rows under excluded paths alone: the
+    /// walk never looked there, so not seeing them proves nothing.
+    pub fn reconcile_deleted_excluding(
+        &self,
+        root: &str,
+        seen: &HashSet<String>,
+        exclusions: &IndexExclusions,
+    ) -> rusqlite::Result<usize> {
         let mut flagged = 0;
         for path in self.paths_under(root)? {
-            if !seen.contains(&path) {
+            if !seen.contains(&path) && !exclusions.excludes(Path::new(&path)) {
                 self.mark_missing(&path)?;
                 flagged += 1;
             }
@@ -153,12 +168,45 @@ mod tests {
         std::fs::write(dir.join("a.jpg"), b"x").unwrap();
         std::fs::write(dir.join("sub/b.png"), b"yy").unwrap();
         std::fs::write(dir.join("note.txt"), b"skip").unwrap();
-        let mut found: Vec<_> = walk_images(&dir)
+        let mut found: Vec<_> = walk_images(&dir, &IndexExclusions::none())
             .into_iter()
             .map(|s| s.path.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         found.sort();
         assert_eq!(found, vec!["a.jpg", "b.png"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// V-31: a cache dir under the root is skipped whole, and its rows are
+    /// not marked missing just because the walk didn't look there.
+    #[test]
+    fn walk_and_reconcile_skip_excluded_dirs() {
+        let dir = std::env::temp_dir().join(format!("vitrine-scan-excl-{}", std::process::id()));
+        let cache = dir.join(".cache/thumbnails/large");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"x").unwrap();
+        let cached = cache.join("d40775e596682f2a16d1b834c221c0a2.png");
+        std::fs::write(&cached, b"y").unwrap();
+        let excl = IndexExclusions::new(&dir, [dir.join(".cache")]);
+
+        let found = walk_images(&dir, &excl);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].path.ends_with("a.jpg"));
+
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_file(&rec(&cached.to_string_lossy(), "h"))
+            .unwrap();
+        let seen: HashSet<String> = found
+            .iter()
+            .map(|f| f.path.to_string_lossy().into_owned())
+            .collect();
+        let root = dir.to_string_lossy();
+        assert_eq!(
+            db.reconcile_deleted_excluding(&root, &seen, &excl).unwrap(),
+            0
+        );
+        let row = db.file_by_path(&cached.to_string_lossy()).unwrap().unwrap();
+        assert!(!row.missing);
         std::fs::remove_dir_all(&dir).ok();
     }
 

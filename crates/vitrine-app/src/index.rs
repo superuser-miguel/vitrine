@@ -23,13 +23,25 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use vitrine_engine::scanner::Change;
-use vitrine_engine::{classify, walk_images, Db, Enrichment, FileRecord, Query};
+use vitrine_engine::{classify, walk_images, Db, Enrichment, FileRecord, IndexExclusions, Query};
 
 /// The library index database path (app-private under Flatpak). Shared by the
 /// writer thread and the window's read-only query connection.
 pub fn index_db_path() -> PathBuf {
     glib::user_data_dir().join("vitrine").join("index.sqlite")
 }
+
+/// What the index never holds (V-31): `~/.cache`, the app's own
+/// `$XDG_CACHE_HOME` (under Flatpak `~/.var/app/<id>/cache`), every other
+/// Flatpak app's cache, and anything laid out like a freedesktop thumbnail.
+/// Browsing such a folder still shows its images — they just aren't indexed.
+pub fn index_exclusions() -> IndexExclusions {
+    let home = glib::home_dir();
+    IndexExclusions::new(&home, [home.join(".cache"), glib::user_cache_dir()])
+}
+
+/// `meta` key marking the one-time V-31 purge as done.
+const CACHE_PURGE_KEY: &str = "maintenance.cache-rows-purged.v1";
 
 /// How many un-enriched files the driver pulls per round-trip to the writer.
 const ENRICH_BATCH: i64 = 64;
@@ -306,6 +318,8 @@ impl Annotator {
 pub struct Indexer {
     requests: async_channel::Sender<Request>,
     pub progress: async_channel::Receiver<IndexProgress>,
+    /// Folders under these are never queued for indexing (V-31).
+    exclusions: IndexExclusions,
     /// Guards against running more than one enrichment driver at a time.
     enriching: Rc<Cell<bool>>,
 }
@@ -315,15 +329,18 @@ impl Indexer {
     pub fn spawn(db_path: PathBuf) -> Indexer {
         let (req_tx, req_rx) = async_channel::unbounded::<Request>();
         let (prog_tx, prog_rx) = async_channel::unbounded::<IndexProgress>();
+        let exclusions = index_exclusions();
+        let worker_exclusions = exclusions.clone();
 
         std::thread::Builder::new()
             .name("vitrine-indexer".into())
-            .spawn(move || worker(db_path, req_rx, prog_tx))
+            .spawn(move || worker(db_path, worker_exclusions, req_rx, prog_tx))
             .expect("spawn indexer thread");
 
         Indexer {
             requests: req_tx,
             progress: prog_rx,
+            exclusions,
             enriching: Rc::new(Cell::new(false)),
         }
     }
@@ -331,16 +348,36 @@ impl Indexer {
     /// Enqueue a user-opened folder to index (non-blocking; ignored if the
     /// worker is gone). Jumps the scan queue — the user is waiting on it.
     pub fn request(&self, folder: PathBuf) {
+        if self.is_excluded(&folder) {
+            return;
+        }
         let _ = self.requests.try_send(Request::Scan { folder, user: true });
     }
 
     /// Enqueue a library root for background indexing (launch rescan,
     /// Preferences). Waits its turn behind anything the user asked for.
     pub fn request_background(&self, folder: PathBuf) {
+        if self.is_excluded(&folder) {
+            return;
+        }
         let _ = self.requests.try_send(Request::Scan {
             folder,
             user: false,
         });
+    }
+
+    /// A cache folder is browsable but never indexed (V-31). Folders *above*
+    /// a cache still scan; the walk prunes the cache subtree.
+    fn is_excluded(&self, folder: &std::path::Path) -> bool {
+        let excluded = self.exclusions.excludes(folder);
+        if excluded && crate::debug::enabled() {
+            eprintln!(
+                "VDBG-INDEX skip-cache-folder ms={} folder={}",
+                crate::debug::since_start_ms(),
+                folder.display()
+            );
+        }
+        excluded
     }
 
     /// A handle for routing annotation writes to the writer thread.
@@ -371,6 +408,7 @@ impl Indexer {
 
 fn worker(
     db_path: PathBuf,
+    exclusions: IndexExclusions,
     requests: async_channel::Receiver<Request>,
     progress: async_channel::Sender<IndexProgress>,
 ) {
@@ -384,6 +422,9 @@ fn worker(
             return;
         }
     };
+
+    // One-time maintenance, on the writer before any scan or write (V-31).
+    purge_cache_rows_once(&db, &db_path, &exclusions);
 
     // Single writer, but no head-of-line blocking (V-04, measured 2026-07-21:
     // the launch roots rescan held the worker ~11 minutes and a 2-file user
@@ -405,7 +446,7 @@ fn worker(
                 Ok(req) => req,
                 Err(async_channel::TryRecvError::Empty) => {
                     let (folder, _) = scans.pop_front().expect("non-empty");
-                    run_scan(&db, &folder, &progress, &requests, &mut scans);
+                    run_scan(&db, &folder, &exclusions, &progress, &requests, &mut scans);
                     continue;
                 }
                 Err(async_channel::TryRecvError::Closed) => break,
@@ -423,6 +464,7 @@ fn worker(
 fn run_scan(
     db: &Db,
     folder: &std::path::Path,
+    exclusions: &IndexExclusions,
     progress: &async_channel::Sender<IndexProgress>,
     requests: &async_channel::Receiver<Request>,
     scans: &mut std::collections::VecDeque<(PathBuf, bool)>,
@@ -440,12 +482,12 @@ fn run_scan(
                     nested.display()
                 );
             }
-            if let Err(e) = scan(db, &nested, progress, &mut || {}) {
+            if let Err(e) = scan(db, &nested, exclusions, progress, &mut || {}) {
                 glib::g_warning!("vitrine", "index scan {}: {e}", nested.display());
             }
         }
     };
-    if let Err(e) = scan(db, folder, progress, &mut checkpoint) {
+    if let Err(e) = scan(db, folder, exclusions, progress, &mut checkpoint) {
         glib::g_warning!("vitrine", "index scan {}: {e}", folder.display());
     }
 }
@@ -730,10 +772,11 @@ type ScanResult = Result<(), Box<dyn std::error::Error>>;
 fn scan(
     db: &Db,
     folder: &std::path::Path,
+    exclusions: &IndexExclusions,
     progress: &async_channel::Sender<IndexProgress>,
     checkpoint: &mut dyn FnMut(),
 ) -> ScanResult {
-    let files = walk_images(folder);
+    let files = walk_images(folder, exclusions);
     let total = files.len();
     let _ = progress.try_send(IndexProgress::Started { total });
 
@@ -761,7 +804,9 @@ fn scan(
     // must still reconcile, or real deletions would never be recorded.
     let root_readable = std::fs::read_dir(folder).is_ok();
     if root_readable {
-        db.reconcile_deleted(&folder.to_string_lossy(), &seen)?;
+        // Rows under an excluded (cache) path are left alone — the walk
+        // skipped them, so their absence from `seen` means nothing.
+        db.reconcile_deleted_excluding(&folder.to_string_lossy(), &seen, exclusions)?;
     } else {
         glib::g_warning!(
             "vitrine",
@@ -819,6 +864,78 @@ fn scan(
 
     let _ = progress.try_send(IndexProgress::Finished { added });
     Ok(())
+}
+
+/// Purge the `files` rows a scan once made of thumbnail caches (V-31: 148,962
+/// of them, from 2026-07-21). Runs once per database, on the writer thread:
+/// plan, take a dated safety copy next to the DB, then delete. A row is kept
+/// when it is the only anchor of an annotation (see
+/// [`Db::plan_cache_purge`]). If the copy fails, nothing is deleted and the
+/// purge retries next launch.
+fn purge_cache_rows_once(db: &Db, db_path: &std::path::Path, exclusions: &IndexExclusions) {
+    if db.meta(CACHE_PURGE_KEY).ok().flatten().is_some() {
+        return;
+    }
+    let plan = match db.plan_cache_purge(exclusions) {
+        Ok(plan) => plan,
+        Err(e) => {
+            glib::g_warning!("vitrine", "cache-row purge: plan failed: {e}");
+            return;
+        }
+    };
+    if crate::debug::enabled() {
+        eprintln!(
+            "VDBG-PURGE ms={} before={} cache_rows={} kept_annotated={} to_delete={}",
+            crate::debug::since_start_ms(),
+            plan.before,
+            plan.cache_rows,
+            plan.kept_annotated,
+            plan.delete_ids.len()
+        );
+    }
+    if !plan.delete_ids.is_empty() {
+        let stamp = glib::DateTime::now_local()
+            .and_then(|t| t.format("%Y%m%d-%H%M%S"))
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| now_secs().to_string());
+        let backup = db_path.with_file_name(format!("index-backup-pre-cache-purge-{stamp}.sqlite"));
+        if let Err(e) = db.backup_to(&backup) {
+            glib::g_warning!(
+                "vitrine",
+                "cache-row purge skipped: backup to {} failed: {e}",
+                backup.display()
+            );
+            return;
+        }
+        match db.apply_cache_purge(&plan) {
+            Ok(done) => {
+                glib::g_message!(
+                    "vitrine",
+                    "removed {} thumbnail-cache rows from the index (backup: {})",
+                    done.deleted,
+                    backup.display()
+                );
+                if crate::debug::enabled() {
+                    eprintln!(
+                        "VDBG-PURGE ms={} before={} deleted={} kept_annotated={} after={} backup={}",
+                        crate::debug::since_start_ms(),
+                        done.before,
+                        done.deleted,
+                        done.kept_annotated,
+                        done.after,
+                        backup.display()
+                    );
+                }
+            }
+            Err(e) => {
+                glib::g_warning!("vitrine", "cache-row purge failed: {e}");
+                return;
+            }
+        }
+    }
+    if let Err(e) = db.set_meta(CACHE_PURGE_KEY, &now_secs().to_string()) {
+        glib::g_warning!("vitrine", "cache-row purge: marking done: {e}");
+    }
 }
 
 fn now_secs() -> i64 {
