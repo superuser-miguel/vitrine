@@ -31,6 +31,9 @@
 # HISTORY.md is the internal narrative record (brief -> now: root causes,
 # reverts, open questions). Internal use only — deliberately not published.
 /HISTORY.md
+# Discussion material brought in from outside (e.g. the gallery-dl sidecar
+# handoff). Its prototype script and its index DB are NOT Vitrine's — never commit.
+/tests/Discussion/
 
 # --- Editors / OS ---
 *.swp
