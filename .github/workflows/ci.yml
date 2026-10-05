@@ -11,20 +11,27 @@ jobs:
   check:
     name: fmt + clippy + test + engine-purity
     runs-on: ubuntu-latest
+    # Ubuntu's GTK trails GNOME: 24.04 ships 4.14, and glycin's gdk4 support
+    # needs >= 4.16, so every push after 0.2.0 failed at gdk4-sys. Fedora
+    # tracks the GNOME 50 platform the Flatpak ships on.
+    container: registry.fedoraproject.org/fedora:44
     steps:
-      - uses: actions/checkout@v4
-
-      # System deps for the GTK app crate. The engine crate needs none.
+      # git first: actions/checkout falls back to a tarball without it, and
+      # `cargo tree` and friends are happier inside a real work tree.
       - name: Install GTK4 / libadwaita / blueprint
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-4-dev libadwaita-1-dev blueprint-compiler
+          dnf -y install gcc pkgconf-pkg-config git gtk4-devel libadwaita-devel \
+            blueprint-compiler gettext-devel rustup
 
+      - uses: actions/checkout@v4
+
+      # Pinned, not `stable`: a new clippy lint on a toolchain nobody develops
+      # with should not turn CI red overnight. Bump this deliberately, together
+      # with the local toolchain.
       - name: Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustup-init -y --profile minimal --default-toolchain 1.94.0 -c rustfmt -c clippy
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Cache cargo
         uses: actions/cache@v4
