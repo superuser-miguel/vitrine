@@ -85,3 +85,85 @@ Ordered roughly safest/most-modern → most-powerful/most-coupled:
 
 *No build scheduled — pairs with the tagging rethink when that turns into search
 work.*
+
+---
+
+## Sidecars → gallery: how downloaded metadata hooks into presentation
+
+*Captured 2026-08-04, out of the ArtistDownloadScripts hardening — "how does
+this all hook in with how the data is presented?"*
+
+### The capture contract (upstream, already live)
+
+The per-artist download scripts now guarantee: **every media file lands with a
+sidecar beside it** (gallery-dl `file.ext.json` for photos/tweets, yt-dlp
+`name.info.json` for videos), carrying the durable identity — platform ID,
+creator, **full caption**, source URL, post date. The filename is just an
+address: truncated to 150 bytes, ID-suffixed for uniqueness, never trusted to
+carry meaning. That split *is* the ingest contract, and it matches Vitrine's
+own identity model: rows are keyed by `content_hash`, so metadata follows the
+pixels through renames, USB migrations and reorganizations — the filename
+fragility defended against at download time stops mattering entirely once
+ingest happens. Sidecars persist on disk with zero loss, so ingest can wait
+indefinitely.
+
+### Ingest: one more enricher, two quarantined tables (the P2 plan)
+
+The scanner already ignores sidecars (extension whitelist) — invisible by
+design until P2. The real work is small: when indexing `photo.jpg`, also read
+the adjacent `photo.jpg.json` as **one more enricher on the existing
+background enrichment pass** (same machinery as the histogram; NULLS-LAST
+tolerance for late data already exists — no new architecture). It fills two
+hash-keyed tables:
+
+- **`sidecar_meta`** — creator, site, source URL, posted-at, plus the
+  *verbatim JSON* so nothing is ever lost to field-mapping choices.
+- **`sidecar_tags`** — kept **separate from curated `file_tags`**, so a rescan
+  can never fight hand edits and a booru-style 80-tag flood never pollutes the
+  small curated vocabulary. Promotion into real tags is always explicit.
+
+### Presentation: two tiers on surfaces that already exist
+
+- **Tier A — Properties sidebar** (where the histogram just went): a "Source"
+  section that only renders when data exists — creator, site, post date,
+  click-through to the original URL — plus read-only "Site tags" chips with a
+  per-chip **promote** button. Platform metadata is visible but quarantined
+  until blessed.
+- **Tier B — queries and smart collections**: creator/site/sidecar-tag
+  predicates in the query layer (builds directly on the structured-search →
+  saved-searches path above; the smart-collection engine already resolves
+  live). Yields auto-organizing "Artist: X" collections — new downloads just
+  *appear* in the right collection. The per-artist folder tree becomes
+  optional, because artist-ness lives in the data.
+- **Later, Lua (§16) as the policy layer**: auto-promotion rules writing
+  `file_tags.source='rule'` (revocable in bulk), creator normalization across
+  TikTok/X handles, sidecar-aware sort keys. Hand-promotion comes first;
+  repeated promotions become the rule engine's spec (the E1 lesson).
+
+### The same pattern, twice more
+
+- **Video Gallery app** (separate, future): the "TikTok webpage meets
+  Nautilus + gThumb" vision is *caption-forward* — feed shows video + full
+  caption + creator + date. Only possible because `.info.json` preserves the
+  full caption; the UI reads `title` from the sidecar, never the filename.
+  Duration/resolution/view counts come free. The sidecar captures happening
+  now are that app's entire data layer, banked years early — sources get
+  deleted; the sidecar is the copy that survives.
+- **Download ledger DB** (deferred, see Obsidian "Download Ledger DB - Future
+  Plan"): if built, `downloads.sqlite3` joins by platform ID against sidecar
+  IDs, adding *provenance* the sidecars don't have — when it was grabbed,
+  what's still blocked. Gallery shows the art; sidecars carry the art's
+  story; the ledger carries the story of collecting it.
+
+### Principles that fall out
+
+- **Filenames are addresses; sidecars are the record.** Anything that must
+  survive belongs in the JSON (or the DB), never in the name.
+- **Ingested platform data stays quarantined until promoted.** Curated tags
+  remain the user's; promotion is explicit (or rule-driven and revocable).
+- **Capture now, ingest whenever.** Sidecars on disk are the durable layer;
+  every downstream stage (P2 tables, Tier A/B UI, Video Gallery, ledger
+  joins) can land on its own schedule with zero data loss.
+
+*Sequencing: P2 ingest ships as its own clean build after v0.2.0's soak;
+Tier A before Tier B; Lua rules only after hand-promotion patterns emerge.*
