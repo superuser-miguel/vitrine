@@ -263,6 +263,13 @@ flatpak build-bundle repo-release Vitrine.flatpak io.github.superuser_miguel.Vit
   --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo
 ```
 
+### Releasing
+
+`build-aux/release.sh` holds the release checklist: `bump X.Y.Z` sets the
+version everywhere, `check [--full]` reports what still blocks a release
+(versions, vendored crates, signing, metainfo, manifest pin), `pin` points the
+release manifest at the new tag, and `steps` prints the remaining commands.
+
 ## Test fixtures
 
 `tests/fixtures/images/` holds tiny generated sample images used by engine
