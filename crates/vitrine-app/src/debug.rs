@@ -83,11 +83,16 @@ pub fn write(op: &str, rows: usize, queued: usize, accepted: bool) {
 }
 
 /// A drag was prepared on a grid cell. `hash=false` means the cell had no content
-/// hash yet, so the drag is silently refused — the item is not indexed (or not
-/// stamped) rather than the drag being broken.
-pub fn drag_prepare(hash: bool) {
+/// hash yet — the item is not indexed (or not stamped) rather than the drag being
+/// broken. `outcome` is what happened next: `ready` (it had a hash), `stamped` (a
+/// path lookup found it in the index and the drag goes ahead) or `refused` (not
+/// in the index; the user got a toast instead of nothing — V-05).
+pub fn drag_prepare(hash: bool, outcome: &str) {
     if enabled() {
-        eprintln!("VDBG-DRAG ms={} hash={hash}", since_start_ms());
+        eprintln!(
+            "VDBG-DRAG ms={} hash={hash} outcome={outcome}",
+            since_start_ms()
+        );
     }
 }
 

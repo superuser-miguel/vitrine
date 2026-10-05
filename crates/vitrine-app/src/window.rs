@@ -217,6 +217,9 @@ mod imp {
         pub scanning: Cell<bool>,
         /// Throttle for progressive re-stamping during a long scan.
         pub last_restamp: Cell<Option<std::time::Instant>>,
+        /// The last "can't drag this" toast, so repeated attempts replace it
+        /// instead of stacking a queue of identical toasts.
+        pub drag_toast: RefCell<Option<adw::Toast>>,
         /// The lazily-built "Duplicates" page + its content box (rebuilt per scan).
         pub duplicates_page: RefCell<Option<adw::NavigationPage>>,
         pub duplicates_content: RefCell<Option<gtk::Box>>,
@@ -371,6 +374,7 @@ mod imp {
                 navigating_back: Cell::new(false),
                 scanning: Cell::new(false),
                 last_restamp: Cell::new(None),
+                drag_toast: RefCell::new(None),
                 duplicates_page: RefCell::new(None),
                 duplicates_content: RefCell::new(None),
                 dedup_near: Cell::new(false),
@@ -1087,13 +1091,20 @@ impl VitrineWindow {
     fn build_factory(&self) -> gtk::SignalListItemFactory {
         let icon_px = self.icon_px();
         let cache = self.imp().thumb_cache.clone();
+        let on_missing: Rc<dyn Fn(&ImageObject) -> bool> = Rc::new(glib::clone!(
+            #[weak(rename_to = window)]
+            self,
+            #[upgrade_or]
+            false,
+            move |item: &ImageObject| window.stamp_for_drag(item)
+        ));
 
         let factory = gtk::SignalListItemFactory::new();
         factory.connect_setup(move |_, list_item| {
             let list_item = list_item.downcast_ref::<gtk::ListItem>().unwrap();
             let cell = VitrineGridCell::default();
             cell.set_icon_size(icon_px);
-            cell.add_drag_source();
+            cell.add_drag_source(on_missing.clone());
             list_item.set_child(Some(&cell));
         });
         factory.connect_bind(glib::clone!(
@@ -3208,6 +3219,40 @@ impl VitrineWindow {
         }
     }
 
+    /// A drag started on an item that carries no content hash yet (V-05).
+    ///
+    /// The index often already has it — the progressive restamp is throttled to
+    /// every few seconds, and an item bound before the scan reached it stays
+    /// unstamped until then. So look the one path up (read-only; the writer
+    /// stays the only writer) and stamp it: the drag then goes ahead. Only when
+    /// the index really doesn't know the file is the drag refused, with a toast
+    /// saying why instead of nothing at all.
+    fn stamp_for_drag(&self, item: &ImageObject) -> bool {
+        let record = item.file().path().and_then(|path| {
+            self.ensure_read_db();
+            let db = self.imp().read_db.borrow();
+            db.as_ref()?
+                .file_by_path(&path.to_string_lossy())
+                .ok()
+                .flatten()
+        });
+        match record {
+            Some(r) if !r.missing && !r.content_hash.is_empty() => {
+                item.set_content_hash(&r.content_hash);
+                true
+            }
+            _ => {
+                let message = drag_refused_message(self.imp().scanning.get());
+                let toast = adw::Toast::new(&message);
+                if let Some(old) = self.imp().drag_toast.replace(Some(toast.clone())) {
+                    old.dismiss();
+                }
+                self.imp().toast_overlay.add_toast(toast);
+                false
+            }
+        }
+    }
+
     /// Drop the whole selection (Escape, or a click on empty grid background).
     fn clear_selection(&self) {
         if let Some(selection) = self.imp().selection.borrow().as_ref() {
@@ -4720,6 +4765,17 @@ fn direction_id(descending: bool) -> &'static str {
     }
 }
 
+/// Why a grid drag was refused: the item isn't in the index. During a scan
+/// that is almost always "not *yet*", so say so rather than implying the
+/// image can never be dragged.
+fn drag_refused_message(scanning: bool) -> String {
+    if scanning {
+        gettextrs::gettext("Still indexing — try again in a moment")
+    } else {
+        gettextrs::gettext("This image isn't indexed, so it can't be dragged to a catalog")
+    }
+}
+
 /// The memo key identifying one item's script sort key.
 ///
 /// Path, not content hash — see the `script_keys` field comment: a hash
@@ -4916,4 +4972,20 @@ async fn collect_images(folder: &gio::File) -> Result<Vec<ImageObject>, glib::Er
             .cmp(&b.display_name().to_lowercase())
     });
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// V-05: a refused drag is never silent, and during a scan it says "not yet"
+    /// rather than "never".
+    #[test]
+    fn drag_refused_message_is_scan_aware() {
+        let scanning = drag_refused_message(true);
+        let idle = drag_refused_message(false);
+        assert!(scanning.contains("Still indexing"), "{scanning}");
+        assert!(idle.contains("isn't indexed"), "{idle}");
+        assert_ne!(scanning, idle);
+    }
 }

@@ -7,6 +7,8 @@
 //! rebound to item B (PLAN §8). We guard by comparing the cell's current item
 //! against the item the decode was started for before touching the picture.
 
+use std::rc::Rc;
+
 use gtk::glib;
 use gtk::prelude::*;
 use gtk::subclass::prelude::*;
@@ -146,7 +148,12 @@ impl VitrineGridCell {
 
     /// Add a drag source so this image can be dragged onto a catalog (the drag
     /// carries the current item's content hash). Called once per cell at setup.
-    pub fn add_drag_source(&self) {
+    ///
+    /// `on_missing` runs when the item has no hash yet — the scan hasn't reached
+    /// it, the restamp throttle hasn't caught up, or it was never indexed (V-05).
+    /// It may stamp the item and return true to let the drag start; false
+    /// refuses it, and the callback owns telling the user why.
+    pub fn add_drag_source(&self, on_missing: Rc<dyn Fn(&ImageObject) -> bool>) {
         let source = gtk::DragSource::new();
         source.set_actions(gtk::gdk::DragAction::COPY);
         // Capture phase, so the cell sees the press before the GridView's
@@ -162,11 +169,15 @@ impl VitrineGridCell {
             #[upgrade_or]
             None,
             move |_, _, _| {
-                let hash = cell.item()?.content_hash();
-                crate::debug::drag_prepare(!hash.is_empty());
-                if hash.is_empty() {
+                let item = cell.item()?;
+                let had_hash = !item.content_hash().is_empty();
+                if !had_hash && !on_missing(&item) {
+                    crate::debug::drag_prepare(false, "refused");
                     return None;
                 }
+                crate::debug::drag_prepare(had_hash, if had_hash { "ready" } else { "stamped" });
+                // Re-read: `on_missing` may have just stamped it.
+                let hash = item.content_hash();
                 Some(gtk::gdk::ContentProvider::for_value(&hash.to_value()))
             }
         ));

@@ -216,7 +216,24 @@ the next `TakeBatch`, so that backlog stays bounded.
 
 Not yet distinguished: **blocked** vs **dead** worker. Different fixes. V-03 settles it.
 
-### V-05 · Drag silently refuses when `content_hash` is empty · `CONFIRMED`
+### V-05 · Drag silently refuses when `content_hash` is empty · `CONFIRMED` · **FIXED (untested)**
+
+> **FIXED (untested) 2026-10-05 — look the path up at drag time, toast on a miss.**
+> `add_drag_source` now takes an `on_missing` callback (wired from
+> `build_factory` through a weak window ref → `stamp_for_drag`). When the item
+> has no hash, it does one read-only `file_by_path` on the window's read DB: a
+> hit stamps the hash onto the item and the drag starts; a miss refuses it with
+> a toast — "Still indexing — try again in a moment" while a scan runs,
+> otherwise "This image isn't indexed…" (`drag_refused_message`, unit-tested).
+> A repeat refusal replaces the toast rather than stacking. No DB writes; the
+> hash stays the identity. `VDBG-DRAG` gains `outcome=ready|stamped|refused`.
+> This covers the stamped-before-the-scan-reached-it and 3 s restamp-throttle
+> cases; a file the indexer never takes (symlink, skipped extension, GVFS path
+> with no local path) still can't be dragged, but now says so.
+> **Verification:** rebuild, `build-aux/debug-run.sh --interact`, open an
+> unindexed USB folder and drag immediately — expect `outcome=refused` + the
+> "Still indexing" toast, then a few seconds later (once the scan has hashed it)
+> the same drag gives `hash=false outcome=stamped` and lands.
 
 `grid_cell.rs:156` returns `None` from `connect_prepare` when the hash is empty —
 the drag simply never starts, with no feedback.
