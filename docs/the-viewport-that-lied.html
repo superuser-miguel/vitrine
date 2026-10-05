@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>The viewport that lied — Vitrine</title>
 <meta name="description" content="A months-old 'it feels sluggish, like it opens in the middle' in a GTK4/Rust image browser — chased through three rebuilds and one confidently wrong fix, then killed by a single line of instrumentation. The bug was the app inferring where you were looking from the wrong thing.">
+<meta property="og:type" content="article">
+<meta property="og:title" content="The viewport that lied">
+<meta property="og:description" content="A months-old 'it feels sluggish, like it opens in the middle' in a GTK4/Rust image browser — chased through three rebuilds and one confidently wrong fix, then killed by a single line of instrumentation. The bug was the app inferring where you were looking from the wrong thing.">
+<meta property="og:url" content="https://superuser-miguel.github.io/vitrine/the-viewport-that-lied.html">
+<meta property="og:site_name" content="Vitrine">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="The viewport that lied">
+<meta name="twitter:description" content="A months-old 'it feels sluggish, like it opens in the middle' in a GTK4/Rust image browser — chased through three rebuilds and one confidently wrong fix, then killed by a single line of instrumentation. The bug was the app inferring where you were looking from the wrong thing.">
 <style>
   :root {
     --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
@@ -37,7 +45,8 @@
   section:last-of-type { border-bottom: 0; }
 
   .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
-  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  .back { display: block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  .back a { text-decoration: none; }
   h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
   .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
   .meta { color: var(--muted); font-size: .88rem; margin: 0; }
@@ -90,7 +99,7 @@
 <body>
 
 <header class="hero wrap">
-  <a class="back" href="./">&larr; Vitrine</a>
+  <nav class="back"><a href="./">&larr; Vitrine</a> · <a href="blog/">Blog</a></nav>
   <h1>The viewport that lied</h1>
   <p class="lede">A months-old feeling — <em>opening a big folder is sluggish, like it
     starts in the middle</em> — in <a href="./">Vitrine</a>, a GTK4/Rust image browser.
@@ -312,13 +321,15 @@ fn viewport_center_position(&amp;self) -&gt; u32 {
 </section>
 
 <footer class="wrap">
-  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
-  <p><a href="blank-cells-warm-cache.html">Blank cells, warm cache</a>
-     · <a href="debugging-vitrine.html">Six bugs in an image browser</a>
+  <p><strong>Vitrine</strong> — GPL-3.0-or-later. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p>More from the blog: <a href="is-this-file-on-a-usb.html">Is this file on a USB?</a>
+     · <a href="blank-cells-warm-cache.html">Blank cells, warm cache</a>
      · <a href="duplicates-that-arent.html">The duplicate that was one file</a>
      · <a href="flatpak-document-portal.html">What the document portal actually does</a>
-     · <a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a>
-     · <a href="./">Project page</a></p>
+     · <a href="debugging-vitrine.html">Six bugs in an image browser</a></p>
+  <p><a href="blog/">All posts</a>
+     · <a href="./">Project page</a>
+     · <a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a></p>
 </footer>
 
 </body>

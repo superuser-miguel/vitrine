@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blank cells, warm cache — Vitrine</title>
 <meta name="description" content="After a hard fling in a GTK4/Rust image browser, the visible thumbnails stay blank for a minute while their decoded textures sit finished in the RAM cache. The culprit: a load queue capped at its newest 400 binds — and a virtualized grid that binds so far ahead of the viewport that the rows you're staring at are the oldest, and the first evicted.">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Blank cells, warm cache">
+<meta property="og:description" content="After a hard fling in a GTK4/Rust image browser, the visible thumbnails stay blank for a minute while their decoded textures sit finished in the RAM cache. The culprit: a load queue capped at its newest 400 binds — and a virtualized grid that binds so far ahead of the viewport that the rows you're staring at are the oldest, and the first evicted.">
+<meta property="og:url" content="https://superuser-miguel.github.io/vitrine/blank-cells-warm-cache.html">
+<meta property="og:site_name" content="Vitrine">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Blank cells, warm cache">
+<meta name="twitter:description" content="After a hard fling in a GTK4/Rust image browser, the visible thumbnails stay blank for a minute while their decoded textures sit finished in the RAM cache. The culprit: a load queue capped at its newest 400 binds — and a virtualized grid that binds so far ahead of the viewport that the rows you're staring at are the oldest, and the first evicted.">
 <style>
   :root {
     --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
@@ -37,7 +45,8 @@
   section:last-of-type { border-bottom: 0; }
 
   .hero { padding: 64px 0 30px; border-bottom: 1px solid var(--border); }
-  .back { display: inline-block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  .back { display: block; margin-bottom: 22px; font-size: .92rem; text-decoration: none; }
+  .back a { text-decoration: none; }
   h1 { font-size: 2.3rem; margin: 0 0 12px; letter-spacing: -.022em; line-height: 1.18; }
   .lede { color: var(--muted); font-size: 1.1rem; margin: 0 0 18px; }
   .meta { color: var(--muted); font-size: .88rem; margin: 0; }
@@ -90,7 +99,7 @@
 <body>
 
 <header class="hero wrap">
-  <a class="back" href="./">&larr; Vitrine</a>
+  <nav class="back"><a href="./">&larr; Vitrine</a> · <a href="blog/">Blog</a></nav>
   <h1>Blank cells, warm cache</h1>
   <p class="lede">Fling a folder of thousands hard, let go, and don't touch it — and in
     <a href="./">Vitrine</a> the whole screen of thumbnails stays <em>blank for a full
@@ -348,13 +357,15 @@ pending.insert(cell.id(), LoadRequest { position, cell });</code></pre>
 </section>
 
 <footer class="wrap">
-  <p><strong>Vitrine</strong> — GPL-3.0. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
-  <p><a href="the-viewport-that-lied.html">The viewport that lied</a>
-     · <a href="debugging-vitrine.html">Six bugs in an image browser</a>
+  <p><strong>Vitrine</strong> — GPL-3.0-or-later. Rust, GTK4, libadwaita, Blueprint, glycin, SQLite.</p>
+  <p>More from the blog: <a href="is-this-file-on-a-usb.html">Is this file on a USB?</a>
+     · <a href="the-viewport-that-lied.html">The viewport that lied</a>
      · <a href="duplicates-that-arent.html">The duplicate that was one file</a>
      · <a href="flatpak-document-portal.html">What the document portal actually does</a>
-     · <a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a>
-     · <a href="./">Project page</a></p>
+     · <a href="debugging-vitrine.html">Six bugs in an image browser</a></p>
+  <p><a href="blog/">All posts</a>
+     · <a href="./">Project page</a>
+     · <a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a></p>
 </footer>
 
 </body>

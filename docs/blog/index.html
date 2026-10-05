@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vitrine blog</title>
+<meta name="description" content="Engineering notes from Vitrine — a catalog-aware GTK4/Rust image browser for GNOME, shipped as a Flatpak.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Vitrine blog">
+<meta property="og:description" content="Engineering notes from a catalog-aware GTK4/Rust image browser: virtualized grids, Flatpak portals, and the bugs that hid in between.">
+<meta property="og:url" content="https://superuser-miguel.github.io/vitrine/blog/">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Vitrine blog">
+<meta name="twitter:description" content="Engineering notes from a catalog-aware GTK4/Rust image browser: virtualized grids, Flatpak portals, and the bugs that hid in between.">
+<style>
+  :root {
+    --bg:#f6f5fb; --surface:#fff; --text:#1b1826; --muted:#5c576b;
+    --border:#e6e2f0; --accent:#7c4dd6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#16131d; --surface:#1f1b29; --text:#ece8f5; --muted:#a89fbe;
+            --border:#2c2638; --accent:#a066e6; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+         font:17px/1.65 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif; }
+  .wrap { max-width:720px; margin:0 auto; padding:0 20px; }
+  header.top { padding:24px 0; border-bottom:1px solid var(--border); }
+  header.top a { color:var(--accent); text-decoration:none; font-weight:600; }
+  main { padding:40px 0 56px; }
+  h1 { font-size:2rem; letter-spacing:-.02em; margin:0 0 6px; }
+  .lede { color:var(--muted); margin:0 0 36px; }
+  .post { display:block; text-decoration:none; color:inherit; background:var(--surface);
+          border:1px solid var(--border); border-radius:14px; padding:20px 22px; margin:0 0 16px; }
+  .post:hover { border-color:var(--accent); }
+  .post h2 { margin:0 0 6px; font-size:1.2rem; color:var(--text); }
+  .post .date { color:var(--muted); font-size:.85rem; }
+  .post p { margin:.5rem 0 0; color:var(--muted); font-size:.97rem; }
+  code { background:color-mix(in srgb, var(--accent) 12%, transparent); padding:1px 6px; border-radius:6px; font-size:.92em; }
+  footer { border-top:1px solid var(--border); color:var(--muted); font-size:.9rem;
+           padding:24px 0 48px; }
+  footer a { color:var(--accent); }
+</style>
+</head>
+<body>
+
+<header class="top"><div class="wrap"><a href="../">← Vitrine</a></div></header>
+
+<main class="wrap">
+  <h1>Vitrine blog</h1>
+  <p class="lede">Engineering notes from a catalog-aware GTK4/Rust image browser — virtualized grids, Flatpak portals, and the bugs that hid in between.</p>
+
+  <a class="post" href="../is-this-file-on-a-usb.html">
+    <span class="date">2026-07-25 · Flatpak · portals</span>
+    <h2>Is this file on a USB?</h2>
+    <p>A slow external drive shouldn't re-decode its thumbnails every visit — but caching
+    them means knowing a file is on removable media, and inside a Flatpak sandbox
+    <code>/run/media</code> is invisible and the path is an opaque doc id. One extended
+    attribute answers it.</p>
+  </a>
+
+  <a class="post" href="../blank-cells-warm-cache.html">
+    <span class="date">2026-07-25 · GTK4 · virtualized lists</span>
+    <h2>Blank cells, warm cache</h2>
+    <p>Fling a big folder to a dead stop and the visible thumbnails stay blank for a
+    minute — while their decoded textures sit warm in the RAM cache the whole time.
+    A load queue capped at its newest 400, and a grid that binds so far ahead that the
+    rows you're staring at are the first evicted.</p>
+  </a>
+
+  <a class="post" href="../the-viewport-that-lied.html">
+    <span class="date">2026-07-23 · GTK4 · virtualized lists</span>
+    <h2>The viewport that lied</h2>
+    <p>A big folder that felt like it opened in the middle — three rebuilds and one
+    confidently wrong fix, ended by a single line of instrumentation. The loose end ran
+    down to a 60-line GTK reproducer: <code>32 × columns + 1</code>.</p>
+  </a>
+
+  <a class="post" href="../duplicates-that-arent.html">
+    <span class="date">2026-07-21 · SQLite · product design</span>
+    <h2>The duplicate that was one file</h2>
+    <p>Find Duplicates reported 41,727 duplicates that mostly weren't. Sandbox path
+    aliases, a trash button that lied, two five-minute experiments — and why
+    "duplicate" turned out to be a product decision with a one-field fix.</p>
+  </a>
+
+  <a class="post" href="../flatpak-document-portal.html">
+    <span class="date">2026-07-20 · Flatpak · D-Bus · FUSE</span>
+    <h2>What the document portal actually does</h2>
+    <p>A hands-on tour of Flatpak's document portal — the FUSE mount, the D-Bus
+    registry, directory grants, and the three states a sandboxed app has to tell
+    apart. With numbers from a real 193,000-file library.</p>
+  </a>
+
+  <a class="post" href="../debugging-vitrine.html">
+    <span class="date">2026-07-20 · debugging</span>
+    <h2>Six bugs in an image browser</h2>
+    <p>A debug log that couldn't see its own bugs, a tag menu that got slower the more
+    you used it, Flatpak portal paths that aren't paths — and the diagnoses that were
+    confidently wrong.</p>
+  </a>
+</main>
+
+<footer><div class="wrap">
+  <p><a href="../">Vitrine</a> · <a href="https://github.com/superuser-miguel/vitrine">GitHub</a></p>
+</div></footer>
+
+</body>
+</html>

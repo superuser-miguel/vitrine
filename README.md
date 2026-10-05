@@ -18,12 +18,33 @@ collections survive gallery-dl renames and moves.
 Rust · GTK4 · gtk-rs · libadwaita · Blueprint · glycin · SQLite · Flatpak.
 See [`PLAN.md`](PLAN.md) for the phased build plan.
 
-> **Status: v1 feature-complete.** Vitrine browses, views, indexes, reviews,
-> organizes, edits (non-destructively), and de-duplicates — all keyed to survive
-> renames. Builds via cargo,
-> Meson, and flatpak-builder; the engine ships 83 tests and stays UI-free.
-> Distributed as a Flatpak bundle via GitHub Releases, with the project page on
+> **Status: v0.3.0.** Vitrine browses, views, indexes, reviews, organizes,
+> edits (non-destructively), and de-duplicates — all keyed to survive renames.
+> Builds via cargo, Meson, and flatpak-builder; the engine stays UI-free.
+> Distributed from its own **signed Flatpak repo** (see [Install](#install)),
+> with the project page on
 > [GitHub Pages](https://superuser-miguel.github.io/vitrine/) — **not** Flathub.
+
+## What's new in 0.3.0
+
+- **Find by name** — press `Ctrl+F` or `/` and type: the grid narrows to fuzzy
+  matches on file name and path, best match first ("snst" finds `sunset.jpg`).
+- **Histogram** — luminance and RGB in the viewer's Image Properties panel.
+- **Thumbnails for USB and network drives are kept between sessions**, and
+  recognised by content, so they're reused even when the drive mounts somewhere
+  else.
+- **Sort orders as Lua scripts** — they appear under *From Scripts* in the Sort
+  By menu and re-sort the grid as you save. Starter scripts in
+  [`docs/scripts/`](docs/scripts/).
+- **Remove a tag from a whole selection** — an Add / Remove toggle in the grid's
+  Tag popover.
+- **Fixed:** the window tiles to half the screen again; thumbnails no longer stay
+  blank after a fast scroll; large folders decode what's on screen first; the
+  grid stops competing with the viewer while an image is open; very large images
+  no longer freeze the app while they're indexed.
+- **Automatic updates** — the first release on Vitrine's own signed update
+  channel. Coming from 0.1.0 or 0.2.0? See
+  [Moving from a bundle install](#moving-from-a-bundle-install-010-or-020).
 
 ## Features
 
@@ -31,20 +52,26 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
 - Virtualized `GtkGridView` — rubber-band / Ctrl / Shift selection, adjustable
   thumbnail size (Ctrl +/−, Ctrl+scroll), trash-to-recycle. Bounded RAM + disk
   caches keep memory flat on 27k-image folders; reuses GNOME's shared thumbnail
-  cache when it can.
+  cache when it can, and keeps a separate, persistent thumbnail cache for USB and
+  network drives that's reused across mounts by content.
 - **First-class AVIF / JXL / HEIF** (plus JPEG/PNG/WebP/…) via glycin — color-
   managed, EXIF-oriented, decoded in sandboxed subprocesses.
 - **Sidebar** — a gThumb-style switcher between **Places** (Nautilus-style
   bookmarks: rename, reorder by drag, remove; removable-media bookmarks show an
   **offline state** when the drive is disconnected), a lazy **Folders** tree, and
   **Collections**. Back / Forward navigation history.
-- **Nautilus-style sorting** — Name / Size / Modified / Type with an independent
-  ascending/descending toggle; instant, live, remembered across sessions.
+- **Nautilus-style sorting** — Name / Size / Modified / Type / Rating / Date
+  Taken with an independent ascending/descending toggle; instant, live,
+  remembered across sessions.
+- **Script sort orders** — any order you can write as a few lines of Lua, picked
+  from the Sort By menu and hot-reloaded as you edit. Drop scripts into
+  `~/.var/app/io.github.superuser_miguel.Vitrine/data/vitrine/scripts/`; see
+  [`docs/scripts/`](docs/scripts/) for five starters.
 
 **View**
 - Single-image viewer — fit / zoom / pan / 100%, arrow-key navigation, a synced
   filmstrip, and a **properties sidebar** (dimensions, size, format, date taken,
-  camera, orientation).
+  camera, orientation) with an optional **histogram** (luminance + RGB).
 
 **Edit (non-destructive)**
 - A **brush button** in the viewer opens an **edit card** (same slide-in as the
@@ -57,11 +84,13 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
 
 **Review & organize**
 - **Ratings** (0–5 stars, keyboard in the grid, star overlays on thumbnails),
-  **comments**, and **tags** (apply to a whole selection, autocomplete).
+  **comments**, and **tags** (add to or remove from a whole selection,
+  autocomplete).
 - **Collections** — hand-curated **catalogs** (drag images in, reorder) and
   **smart collections** (a saved filter that updates itself).
-- **Filter bar** — narrow the grid live by minimum rating or tag; save the
-  filter as a smart collection.
+- **Filter bar** — narrow the grid live by minimum rating or tag, and **fuzzy
+  find** by name and path (`Ctrl+F` or `/`); save the rating/tag filter as a
+  smart collection.
 
 **Find duplicates**
 - **Exact** (byte-identical) and **near** (perceptual-hash) clustering, with a
@@ -98,11 +127,13 @@ See [`PLAN.md`](PLAN.md) for the phased build plan.
 
 ## Roadmap
 
-v1 is feature-complete. See [`PLAN.md`](PLAN.md) for full specs.
+See [`PLAN.md`](PLAN.md) for full specs, and the
+[blog](https://superuser-miguel.github.io/vitrine/blog/) for the stories behind
+the hard parts.
 
-Recently shipped: a non-destructive edit tier (rotate / flip / crop), the
-decode-scheduling performance sprint (viewport-ordered, cost-aware loading;
-warm-cache-during-indexing), and a first cut of offline removable-media bookmarks.
+Recently shipped (0.3.0): fuzzy find, the histogram, the persistent removable /
+network thumbnail cache, Lua sort scripts, bulk tag removal, and the signed
+update channel.
 
 **Next up**
 
@@ -114,7 +145,8 @@ warm-cache-during-indexing), and a first cut of offline removable-media bookmark
 **Later**
 
 - **Navigation** — a Nautilus-style address bar and tabs (Back/Forward shipped).
-- **Lua scripting** — custom sort orders, batch ImageMagick ops, rename rules.
+- **More scripting** — batch ImageMagick operations and rename rules, on top of
+  the sort scripts that ship today.
 - **WASM compute plugins** — local auto-tagging and embedding-based "find
   similar", plus faces / OCR / quality scoring.
 - **In-file XMP embed** — write the packet directly into JPEG/PNG containers, on
@@ -122,21 +154,53 @@ warm-cache-during-indexing), and a first cut of offline removable-media bookmark
 
 ## Install
 
-**Not on Flathub** — Vitrine is distributed as a Flatpak **bundle via
-[GitHub Releases](https://github.com/superuser-miguel/vitrine/releases)**, with
-the project page on [GitHub Pages](https://superuser-miguel.github.io/vitrine/).
+**Not on Flathub** — Vitrine ships from its own **signed Flatpak repository**,
+with the project page on [GitHub Pages](https://superuser-miguel.github.io/vitrine/).
 
-Download `Vitrine.flatpak` from the
-[latest release](https://github.com/superuser-miguel/vitrine/releases/latest), then:
+### Recommended — the repository (gets `flatpak update`)
 
 ```sh
-flatpak install --user ./Vitrine.flatpak
+flatpak install --user https://superuser-miguel.github.io/vitrine-repo/vitrine.flatpakref
 flatpak run io.github.superuser_miguel.Vitrine
 ```
 
-The bundle references (does not include) the `org.gnome.Platform//50` runtime;
-`flatpak install` fetches it from Flathub if you don't have it. Bundles don't
-auto-update — grab a newer release and reinstall over it. Or build locally (below).
+That one command (or opening
+[`vitrine.flatpakref`](https://superuser-miguel.github.io/vitrine-repo/vitrine.flatpakref)
+in GNOME Software) adds the remote and installs the app, so new versions arrive
+with a normal `flatpak update`. The remote is GPG-signed; flatpak verifies every
+pull against the key embedded in the `.flatpakref`.
+
+### Alternative — the standalone bundle
+
+A `Vitrine.flatpak` bundle is also published on
+[GitHub Releases](https://github.com/superuser-miguel/vitrine/releases/latest)
+for offline or air-gapped installs:
+
+```sh
+flatpak install --user ./Vitrine.flatpak
+```
+
+> A bundle install has **no origin to pull from**, so `flatpak update` cannot
+> upgrade it — moving versions means downloading the next bundle by hand. Prefer
+> the repository unless you specifically need a single offline file.
+
+Either way you need the GNOME 50 runtime; `flatpak install` fetches
+`org.gnome.Platform//50` from Flathub if you don't have it.
+
+### Moving from a bundle install (0.1.0 or 0.2.0)
+
+Vitrine 0.1.0 and 0.2.0 were published only as bundles, so those installs will
+never update on their own. Switch to the repository once:
+
+```sh
+flatpak uninstall --user io.github.superuser_miguel.Vitrine
+flatpak install --user https://superuser-miguel.github.io/vitrine-repo/vitrine.flatpakref
+```
+
+Your index, tags, ratings, comments, collections, bookmarks, scripts and
+settings are kept: they live in `~/.var/app/io.github.superuser_miguel.Vitrine/`,
+which a plain `flatpak uninstall` leaves alone (don't add `--delete-data`).
+After that, `flatpak update` keeps you current.
 
 ## Layout
 

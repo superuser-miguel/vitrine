@@ -86,6 +86,7 @@
         padding: 14px 16px; overflow-x: auto; font-size: .9rem; }
   code { background: color-mix(in srgb, var(--accent) 12%, transparent); padding: 1px 6px; border-radius: 6px; }
   pre code { background: none; padding: 0; }
+  p code, li code { overflow-wrap: anywhere; }
 
   .shot { display: block; width: 100%; max-width: 860px; margin: 34px auto 0;
           border-radius: 14px; border: 1px solid var(--border);
@@ -200,38 +201,69 @@
   </div>
 </section>
 
+<section class="wrap" id="install">
+  <h2>Install</h2>
+  <p class="sub">Not on Flathub — Vitrine ships from its own signed Flatpak repo. The GNOME 50 runtime comes from Flathub automatically.</p>
+
+  <h3 class="step">Recommended — the signed repo (gets <code>flatpak update</code>)</h3>
+  <pre><code>flatpak install --user https://superuser-miguel.github.io/vitrine-repo/vitrine.flatpakref
+flatpak run io.github.superuser_miguel.Vitrine</code></pre>
+  <p>Or open <a href="https://superuser-miguel.github.io/vitrine-repo/vitrine.flatpakref"><code>vitrine.flatpakref</code></a> with GNOME Software. Either way, one step adds the remote and installs the app, so new versions arrive with a normal <code>flatpak update</code> — or GNOME Software's updates. The repo is GPG-signed, and flatpak checks every update against the key embedded in the <code>.flatpakref</code>.</p>
+
+  <h3 class="step">Alternative — the offline bundle</h3>
+  <p>A <code>Vitrine.flatpak</code> bundle is also attached to the <a href="https://github.com/superuser-miguel/vitrine/releases/latest">latest GitHub release</a>, for offline or air-gapped installs:</p>
+  <pre><code>flatpak install --user ./Vitrine.flatpak</code></pre>
+  <p class="sub" style="margin:0">A bundle has no origin to pull from, so <code>flatpak update</code> can't upgrade it — moving to a newer version means downloading the next bundle by hand. Prefer the repo unless you specifically need a single offline file.</p>
+
+  <div class="callout">
+    <p><strong>Installed 0.1.0 or 0.2.0?</strong> Those came as bundles, so they'll never update on their own. Switch to the repo once:</p>
+    <pre><code>flatpak uninstall --user io.github.superuser_miguel.Vitrine
+flatpak install --user https://superuser-miguel.github.io/vitrine-repo/vitrine.flatpakref</code></pre>
+    <p>Your index, tags, ratings, comments, collections, bookmarks, scripts and settings are kept: they live in <code>~/.var/app/io.github.superuser_miguel.Vitrine/</code>, which a plain uninstall leaves alone (just don't add <code>--delete-data</code>). From then on, <code>flatpak update</code> keeps you current.</p>
+  </div>
+</section>
+
 <section class="wrap">
   <h2>Roadmap</h2>
-  <p class="sub">v1 shipped. Next up:</p>
+  <p class="sub">Honest about where it's headed. <strong>v0.3.0 is out now.</strong> (The stories behind the hard parts are in <a href="blog/">the Vitrine blog</a>.)</p>
+
+  <h3 class="step">Shipped in 0.3.0 — find, measure, and remember</h3>
+  <ul class="road">
+    <li class="done"><b>Fuzzy find</b> — by name and path, from the filter bar, ranked best match first.</li>
+    <li class="done"><b>Histogram</b> — luminance and RGB in Image Properties.</li>
+    <li class="done"><b>Thumbnails for removable drives</b> — kept between sessions, recognised by content across mounts. <a href="is-this-file-on-a-usb.html">How it knows a file is on a USB →</a></li>
+    <li class="done"><b>Lua sort scripts</b> — custom orders in the Sort By menu, reloaded live, with starter scripts.</li>
+    <li class="done"><b>Bulk tag removal</b> — an Add / Remove toggle in the grid's Tag popover.</li>
+    <li class="done"><b>Smoother under load</b> — no blank cells after a fling, visible thumbnails first on cold opens, the grid standing down while the viewer is up. <a href="blank-cells-warm-cache.html">Blank cells →</a> · <a href="the-viewport-that-lied.html">Decode order →</a></li>
+    <li class="done"><b>Signed update channel</b> — install once from the <code>.flatpakref</code>; updates arrive with <code>flatpak update</code>.</li>
+  </ul>
+
+  <h3 class="step">Shipped in 0.1 and 0.2</h3>
   <ul class="road">
     <li class="done"><b>Browse · view · index</b> — grid, viewer, filmstrip, content-hash catalog.</li>
     <li class="done"><b>Review &amp; organize</b> — ratings, comments, tags, collections, filter bar.</li>
-    <li class="done"><b>Find duplicates</b> — exact and perceptual-hash clustering.</li>
+    <li class="done"><b>Find duplicates</b> — exact and perceptual-hash clustering, scoped to the open folder.</li>
     <li class="done"><b>Navigation</b> — switchable sidebar, bookmarks, folder tree, Back/Forward.</li>
     <li class="done"><b>XMP sidecar export</b> — ratings/comments/tags out to <code>.xmp</code> for other tools.</li>
     <li class="done"><b>Edit tier</b> — non-destructive rotate / flip / crop with undo/redo and Save / Save As.</li>
     <li class="done"><b>Decode-scheduling performance</b> — viewport-ordered, cost-aware thumbnail loading.</li>
     <li class="done"><b>Removable-media bookmarks</b> — offline state for USB drives that come and go.</li>
+  </ul>
+
+  <h3 class="step">Later</h3>
+  <ul class="road">
     <li><b>Viewer pan</b> — grab-hand click-drag panning for zoomed-in / large images.</li>
     <li><b>Deeper editing</b> — resize / straighten and GPU-accelerated adjustments.</li>
     <li><b>More navigation</b> — address bar and tabs.</li>
-    <li><b>Lua scripting</b> — custom sort orders, batch ImageMagick, rename rules.</li>
+    <li><b>More scripting</b> — batch ImageMagick operations and rename rules, on top of the sort scripts that ship today.</li>
     <li><b>WASM plugins</b> — local auto-tagging and embedding-based "find similar".</li>
     <li><b>In-file XMP embed</b> — write the packet directly into JPEG/PNG containers.</li>
   </ul>
 </section>
 
-<section class="wrap">
-  <h2>Install</h2>
-  <p class="sub">A Flatpak bundle on GitHub Releases — not Flathub. The GNOME runtime comes from Flathub automatically.</p>
-  <pre><code># Download Vitrine.flatpak from the latest release, then:
-flatpak install --user ./Vitrine.flatpak
-flatpak run io.github.superuser_miguel.Vitrine</code></pre>
-</section>
-
-<section class="wrap">
+<section class="wrap" id="writing">
   <h2>Writing</h2>
-  <p class="sub">Notes from building it.</p>
+  <p class="sub">Notes from building it — newest first. <a href="blog/">All posts →</a></p>
   <div class="grid">
     <div class="card">
       <h3><a href="is-this-file-on-a-usb.html">Is this file on a USB?</a></h3>
@@ -277,7 +309,7 @@ flatpak run io.github.superuser_miguel.Vitrine</code></pre>
 
 <section class="wrap">
   <h2>Build &amp; run</h2>
-  <p class="sub">GNOME 48+ · a Rust toolchain · <code>blueprint-compiler</code>.</p>
+  <p class="sub">Flatpak: the GNOME 50 SDK. Host builds: GTK4, libadwaita, a Rust toolchain and <code>blueprint-compiler</code>. Details in the <a href="https://github.com/superuser-miguel/vitrine#build--run">README</a>.</p>
   <pre><code># Flatpak (recommended)
 flatpak-builder --user --install --force-clean build-dir \
   build-aux/io.github.superuser_miguel.Vitrine.yml
@@ -289,8 +321,8 @@ cargo run -p vitrine-app</code></pre>
 
 <footer class="wrap">
   <section>
-    <p><strong>Vitrine</strong> — GPL-3.0. Built with Rust, GTK4, libadwaita, Blueprint, glycin, and SQLite.</p>
-    <p><a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a></p>
+    <p><strong>Vitrine</strong> is free software, <strong>GPL-3.0-or-later</strong>. Built with Rust, GTK4, libadwaita, Blueprint, glycin, and SQLite.</p>
+    <p><a href="https://github.com/superuser-miguel/vitrine">github.com/superuser-miguel/vitrine</a> · <a href="blog/">Blog</a> · <a href="https://github.com/superuser-miguel/vitrine/releases">Releases</a></p>
   </section>
 </footer>
 
