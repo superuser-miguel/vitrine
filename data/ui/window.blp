@@ -93,6 +93,21 @@ template $VitrineWindow: Adw.ApplicationWindow {
   width-request: 360;
   height-request: 240;
 
+  // V-29. Without a breakpoint an AdwNavigationSplitView never collapses, so
+  // the window's minimum width is permanently sidebar + content. Shipped 0.2.0
+  // reported `set_min_size(1021, 240)` over the Wayland protocol — wider than
+  // half of a 1920px screen, so the compositor refused to tile the window at
+  // all. Fullscreen still worked, because it ignores minimum sizes; that
+  // asymmetry is what "snapping left/right does nothing" actually was.
+  // 800sp keeps the uncollapsed layout clear of its own ~770px minimum.
+  Adw.Breakpoint {
+    condition ("max-width: 800sp")
+
+    setters {
+      split_view.collapsed: true;
+    }
+  }
+
   content: Adw.NavigationSplitView split_view {
     max-sidebar-width: 260;
 
@@ -324,9 +339,15 @@ template $VitrineWindow: Adw.ApplicationWindow {
                   "toolbar",
                 ]
 
+                // V-29: `width-request` here is a *hard floor* on the whole
+                // window — GtkRevealer's slide-down transition collapses height
+                // only, so this row constrains the width even while the filter
+                // bar is hidden. A fixed 240 here cost 254px of window minimum
+                // and broke tiling. Expanding instead gives the entry the row's
+                // slack when there's room and lets it shrink when there isn't.
                 Gtk.SearchEntry search_entry {
                   placeholder-text: _("Find by name…");
-                  width-request: 240;
+                  hexpand: true;
                 }
 
                 Gtk.Label {
@@ -347,7 +368,6 @@ template $VitrineWindow: Adw.ApplicationWindow {
                 }
 
                 Gtk.DropDown tag_filter {
-                  hexpand: true;
                   halign: start;
                 }
 

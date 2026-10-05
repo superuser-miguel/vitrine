@@ -757,6 +757,63 @@ collections / bookmarks) and relates to [tag UX: V-09 remove-tag, V-11 filter].
 
 ---
 
+### V-29 · The window cannot be tiled left/right — fullscreen works · `MEASURED` (2026-08-01, Wayland protocol A/B) · **FIXED — verified in use** (user, 2026-10-05: half-screen tiling works, has for a while)
+
+Reported in use (user, 2026-08-01): snapping to the left/right half of the
+screen does nothing; fullscreen is fine. It matters because half-screen tiling
+is how you drag-and-drop between Vitrine and a file manager.
+
+A compositor will not tile a window whose **minimum** width exceeds the
+half-tile it is asked to occupy — it refuses silently, so Super+←/→ and
+drag-to-edge appear dead. Fullscreen is unaffected because it ignores minimum
+sizes. That asymmetry *is* the diagnosis.
+
+Measured off the Wayland protocol (`WAYLAND_DEBUG=1`, reading
+`xdg_toplevel.set_min_size`), 1920px screen → 960px half-tile:
+
+| build | `set_min_size` | tiles at 960? |
+|---|---|---|
+| installed 0.2.0 (shipped) | **1021 × 240** | no — 61px over |
+| after this fix | **360 × 240** | yes |
+
+Two causes, both in `data/ui/window.blp`, and both invisible in a diff:
+
+1. **No `Adw.Breakpoint` anywhere in the file.** An `AdwNavigationSplitView`
+   never collapses without one, so `min-sidebar-width` (180, the default — the
+   blp only sets *max*) is permanently added to the window's minimum.
+2. **`width-request: 240` on `search_entry`**, added by `bc777e5` (V-11 cut 1,
+   2026-07-24 01:39). `GtkRevealer`'s slide-down transition collapses **height
+   only**, so the hidden filter bar still imposes its full width — that one
+   property cost **+254px** of window minimum against **184px** of headroom.
+
+**Why it looked sudden.** It broke on 2026-07-24 and surfaced ~a week later.
+A running window keeps the size constraints of the binary it started from, and
+the user had not logged out in days — the successfully-tiled window was a
+process from before the 2026-07-25 rebuild. The logout swapped the binary and
+the regression arrived all at once. Worth remembering when triaging "it worked
+yesterday": **the running app is not necessarily the installed app.**
+
+> **Fixed 2026-08-01:** an `Adw.Breakpoint` at `max-width: 800sp` setting
+> `split_view.collapsed: true` (800 keeps the uncollapsed layout above its own
+> ~776px minimum), and the search entry swapped from `width-request: 240` to
+> `hexpand: true` — it claims the row's slack when there is room instead of
+> demanding it always. `tag_filter` gave up `hexpand` so the slack lands on the
+> entry. Either change alone clears 960; together the minimum is 360px and the
+> window is properly adaptive.
+>
+> **Guard:** `crates/vitrine-app/tests/window_min_width.rs` (in `cargo test
+> --all`) asserts the breakpoint exists and that the filter bar declares no more
+> than 120px of `width-request`. Both checks were confirmed to **fail** against
+> the reintroduced regression before being kept. Static, so it catches a hard
+> floor written into the markup — not a widget whose natural minimum is large on
+> its own.
+>
+> **Re-test:** rebuild, **restart the app** (a running instance keeps the old
+> constraints), then Super+← and Super+→. The window should take exactly half
+> the screen; dragging to a screen edge should tile too.
+
+---
+
 ## Tier 4 — Open questions.
 
 ### V-15 · `Adwaita-CRITICAL: Page 'Viewer' is not in the navigation stack` · `CONFIRMED` · **FIXED — verified in use** (0 CRITICAL across 4 runs)
