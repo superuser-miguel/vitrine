@@ -14,6 +14,8 @@
 /repo/
 /repo-release/
 /build-dir-release/
+# publish-repo.sh scratch (must not be /tmp: tmpfs breaks flatpak-builder)
+/.publish-tmp.*
 *.flatpak
 
 # --- Debug logs ---
