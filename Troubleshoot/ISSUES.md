@@ -3,6 +3,10 @@
 Derived from `vitrine-debug.log` (run of 2026-07-20 01:36), `Observations.md`, and
 direct code/DB verification on 2026-07-20.
 
+> **Logs cited below** (`vitrine-debug_*.log`, `vitrine-soak*.log`, …) were
+> compressed on 2026-10-05 into `Troubleshoot/debug-logs-2026-07.tar.xz` (local,
+> not in git). `tar -xJf` it in `Troubleshoot/` to read them again.
+
 **Evidence key**
 - `MEASURED` — reproduced with numbers against the live 92MB index.
 - `CONFIRMED` — read directly in the source; mechanism is unambiguous.

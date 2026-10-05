@@ -23,6 +23,8 @@
 # regenerable and large (a single --cold run reached 4.3MB), so the register and
 # any hand-written notes are tracked but the raw logs are not.
 /Troubleshoot/*.log
+# Older logs are compressed in place (tar.xz) to save space; same rule.
+/Troubleshoot/*.tar.xz
 
 # --- Blueprint ---
 # Compiled *.ui XML is a build artifact generated into the build dir, never in-tree.
