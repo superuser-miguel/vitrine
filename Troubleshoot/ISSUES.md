@@ -507,7 +507,7 @@ so the cell requests were gone before the queue was built, not dropped later.
 
 ## Tier 3 — UI/UX. Observed in use.
 
-### V-18 · No gesture clears a selection · `CONFIRMED` · **FIXED (untested)**
+### V-18 · No gesture clears a selection · `CONFIRMED` · **FIXED — verified in use** (user, 2026-10-05: works, has for a while)
 
 `GtkGridView` only clears a selection when another item is picked, so a
 multi-selection could only be undone by selecting a single image — there was no
@@ -631,7 +631,7 @@ inside it.
 > after a rebuild; if STILL solid, next step is `GTK_DEBUG=interactive` and
 > reading the child node's computed style — stop guessing from screenshots.
 
-### V-20 · A collection view doesn't refresh when it gains members · `CONFIRMED` · **FIXED (untested)**
+### V-20 · A collection view doesn't refresh when it gains members · `CONFIRMED` · **FIXED — verified in use** (user, 2026-10-05: works, has for a while)
 
 Dropping onto the catalog you are currently viewing wrote to the index but left
 the grid alone — the images only appeared after navigating away and back. A
@@ -728,7 +728,7 @@ Engine has a `Query` struct to extend. FTS5 if it needs to scale.
 
 `date_taken` is already indexed (`idx_files_date`), so Date Taken is close to free.
 
-### V-13 · No Clear / Home button · `OBSERVED` · **FIXED (untested)**
+### V-13 · No Clear / Home button · `OBSERVED` · **FIXED — verified in use** (user, 2026-10-05: works, has for a while)
 
 > **2026-07-20.** `home_button` (`go-home-symbolic`) beside Back/Forward,
 > insensitive until something is open. There was no route back to "No Folder
