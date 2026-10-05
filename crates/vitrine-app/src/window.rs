@@ -131,6 +131,15 @@ const ENUMERATE_ATTRS: &str = "standard::name,standard::display-name,standard::c
 const ICON_SIZES: &[u32] = &[128, 176, 240, 320, 448, 640];
 /// Default icon-size index into `ICON_SIZES`.
 const DEFAULT_ICON: usize = 2;
+
+/// The `ICON_SIZES` step closest to a remembered pixel size (ties go to the
+/// smaller step). Settings store pixels, so a later change to the list lands
+/// people on the nearest size rather than whatever now sits at their old index.
+fn nearest_icon_index(px: u32) -> usize {
+    (0..ICON_SIZES.len())
+        .min_by_key(|&i| ICON_SIZES[i].abs_diff(px))
+        .unwrap_or(DEFAULT_ICON)
+}
 /// Never show more than this many columns, however wide the window / small the
 /// icons (user preference: more than this is useless).
 const MAX_COLUMNS: u32 = 7;
@@ -488,6 +497,11 @@ impl VitrineWindow {
     fn setup_grid(&self) {
         let imp = self.imp();
 
+        // Restore the remembered icon size before the first factory is built,
+        // so the grid never flashes at the default size first.
+        if let Some(px) = crate::settings::Settings::load().icon_px() {
+            imp.icon_index.set(nearest_icon_index(px));
+        }
         // Dev aid: VITRINE_ICON=<index> sets the initial icon-size level.
         if let Some(idx) = std::env::var("VITRINE_ICON")
             .ok()
@@ -675,6 +689,8 @@ impl VitrineWindow {
             self,
             move |_| window.change_icon(1)
         ));
+        // A restored size may sit at either end of the range.
+        self.update_icon_buttons();
     }
 
     /// (Re)start the debounce that flushes queued thumbnail loads. Every cell
@@ -1157,6 +1173,7 @@ impl VitrineWindow {
         }
         imp.icon_index.set(new as usize);
         self.apply_icon_size();
+        crate::settings::Settings::load().set_icon_px(self.icon_px());
     }
 
     fn reset_icon(&self) {
@@ -1164,16 +1181,22 @@ impl VitrineWindow {
         if imp.icon_index.get() != DEFAULT_ICON {
             imp.icon_index.set(DEFAULT_ICON);
             self.apply_icon_size();
+            crate::settings::Settings::load().set_icon_px(self.icon_px());
         }
     }
 
     /// Rebuild the grid factory at the current icon size (recreates visible
     /// cells) and update the +/- buttons' sensitivity.
     fn apply_icon_size(&self) {
-        let imp = self.imp();
-        if let Some(grid_view) = imp.grid_view.borrow().as_ref() {
+        if let Some(grid_view) = self.imp().grid_view.borrow().as_ref() {
             grid_view.set_factory(Some(&self.build_factory()));
         }
+        self.update_icon_buttons();
+    }
+
+    /// Grey out +/- at the ends of the size range.
+    fn update_icon_buttons(&self) {
+        let imp = self.imp();
         let idx = imp.icon_index.get();
         imp.icon_smaller.set_sensitive(idx > 0);
         imp.icon_larger.set_sensitive(idx < ICON_SIZES.len() - 1);
@@ -4987,5 +5010,22 @@ mod tests {
         assert!(scanning.contains("Still indexing"), "{scanning}");
         assert!(idle.contains("isn't indexed"), "{idle}");
         assert_ne!(scanning, idle);
+    }
+
+    /// A remembered pixel size snaps to the nearest step; exact sizes round-trip.
+    #[test]
+    fn nearest_icon_index_snaps() {
+        for (i, &px) in ICON_SIZES.iter().enumerate() {
+            assert_eq!(nearest_icon_index(px), i, "exact {px}");
+        }
+        assert_eq!(nearest_icon_index(0), 0, "below the range");
+        assert_eq!(nearest_icon_index(10_000), ICON_SIZES.len() - 1, "above");
+        assert_eq!(nearest_icon_index(200), 1, "176 is closer than 240");
+        assert_eq!(nearest_icon_index(230), 2, "240 is closer than 176");
+        assert_eq!(
+            nearest_icon_index(152),
+            0,
+            "tie between 128/176 goes smaller"
+        );
     }
 }

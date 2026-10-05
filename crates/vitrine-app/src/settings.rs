@@ -23,6 +23,8 @@ const GROUP_SORT: &str = "Sort";
 const KEY_SORT_FIELD: &str = "field";
 const KEY_SORT_DESC: &str = "descending";
 const GROUP_BOOKMARKS: &str = "Bookmarks";
+const GROUP_GRID: &str = "Grid";
+const KEY_ICON_PX: &str = "icon-size";
 
 /// Default thumbnail-cache budget (MB) — matches the historical prune default.
 pub const DEFAULT_CACHE_MB: u64 = 8192;
@@ -177,6 +179,22 @@ impl Settings {
     pub fn set_sort_descending(&self, descending: bool) {
         self.key_file
             .set_boolean(GROUP_SORT, KEY_SORT_DESC, descending);
+        self.save();
+    }
+
+    /// The remembered grid thumbnail size in pixels, or `None` if never set.
+    /// Stored as pixels, not a step index, so changing the size list later
+    /// doesn't remap anyone's choice — the window snaps it to the nearest step.
+    pub fn icon_px(&self) -> Option<u32> {
+        self.key_file
+            .uint64(GROUP_GRID, KEY_ICON_PX)
+            .ok()
+            .and_then(|px| u32::try_from(px).ok())
+    }
+
+    pub fn set_icon_px(&self, px: u32) {
+        self.key_file
+            .set_uint64(GROUP_GRID, KEY_ICON_PX, u64::from(px));
         self.save();
     }
 
