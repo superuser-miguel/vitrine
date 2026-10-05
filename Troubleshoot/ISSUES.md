@@ -526,6 +526,41 @@ so the cell requests were gone before the queue was built, not dropped later.
 
 ---
 
+### V-30 · Vitrine's "private" thumbnail cache was GNOME's shared cache · `MEASURED` (2026-10-05, inside the sandbox) · **FIXED (untested)**
+
+`private_dir()` was `glib::user_cache_dir().join("thumbnails")`. Under Flatpak
+that is `~/.var/app/io.github.superuser_miguel.Vitrine/cache/thumbnails` — and
+the manifest's `--filesystem=xdg-cache/thumbnails:create` makes Flatpak
+bind-mount the host's `~/.cache/thumbnails` **there too** (an `xdg-cache/<dir>`
+grant is exposed at both the host path and the app's own `$XDG_CACHE_HOME`).
+Listed from inside the sandbox, both paths showed the same **147,520 files**.
+
+Consequences, all silent:
+- **No private tier existed.** `x-large`/`xx-large` grid thumbnails went into
+  GNOME's cache, which is not ours to grow.
+- **Every local thumbnail was written twice to the same file** (`roots_for`
+  compared the two *paths*, which differ; the directories are one).
+- **`prune_private_cache()` LRU-prunes GNOME's shared cache** down to the
+  user's `thumbnail-mb` budget, at launch and on Preferences close. Set to
+  16,384 MB against a ~9.8 GB cache, so it had **not fired yet** — it would have
+  started evicting Nautilus's thumbnails the day the cache crossed 16 GB.
+
+> **Fixed 2026-10-05 (untested in the app):** private tier moved to
+> `$XDG_CACHE_HOME/vitrine-thumbnails` (no grant covers that name). The shared
+> cache receives only `normal`/`large`, and only for real host paths; a local
+> thumbnail is written once (shared at those sizes, private otherwise). The
+> prune refuses any dir that is the shared cache by device + inode — a path
+> comparison could not have caught the bind mount. Reads still try the shared
+> cache first, so existing `x-large`/`xx-large` thumbnails there keep hitting.
+>
+> **Re-test (rebuild first):** inside the sandbox, `ls` the new
+> `~/.var/app/…/cache/vitrine-thumbnails/` after browsing at the largest icon
+> size — files appear there, and `~/.cache/thumbnails/x-large` stops growing.
+> Thumbnail load times should be unchanged (`VDBG` hit rate the same on a warm
+> folder).
+
+---
+
 ## Tier 3 — UI/UX. Observed in use.
 
 ### V-18 · No gesture clears a selection · `CONFIRMED` · **FIXED — verified in use** (user, 2026-10-05: works, has for a while)

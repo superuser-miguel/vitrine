@@ -132,7 +132,9 @@ fn cache_group(dialog: &adw::PreferencesDialog) -> adw::PreferencesGroup {
     let adjustment = gtk::Adjustment::new(mb as f64, 128.0, 65536.0, 128.0, 512.0, 0.0);
     let row = adw::SpinRow::builder()
         .title(gettextrs::gettext("Thumbnail Cache"))
-        .subtitle(gettextrs::gettext("Maximum size on disk (MB)"))
+        .subtitle(gettextrs::gettext(
+            "Maximum size of Vitrine’s own cache (MB)",
+        ))
         .adjustment(&adjustment)
         .build();
     adjustment.connect_value_changed(|adj| {

@@ -1,20 +1,35 @@
-//! Thumbnail loading: shared freedesktop cache first, glycin on a miss.
+//! Thumbnail loading: our caches and GNOME's, glycin on a miss.
 //!
-//! Load order (PLAN task 3), fastest first:
-//!  1. **Shared cache** (`~/.cache/thumbnails/…`). Inside Flatpak the
-//!     `xdg-cache/thumbnails` grant maps this to the host's cache, so we reuse
-//!     the thumbnails Nautilus/GNOME already generated — no decode at all.
-//!  2. **App-private cache** (`$XDG_CACHE_HOME/thumbnails/…`) — where our own
-//!     decodes are stored.
-//!  3. **glycin decode** (concurrency-gated) + CPU downscale on a worker thread, then written to
-//!     the app-private cache.
+//! The disk tiers, in load order (fastest first; the RAM `SizedLru` sits above
+//! all of them):
+//!  1. **Content tier** (`$XDG_CACHE_HOME/content-thumbnails/…`), keyed by the
+//!     BLAKE3 content hash — read by the grid before [`load`] (PLAN §16.5,
+//!     Flavor 2).
+//!  2. **Removable tier** (`$XDG_CACHE_HOME/removable-thumbnails/…`) — for
+//!     USB/network sources only, separately budgeted (Flavor 1).
+//!  3. **GNOME's shared cache** (`~/.cache/thumbnails/…`, the host's, via the
+//!     `xdg-cache/thumbnails` grant) — reuses what Nautilus already generated.
+//!     **Not ours:** we read it and never touch it, add only the spec's standard
+//!     `normal`/`large` sizes to it, and never prune it.
+//!  4. **Vitrine's private cache** (`$XDG_CACHE_HOME/vitrine-thumbnails/…`) —
+//!     our own decodes that don't belong in the shared cache (`x-large`,
+//!     `xx-large`, portal paths), LRU-pruned to the user's budget.
+//!  5. **glycin decode** (concurrency-gated) + CPU downscale on a worker thread,
+//!     then written to *one* of the URI tiers (see [`roots_for`]).
+//!
+//! **V-30:** the private tier used to be `$XDG_CACHE_HOME/thumbnails`. A
+//! Flatpak `xdg-cache/<subdir>` grant also bind-mounts the host dir over the
+//! app's own `$XDG_CACHE_HOME/<subdir>`, so that path *was* GNOME's cache:
+//! there was no private tier, every thumbnail was written twice to one file,
+//! and the budget prune ran on GNOME's cache. The private dir is now a name no
+//! grant covers.
 //!
 //! **§4 RISK, resolved:** cache keys are the MD5 of the file *URI*. Real paths
 //! (e.g. under `xdg-pictures`) present the same URI inside the sandbox as on the
 //! host, so shared-cache hits work. Document-portal paths do not match the host
 //! URI, so we only ever *read* the shared cache (a harmless miss for those) and
-//! *write* to the app-private cache — never polluting the shared cache with keys
-//! the host can't reproduce.
+//! *write* them to the private cache — never polluting the shared cache with
+//! keys the host can't reproduce.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -81,9 +96,28 @@ fn shared_dir() -> PathBuf {
     glib::home_dir().join(".cache/thumbnails")
 }
 
-/// Our private thumbnail cache (app-scoped under Flatpak; = shared on the host).
+/// Vitrine's private thumbnail cache. Deliberately *not* `…/thumbnails`: under
+/// Flatpak the `xdg-cache/thumbnails` grant bind-mounts the host's shared cache
+/// over `$XDG_CACHE_HOME/thumbnails` (V-30), and on the host that name is the
+/// shared cache outright. No `--filesystem` grant covers this name.
 fn private_dir() -> PathBuf {
-    glib::user_cache_dir().join("thumbnails")
+    glib::user_cache_dir().join("vitrine-thumbnails")
+}
+
+/// Whether `dir` is GNOME's shared cache under another name — the same
+/// directory by device + inode, which is what sees through a bind mount (a
+/// path comparison can't). Our pruning and cleanup refuse to run on it.
+fn is_shared_cache(dir: &std::path::Path) -> bool {
+    same_dir(dir, &shared_dir())
+}
+
+/// Whether two paths name the same existing directory (device + inode).
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(a), Ok(b)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    a.dev() == b.dev() && a.ino() == b.ino()
 }
 
 /// Persistent cache for removable/remote (USB, network) thumbnails — a *separate*
@@ -494,7 +528,7 @@ pub async fn warm_cache(file: &gio::File, source_mtime: i64, frame: &gdk::Textur
     };
     let uri = file.uri().to_string();
     let removable = removable_enabled() && is_removable_source(file, &uri);
-    let roots = roots_for(is_shareable(file), removable);
+    let roots = roots_for(is_shareable(file), removable, bucket);
     // Awaited (not fire-and-forget) and unbounded, unlike `store`: warm thumbnails
     // are already small (no full-res RSS risk), and enrichment's own bounded
     // concurrency paces these — so every indexed image actually gets warmed rather
@@ -578,6 +612,15 @@ fn prune_dir(root: PathBuf, cap: u64) {
         return;
     }
     std::thread::spawn(move || {
+        // Never GNOME's cache, whatever path reached us (V-30).
+        if is_shared_cache(&root) {
+            glib::g_warning!(
+                "vitrine",
+                "not pruning {}: it is the shared thumbnail cache",
+                root.display()
+            );
+            return;
+        }
         let mut files: Vec<PathBuf> = Vec::new();
         let mut facts: Vec<(u64, i64)> = Vec::new();
         for bucket in ["normal", "large", "x-large", "xx-large"] {
@@ -626,28 +669,34 @@ pub fn prune_removable_cache() {
     );
 }
 
-/// Write `texture` to the thumbnail cache(s), tagged with the freedesktop
-/// `Thumb::URI`/`Thumb::MTime` metadata. Fire-and-forget: PNG **encode and disk
-/// write happen on a worker thread** (both are pure CPU/IO and were a major
-/// main-loop stall while populating). Always writes the app-private cache; also
-/// the shared cache when `shareable` (real-path files, contributing to Nautilus).
-/// The cache roots a thumbnail is written to: always the app-private cache, plus
-/// the shared freedesktop cache when the file is shareable (a real host path).
-fn roots_for(shareable: bool, removable: bool) -> Vec<PathBuf> {
-    // Removable/remote decodes go to the persistent removable tier; everything
-    // else to the LRU-pruned private cache. Either may also write the shared
-    // freedesktop cache (Nautilus interop) when the path is a real host path.
-    let primary = if removable {
-        removable_dir()
+/// Whether a thumbnail at `bucket` may go into GNOME's shared cache: only the
+/// sizes GNOME itself generates. `x-large`/`xx-large` are Vitrine's grid sizes
+/// and stay private — GNOME's cache is not ours to grow.
+fn is_standard_bucket(bucket: ThumbBucket) -> bool {
+    matches!(bucket, ThumbBucket::Normal | ThumbBucket::Large)
+}
+
+/// The cache roots a thumbnail is written to — each one a tier the load order
+/// will actually read back, so nothing is written twice for nothing (V-30):
+/// - **removable/remote** → the persistent removable tier, plus the shared cache
+///   at a standard size when the path is a real host path (Nautilus interop);
+/// - **local, standard size, real host path** → the shared cache alone (it is
+///   read before the private tier, so a private copy would never be used);
+/// - **everything else** (`x-large`/`xx-large`, portal paths) → the private
+///   tier.
+fn roots_for(shareable: bool, removable: bool, bucket: ThumbBucket) -> Vec<PathBuf> {
+    let to_shared = shareable && is_standard_bucket(bucket);
+    if removable {
+        let mut roots = vec![removable_dir()];
+        if to_shared {
+            roots.push(shared_dir());
+        }
+        roots
+    } else if to_shared {
+        vec![shared_dir()]
     } else {
-        private_dir()
-    };
-    let shared = shared_dir();
-    let mut roots = vec![primary.clone()];
-    if shareable && shared != primary {
-        roots.push(shared);
+        vec![private_dir()]
     }
-    roots
 }
 
 /// PNG-encode `texture` (with the freedesktop `Thumb::URI`/`Thumb::MTime` chunks)
@@ -678,6 +727,10 @@ fn write_thumb(
     }
 }
 
+/// Write `texture` to the thumbnail cache(s), tagged with the freedesktop
+/// `Thumb::URI`/`Thumb::MTime` metadata. Fire-and-forget: PNG **encode and disk
+/// write happen on a worker thread** (both are pure CPU/IO and were a major
+/// main-loop stall while populating). Where it lands is [`roots_for`].
 fn store(
     uri: &str,
     source_mtime: i64,
@@ -701,7 +754,7 @@ fn store(
 
     let texture = texture.clone(); // gdk::Texture is Send
     let uri = uri.to_string();
-    let roots = roots_for(shareable, removable);
+    let roots = roots_for(shareable, removable, bucket);
 
     gio::spawn_blocking(move || {
         write_thumb(&texture, &uri, source_mtime, bucket, &roots);
@@ -756,15 +809,52 @@ mod tests {
     /// LRU prune can't evict them); local decodes stay in the private cache.
     #[test]
     fn roots_route_removable_to_its_own_dir() {
-        let rem = roots_for(false, true);
-        assert_eq!(rem[0], removable_dir());
-        assert!(!rem.contains(&private_dir()));
+        let large = ThumbBucket::Large;
+        let rem = roots_for(false, true, large);
+        assert_eq!(rem, vec![removable_dir()]);
 
-        let local = roots_for(false, false);
-        assert_eq!(local[0], private_dir());
-        assert!(!local.contains(&removable_dir()));
+        let local = roots_for(false, false, large);
+        assert_eq!(local, vec![private_dir()]);
 
-        // Shareable (real host path) also writes the shared freedesktop cache.
-        assert!(roots_for(true, true).contains(&shared_dir()));
+        // Shareable (real host path) removable also writes the shared cache.
+        assert_eq!(
+            roots_for(true, true, large),
+            vec![removable_dir(), shared_dir()]
+        );
+    }
+
+    /// V-30: only GNOME's standard sizes go to its shared cache, and a local
+    /// thumbnail is written exactly once.
+    #[test]
+    fn shared_cache_gets_standard_sizes_only() {
+        for bucket in [ThumbBucket::Normal, ThumbBucket::Large] {
+            assert_eq!(roots_for(true, false, bucket), vec![shared_dir()]);
+        }
+        for bucket in [ThumbBucket::XLarge, ThumbBucket::XxLarge] {
+            assert_eq!(roots_for(true, false, bucket), vec![private_dir()]);
+            assert_eq!(roots_for(true, true, bucket), vec![removable_dir()]);
+        }
+    }
+
+    /// The private dir is never the name the Flatpak grant shadows.
+    #[test]
+    fn private_dir_is_not_the_granted_name() {
+        assert_ne!(private_dir(), glib::user_cache_dir().join("thumbnails"));
+        assert_ne!(private_dir(), shared_dir());
+    }
+
+    /// The shared-cache guard sees through a second name for the same dir
+    /// (a symlink here, standing in for the Flatpak bind mount).
+    #[test]
+    fn shared_cache_guard_is_by_inode() {
+        let tmp = std::env::temp_dir().join(format!("vitrine-v30-{}", std::process::id()));
+        let real = tmp.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias = tmp.join("alias");
+        let _ = std::os::unix::fs::symlink(&real, &alias);
+        assert!(same_dir(&real, &alias));
+        assert!(!same_dir(&real, &tmp));
+        assert!(!same_dir(&real, &tmp.join("absent")));
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

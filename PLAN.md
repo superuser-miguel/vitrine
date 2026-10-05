@@ -1569,6 +1569,24 @@ freedesktop (URI) → private (URI) → decode. This adds tiers and changes the 
   feature and shares the enrichment hook with cache-warming — do them as one
   effort, not twice.
 
+**The real tiers — corrected 2026-10-05 (V-30).** The "private disk cache"
+above never existed under Flatpak. `--filesystem=xdg-cache/thumbnails:create`
+also bind-mounts the host's `~/.cache/thumbnails` over the app's own
+`$XDG_CACHE_HOME/thumbnails`, which is exactly what `private_dir()` returned —
+so the "private" tier was GNOME's cache (same 147,520 files, verified inside
+the sandbox), every local thumbnail was written twice to one file, and
+`prune_private_cache` LRU-pruned *GNOME's* cache to the `thumbnail-mb` budget
+(16,384 MB set, ~9.8 GB in the cache, so it had not fired yet). Fixed:
+- private tier → `$XDG_CACHE_HOME/vitrine-thumbnails` (no grant covers the name;
+  on the host it is `~/.cache/vitrine-thumbnails`, beside, not inside, GNOME's);
+- the shared cache gets only the spec's `normal`/`large` sizes, and a local
+  thumbnail is written once — to the shared cache at those sizes, else private;
+- `prune_dir` refuses any dir that *is* the shared cache by device + inode, so
+  no future path mix-up can reach it;
+- reads still check the shared cache before the private tier, so the
+  `x-large`/`xx-large` files already sitting in GNOME's cache keep serving —
+  no cold start. Removable and content tiers unchanged.
+
 ### 16.6 Phases & acceptance
 
 - **E0 — seam freeze.** This section reviewed + merged; `vitrine.api_version`
