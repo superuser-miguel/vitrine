@@ -65,6 +65,6 @@ modules:
       # tagged). Local testing can swap in {type: dir, path: ..}.
       - type: git
         url: https://github.com/superuser-miguel/vitrine.git
-        tag: v0.2.0
-        commit: ca53a81e9a6d492842cac043e4c3dd319785e143
+        tag: v0.3.0
+        commit: c508d11153d02af212546a4a318578bb0c3211f7
       - cargo-sources.json

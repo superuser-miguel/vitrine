@@ -3,8 +3,17 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vitrine — a catalog-aware image browser & reviewer for GNOME</title>
+<title>Vitrine — a catalog-aware image browser &amp; reviewer for GNOME</title>
 <meta name="description" content="Browse images that happen to be files: Loupe's viewer, Nautilus's grid, and a tag/catalog layer keyed to survive gallery-dl renames. Rate, comment, tag, collect, and de-duplicate — all rename-proof.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Vitrine — a catalog-aware image browser &amp; reviewer for GNOME">
+<meta property="og:description" content="Loupe's viewer, Nautilus's grid, and a tag/catalog layer keyed by content hash, so ratings, tags and collections survive renames and moves. Now with fuzzy find, a histogram, and a thumbnail cache for USB drives.">
+<meta property="og:url" content="https://superuser-miguel.github.io/vitrine/">
+<meta property="og:image" content="https://superuser-miguel.github.io/vitrine/screenshots/browser-grid.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Vitrine — a catalog-aware image browser &amp; reviewer for GNOME">
+<meta name="twitter:description" content="Loupe's viewer, Nautilus's grid, and a tag/catalog layer keyed by content hash, so ratings, tags and collections survive renames and moves. Now with fuzzy find, a histogram, and a thumbnail cache for USB drives.">
+<meta name="twitter:image" content="https://superuser-miguel.github.io/vitrine/screenshots/browser-grid.png">
 <style>
   :root {
     --bg: #f6f5fb; --surface: #ffffff; --text: #1b1826; --muted: #5c576b;
@@ -86,6 +95,13 @@
   .shots img { width: 100%; border-radius: 12px; border: 1px solid var(--border); display: block; }
   .shots figcaption { color: var(--muted); font-size: .88rem; padding: 8px 4px 0; }
 
+  h3.step { font-size: 1.08rem; margin: 30px 0 6px; }
+  .callout { background: var(--surface); border: 1px solid var(--border);
+             border-left: 3px solid var(--accent); border-radius: 0 12px 12px 0;
+             padding: 14px 18px; margin: 18px 0 0; }
+  .callout p { margin: 0 0 10px; } .callout p:last-child { margin: 0; }
+  .callout pre { margin: 10px 0; }
+
   footer { border-top: 1px solid var(--border); color: var(--muted); font-size: .9rem; }
   footer p { margin: 6px 0; }
 </style>
@@ -109,17 +125,17 @@
     <path d="M31 93 V74 C48 62 55 74 64 70 C76 65 84 78 97 72 V93 Z" fill="#db5a8f"/>
     <polygon points="42,35 64,35 34,93 12,93" fill="#fff" opacity="0.26"/>
   </svg>
-  <div class="badge">GNOME · Rust · GTK4 · v1 feature-complete</div>
+  <div class="badge">v0.3.0 — fuzzy find, a histogram, and auto-updates</div>
   <h1>Vitrine</h1>
   <p class="tagline">A fast, focused, catalog-aware image browser &amp; reviewer for GNOME.</p>
   <p class="lede">Browse <em>images that happen to be files</em> — Loupe's viewer, Nautilus's
     grid and selection model, and a tag/catalog layer keyed to survive gallery-dl renames.
     Rate, comment, tag, collect, and de-duplicate; nothing gets lost when files move.</p>
   <div class="btns">
-    <a class="btn primary" href="https://github.com/superuser-miguel/vitrine/releases/latest">Download (.flatpak)</a>
+    <a class="btn primary" href="https://superuser-miguel.github.io/vitrine-repo/vitrine.flatpakref">Install (auto-updating)</a>
     <a class="btn" href="https://github.com/superuser-miguel/vitrine">View on GitHub</a>
-    <a class="btn" href="https://github.com/superuser-miguel/vitrine#build--run">Build it</a>
   </div>
+  <p class="sub" style="margin-top:12px">Signed Flatpak repo — new releases arrive with <code>flatpak update</code>. Prefer a one-off file? <a href="https://github.com/superuser-miguel/vitrine/releases/latest">Download the .flatpak bundle</a>. Coming from 0.1 or 0.2? <a href="#install">Switch once</a>.</p>
   <img class="shot" src="screenshots/browser-grid.png" alt="Vitrine browsing a folder of images in its virtualized thumbnail grid, with the Places / Folders / Collections sidebar">
 </header>
 
@@ -141,18 +157,32 @@
   </div>
 </section>
 
+<section class="wrap" id="new">
+  <h2>New in 0.3.0</h2>
+  <p class="sub">Quicker to find things in, faster on big and removable libraries — and the first release on Vitrine's own signed update channel.</p>
+  <div class="grid">
+    <div class="card"><h3>Find by name</h3><p>Press <code>Ctrl+F</code> or <code>/</code> and type: the grid narrows to fuzzy matches on file name and path, best match first. "snst" finds <code>sunset.jpg</code>. Stacks with the rating and tag filters; <code>Esc</code> clears it.</p></div>
+    <div class="card"><h3>A histogram</h3><p>Luminance and RGB, in the viewer's Image Properties panel. Hidden until you switch it on, so it costs nothing until you want it.</p></div>
+    <div class="card"><h3>USB and network drives remember their thumbnails</h3><p>Thumbnails from removable and network drives are kept between sessions in their own cache, so browsing local folders can't push them out. They're recognised by content, so they're reused even when the drive mounts somewhere else.</p></div>
+    <div class="card"><h3>Sort orders as Lua scripts</h3><p>Drop a small script into the scripts folder and it appears under <em>From Scripts</em> in the Sort By menu. Edit it and the grid re-sorts as you save. <a href="https://github.com/superuser-miguel/vitrine/tree/main/docs/scripts">Five starter scripts</a>: natural sort, best-rated first, by folder, by type, largest first.</p></div>
+    <div class="card"><h3>Remove a tag from a selection</h3><p>The grid's Tag popover has an Add / Remove toggle, so a tag applied to the wrong hundred images comes off in one go. It touches only the selected images.</p></div>
+    <div class="card"><h3>Fixed</h3><p>The window tiles to half the screen again. Thumbnails no longer stay blank after a fast scroll. Large folders decode what's on screen first. The grid stops competing with the viewer while an image is open. Very large images no longer freeze the app while they're indexed.</p></div>
+  </div>
+</section>
+
 <section class="wrap">
   <h2>What it does</h2>
-  <p class="sub">v1 is feature-complete.</p>
+  <p class="sub">Browse, view, review, organize, edit and de-duplicate — all keyed to survive renames.</p>
   <div class="grid">
-    <div class="card"><h3>Fast browsing</h3><p>Virtualized grid with rubber-band selection, adjustable thumbnails, and bounded caches that stay flat on 27k-image folders. Reuses GNOME's shared thumbnail cache.</p></div>
+    <div class="card"><h3>Fast browsing</h3><p>Virtualized grid with rubber-band selection, adjustable thumbnails, and bounded caches that stay flat on 27k-image folders. Reuses GNOME's shared thumbnail cache, and keeps a separate one for USB and network drives.</p></div>
     <div class="card"><h3>Beautiful decoding</h3><p>AVIF, JXL, HEIF, and the classics via glycin — color-managed, EXIF-oriented, decoded in sandboxed subprocesses. Sharper than gdk-pixbuf thumbnails.</p></div>
-    <div class="card"><h3>Viewer &amp; filmstrip</h3><p>Fit / zoom / pan / 100%, arrow-key navigation, a synced filmstrip, and a live properties panel (dimensions, camera, date, format).</p></div>
-    <div class="card"><h3>Review layer</h3><p>0–5 star ratings (with keyboard shortcuts and thumbnail overlays), free-text comments, and tags you apply to a whole selection at once.</p></div>
+    <div class="card"><h3>Viewer &amp; filmstrip</h3><p>Fit / zoom / pan / 100%, arrow-key navigation, a synced filmstrip, and a live properties panel (dimensions, camera, date, format) with an optional histogram.</p></div>
+    <div class="card"><h3>Review layer</h3><p>0–5 star ratings (with keyboard shortcuts and thumbnail overlays), free-text comments, and tags you add to — or remove from — a whole selection at once.</p></div>
     <div class="card"><h3>Collections</h3><p>Hand-curated catalogs (drag images in, reorder) and smart collections — a saved filter that keeps itself up to date.</p></div>
     <div class="card"><h3>Rename-proof index</h3><p>A background SQLite catalog keyed by BLAKE3 content hash. Move or rename a file and its tags, rating, comment, and collection memberships follow the bytes.</p></div>
     <div class="card"><h3>Find duplicates</h3><p>Exact (byte-identical) and near (perceptual-hash) clustering, with a reclaimable-space readout and one-click "keep the largest, trash the rest".</p></div>
-    <div class="card"><h3>Nautilus-style navigation</h3><p>A switchable sidebar — bookmarks, a folder tree, and collections — plus Back/Forward history and a filter bar.</p></div>
+    <div class="card"><h3>Nautilus-style navigation</h3><p>A switchable sidebar — bookmarks, a folder tree, and collections — plus Back/Forward history and a filter bar with fuzzy find by name.</p></div>
+    <div class="card"><h3>Your own sort orders</h3><p>Name, size, date, type, rating or date taken — or any order you can write as a few lines of Lua, reloaded live as you edit it.</p></div>
     <div class="card"><h3>Interoperable</h3><p>Export XMP sidecars (<code>xmp:Rating</code> / <code>dc:description</code> / <code>dc:subject</code>) so digiKam, darktable, Lightroom, and XnView read your ratings, comments, and tags. Originals are never rewritten.</p></div>
   </div>
 </section>
