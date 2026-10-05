@@ -45,6 +45,7 @@ pub mod resize;
 pub mod scanner;
 pub mod schema;
 pub mod tags;
+pub mod thumb_cleanup;
 pub mod thumbnail_cache;
 pub mod xmp;
 

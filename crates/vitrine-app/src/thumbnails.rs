@@ -255,14 +255,33 @@ fn content_path(hash: &str, bucket: ThumbBucket) -> PathBuf {
 /// Read the content-keyed thumbnail for `hash`, if present. **No mtime check** —
 /// the hash guarantees the bytes. Off the main thread; returns the as-decoded
 /// thumbnail (the caller applies any rotate/crop edit).
+///
+/// A hit records access the way the private tier does — the mtime is bumped
+/// when older than [`ACCESS_TOUCH_AFTER`] — so the cleanup's "not used in N
+/// days" means *read*, not *created*. Same open, one `fstat` (which `fs::read`
+/// did anyway), and at most one timestamp write per file per 6 h.
 pub async fn read_content(hash: &str, target_px: u32) -> Option<gdk::Texture> {
     if !content_enabled() || hash.is_empty() {
         return None;
     }
     let path = content_path(hash, ThumbBucket::for_target(target_px));
     let tex = gio::spawn_blocking(move || {
-        let bytes = std::fs::read(&path).ok()?;
-        gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()
+        use std::io::Read;
+        let mut file = std::fs::File::open(&path).ok()?;
+        let meta = file.metadata().ok()?;
+        let mut bytes = Vec::with_capacity(meta.len() as usize);
+        file.read_to_end(&mut bytes).ok()?;
+        let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
+        let stale = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|d| (d.as_secs() as i64) < now_secs() - ACCESS_TOUCH_AFTER);
+        if stale {
+            // futimens on the read fd: we own the file, no write access needed.
+            let _ = file.set_modified(std::time::SystemTime::now());
+        }
+        Some(texture)
     })
     .await
     .ok()
@@ -621,31 +640,42 @@ fn prune_dir(root: PathBuf, cap: u64) {
             );
             return;
         }
-        let mut files: Vec<PathBuf> = Vec::new();
-        let mut facts: Vec<(u64, i64)> = Vec::new();
-        for bucket in ["normal", "large", "x-large", "xx-large"] {
-            let Ok(entries) = std::fs::read_dir(root.join(bucket)) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let Ok(meta) = entry.metadata() else { continue };
-                if !meta.is_file() {
-                    continue;
-                }
-                let mtime = meta
-                    .modified()
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
-                files.push(entry.path());
-                facts.push((meta.len(), mtime));
-            }
-        }
+        let (files, facts): (Vec<PathBuf>, Vec<(u64, i64)>) = list_thumbs(&root)
+            .into_iter()
+            .map(|(path, size, mtime)| (path, (size, mtime)))
+            .unzip();
         for i in vitrine_engine::cache_evict::evict_lru(&facts, cap) {
             let _ = std::fs::remove_file(&files[i]);
         }
     });
+}
+
+/// Every thumbnail file in a cache dir's size buckets, as `(path, size,
+/// mtime)`. Blocking (call it off the main thread).
+fn list_thumbs(root: &std::path::Path) -> Vec<(PathBuf, u64, i64)> {
+    let mut out = Vec::new();
+    for bucket in ["normal", "large", "x-large", "xx-large"] {
+        let Ok(entries) = std::fs::read_dir(root.join(bucket)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            out.push((entry.path(), meta.len(), mtime_secs(&meta)));
+        }
+    }
+    out
+}
+
+/// A file's mtime in unix seconds (0 if unavailable).
+fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
+    meta.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Prune the app-private disk cache to the configured budget (see
@@ -762,6 +792,237 @@ fn store(
     });
 }
 
+// ---- Cleanup (Preferences → Clean Up Thumbnails…) ---------------------------
+// The dialog lists every tier once (`survey`), optionally checks the URI-keyed
+// tiers for thumbnails whose source is gone (`find_gone`), derives what the
+// chosen options would remove (`plan_cleanup`), and only then deletes
+// (`run_cleanup`). All of it is blocking file I/O, run off the main thread. The
+// decisions are `vitrine_engine::thumb_cleanup`'s; this side gathers the facts.
+
+/// A disk tier, as the cleanup dialog shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    Private,
+    Removable,
+    Content,
+    /// GNOME's shared cache — never cleaned by age, only of missing sources.
+    Shared,
+}
+
+impl Tier {
+    pub const ALL: [Tier; 4] = [Tier::Private, Tier::Removable, Tier::Content, Tier::Shared];
+
+    fn dir(self) -> PathBuf {
+        match self {
+            Tier::Private => private_dir(),
+            Tier::Removable => removable_dir(),
+            Tier::Content => content_dir(),
+            Tier::Shared => shared_dir(),
+        }
+    }
+
+    /// Vitrine's own tiers — the only ones the age rule touches.
+    fn is_ours(self) -> bool {
+        self != Tier::Shared
+    }
+
+    /// Keyed by source URI (so the missing-source rule applies). The content
+    /// tier is keyed by hash and has no source to check.
+    fn is_uri_keyed(self) -> bool {
+        self != Tier::Content
+    }
+}
+
+/// One thumbnail file on disk.
+#[derive(Debug, Clone)]
+pub struct CachedThumb {
+    pub tier: Tier,
+    pub path: PathBuf,
+    pub size: u64,
+    /// Last use: reads of our tiers bump it (see `ACCESS_TOUCH_AFTER`).
+    pub mtime: i64,
+}
+
+/// Every thumbnail across the tiers, listed once when the dialog opens.
+#[derive(Debug, Default)]
+pub struct Survey {
+    pub thumbs: Vec<CachedThumb>,
+}
+
+impl Survey {
+    /// `(files, bytes)` held by `tier`.
+    pub fn usage(&self, tier: Tier) -> (usize, u64) {
+        self.thumbs
+            .iter()
+            .filter(|t| t.tier == tier)
+            .fold((0, 0), |(n, b), t| (n + 1, b + t.size))
+    }
+
+    /// How many thumbnails `find_gone` would have to read.
+    pub fn uri_keyed_count(&self) -> usize {
+        self.thumbs.iter().filter(|t| t.tier.is_uri_keyed()).count()
+    }
+}
+
+/// List every tier. Blocking. One of *our* tiers that turns out to be the
+/// shared cache under another name (V-30) is left out, so nothing below can
+/// apply our rules to GNOME's files.
+pub fn survey() -> Survey {
+    let mut thumbs = Vec::new();
+    for tier in Tier::ALL {
+        let dir = tier.dir();
+        if tier.is_ours() && is_shared_cache(&dir) {
+            continue;
+        }
+        for (path, size, mtime) in list_thumbs(&dir) {
+            thumbs.push(CachedThumb {
+                tier,
+                path,
+                size,
+                mtime,
+            });
+        }
+    }
+    Survey { thumbs }
+}
+
+/// Where this process sees the real filesystem: `None` = everywhere (not
+/// sandboxed). Under Flatpak only the granted locations are faithful — the
+/// rest of `$HOME` and `/tmp` exist but are sandbox stand-ins, where a missing
+/// file proves nothing.
+fn source_view() -> Option<Vec<PathBuf>> {
+    if !std::path::Path::new("/.flatpak-info").exists() {
+        return None;
+    }
+    let mut roots = vec![glib::home_dir()
+        .join(".var/app")
+        .join(crate::config::APP_ID)];
+    if let Some(pictures) = glib::user_special_dir(glib::UserDirectory::Pictures) {
+        roots.push(pictures);
+    }
+    Some(roots)
+}
+
+/// How much of a thumbnail to read for its `Thumb::URI` chunk — thumbnailers
+/// write their text chunks right after the header, well inside this.
+const URI_PREFIX_BYTES: u64 = 8 * 1024;
+
+/// The thumbnails in `paths` whose source is provably gone (see
+/// `vitrine_engine::thumb_cleanup::source_gone`). Blocking: reads the head of
+/// each file. Anything unreadable, non-`file://`, off-view, on removable
+/// media, or under a missing/unreadable parent is kept.
+pub fn find_gone(paths: Vec<PathBuf>) -> std::collections::HashSet<PathBuf> {
+    use std::io::Read;
+    use vitrine_engine::thumb_cleanup::{is_within, source_gone, SourceFacts};
+
+    let view = source_view();
+    let mut parents: std::collections::HashMap<PathBuf, bool> = Default::default();
+    let mut gone = std::collections::HashSet::new();
+    for path in paths {
+        let mut head = Vec::new();
+        let read = std::fs::File::open(&path)
+            .and_then(|f| f.take(URI_PREFIX_BYTES).read_to_end(&mut head));
+        if read.is_err() {
+            continue;
+        }
+        let Some(uri) = vitrine_engine::png_meta::read_text_chunk(&head, "Thumb::URI") else {
+            continue;
+        };
+        let is_gone = source_gone(&uri, |source| {
+            let in_view = !source.to_str().is_some_and(is_removable_path)
+                && view.as_ref().is_none_or(|roots| is_within(source, roots));
+            let parent_readable = in_view
+                && source.parent().is_some_and(|parent| {
+                    *parents
+                        .entry(parent.to_path_buf())
+                        .or_insert_with(|| std::fs::read_dir(parent).is_ok())
+                });
+            let file_absent = parent_readable
+                && matches!(
+                    std::fs::symlink_metadata(source),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                );
+            SourceFacts {
+                in_view,
+                parent_readable,
+                file_absent,
+            }
+        });
+        if is_gone {
+            gone.insert(path);
+        }
+    }
+    gone
+}
+
+/// What a cleanup would remove: each file with the mtime it had when planned.
+#[derive(Debug, Default, Clone)]
+pub struct CleanupPlan {
+    pub items: Vec<(PathBuf, i64)>,
+    pub bytes: u64,
+}
+
+/// Apply the dialog's options to a survey. `gone` is `find_gone`'s result when
+/// the missing-files option is on. Never selects a shared-cache file by age.
+pub fn plan_cleanup(
+    survey: &Survey,
+    rule: vitrine_engine::thumb_cleanup::AgeRule,
+    gone: Option<&std::collections::HashSet<PathBuf>>,
+) -> CleanupPlan {
+    let ours: Vec<usize> = (0..survey.thumbs.len())
+        .filter(|&i| survey.thumbs[i].tier.is_ours())
+        .collect();
+    let facts: Vec<(u64, i64)> = ours
+        .iter()
+        .map(|&i| (survey.thumbs[i].size, survey.thumbs[i].mtime))
+        .collect();
+    let mut chosen = vec![false; survey.thumbs.len()];
+    for k in vitrine_engine::thumb_cleanup::select_unused(&facts, now_secs(), rule) {
+        chosen[ours[k]] = true;
+    }
+    if let Some(gone) = gone {
+        for (i, thumb) in survey.thumbs.iter().enumerate() {
+            if thumb.tier.is_uri_keyed() && gone.contains(&thumb.path) {
+                chosen[i] = true;
+            }
+        }
+    }
+    let mut plan = CleanupPlan::default();
+    for (thumb, _) in survey.thumbs.iter().zip(&chosen).filter(|(_, &c)| c) {
+        plan.items.push((thumb.path.clone(), thumb.mtime));
+        plan.bytes += thumb.size;
+    }
+    plan
+}
+
+/// Delete what `plan` lists. Blocking. A file whose mtime moved since the plan
+/// (read — so used — or rewritten in the meantime) is skipped. Returns
+/// `(files, bytes)` actually removed.
+pub fn run_cleanup(plan: CleanupPlan) -> (usize, u64) {
+    let mut removed = (0, 0);
+    for (path, planned_mtime) in plan.items {
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if mtime_secs(&meta) != planned_mtime {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed.0 += 1;
+            removed.1 += meta.len();
+        }
+    }
+    if crate::debug::enabled() {
+        eprintln!(
+            "VDBG-CLEANUP ms={} removed={} bytes={}",
+            crate::debug::since_start_ms(),
+            removed.0,
+            removed.1
+        );
+    }
+    removed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,6 +1102,99 @@ mod tests {
     fn private_dir_is_not_the_granted_name() {
         assert_ne!(private_dir(), glib::user_cache_dir().join("thumbnails"));
         assert_ne!(private_dir(), shared_dir());
+    }
+
+    /// The content-tier access touch uses `set_modified` on the fd it read
+    /// from; that must work on a read-only open of a read-only file we own.
+    #[test]
+    fn touch_works_on_a_read_only_fd() {
+        let path = std::env::temp_dir().join(format!("vitrine-touch-{}", std::process::id()));
+        std::fs::write(&path, b"x").unwrap();
+        let old = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        file.set_modified(std::time::SystemTime::now()).unwrap();
+        assert!(mtime_secs(&std::fs::metadata(&path).unwrap()) > 1_000_000);
+        std::fs::remove_file(&path).ok();
+    }
+
+    fn thumb(tier: Tier, name: &str, size: u64, mtime: i64) -> CachedThumb {
+        CachedThumb {
+            tier,
+            path: PathBuf::from(name),
+            size,
+            mtime,
+        }
+    }
+
+    /// The age rule never reaches GNOME's cache; the missing rule never
+    /// reaches the content tier.
+    #[test]
+    fn plan_respects_tier_rules() {
+        use vitrine_engine::thumb_cleanup::AgeRule;
+        let survey = Survey {
+            thumbs: vec![
+                thumb(Tier::Private, "p", 1, 0),
+                thumb(Tier::Removable, "r", 2, 0),
+                thumb(Tier::Content, "c", 4, 0),
+                thumb(Tier::Shared, "s", 8, 0),
+                thumb(Tier::Private, "fresh", 16, now_secs()),
+            ],
+        };
+        let plan = plan_cleanup(&survey, AgeRule::All, None);
+        assert_eq!(plan.items.len(), 4); // p r c fresh — never s
+        assert_eq!(plan.bytes, 1 + 2 + 4 + 16);
+
+        let plan = plan_cleanup(&survey, AgeRule::Days(30), None);
+        assert_eq!(plan.bytes, 1 + 2 + 4);
+
+        let gone: std::collections::HashSet<PathBuf> =
+            ["s", "c", "fresh"].into_iter().map(PathBuf::from).collect();
+        let plan = plan_cleanup(&survey, AgeRule::Off, Some(&gone));
+        assert_eq!(plan.bytes, 8 + 16); // c is hash-keyed: not by missing
+    }
+
+    /// Only provably-gone sources are found: present files, non-file URIs and
+    /// files under a missing parent are kept.
+    #[test]
+    fn find_gone_on_a_temp_tree() {
+        let tmp = std::env::temp_dir().join(format!("vitrine-gone-{}", std::process::id()));
+        let src = tmp.join("src");
+        let cache = tmp.join("cache");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(src.join("here.jpg"), b"x").unwrap();
+        let png = |uri: &str, name: &str| {
+            let mut bytes = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+            bytes.extend_from_slice(&13u32.to_be_bytes());
+            bytes.extend_from_slice(b"IHDR");
+            bytes.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0]);
+            bytes.extend_from_slice(&0u32.to_be_bytes());
+            let bytes =
+                vitrine_engine::png_meta::add_text_chunks(&bytes, &[("Thumb::URI", uri)]).unwrap();
+            let path = cache.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            path
+        };
+        let uri = |p: &std::path::Path| format!("file://{}", p.display());
+        let here = png(&uri(&src.join("here.jpg")), "1.png");
+        let gone = png(&uri(&src.join("gone.jpg")), "2.png");
+        let offline = png(&uri(&tmp.join("unplugged/x.jpg")), "3.png");
+        let remote = png("smb://nas/x.jpg", "4.png");
+        let found = find_gone(vec![here, gone.clone(), offline, remote]);
+        // Under Flatpak the temp dir is outside the source view: nothing goes.
+        if source_view().is_none() {
+            assert_eq!(found, [gone].into_iter().collect());
+        } else {
+            assert!(found.is_empty());
+        }
+        std::fs::remove_dir_all(&tmp).ok();
     }
 
     /// The shared-cache guard sees through a second name for the same dir
