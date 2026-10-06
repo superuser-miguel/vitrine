@@ -117,23 +117,88 @@ impl Db {
         Ok(())
     }
 
-    /// Move every annotation row from `old` to `new` content hash — the Save
-    /// (bake-in-place) path: the rewritten file has a new identity, and the
-    /// user's ratings/tags/comments/collections must follow it. Orientation and
-    /// crop instructions are NOT moved (they were just baked into the pixels).
+    /// Carry every annotation from `old` to `new` content hash — the Save
+    /// (bake-in-place) path: the rewritten file at `saved_path` has a new
+    /// identity, and the user's ratings/tags/comments/collections must follow it.
+    ///
+    /// A hash is shared by every copy of the same bytes, so the annotations
+    /// belong to all of them. If any *other* present row still holds `old` (a
+    /// duplicate elsewhere, or the same file under a portal handle), they are
+    /// **copied** so that copy keeps them; only when the saved file was the last
+    /// holder are they moved. Orientation and crop instructions are never carried
+    /// (they were just baked into the pixels), and are dropped from `old` only on
+    /// a move — on a copy they still describe the duplicate's unbaked pixels.
+    ///
+    /// All of it is one transaction: a failure midway leaves nothing rekeyed.
+    pub fn rekey_annotations_from(
+        &self,
+        saved_path: &str,
+        old: &str,
+        new: &str,
+    ) -> rusqlite::Result<()> {
+        self.rekey(Some(saved_path), old, new)
+    }
+
+    /// [`Db::rekey_annotations_from`] without the saved path: every present row
+    /// holding `old` counts as another holder, so this copies whenever the index
+    /// still knows the hash. Never loses annotations; at worst it leaves them on
+    /// a hash that the next rescan orphans. Prefer the path-aware form.
     pub fn rekey_annotations(&self, old: &str, new: &str) -> rusqlite::Result<()> {
+        self.rekey(None, old, new)
+    }
+
+    fn rekey(&self, saved_path: Option<&str>, old: &str, new: &str) -> rusqlite::Result<()> {
         let conn = self.conn();
-        for sql in [
-            "UPDATE OR REPLACE ratings SET content_hash = ?2 WHERE content_hash = ?1",
-            "UPDATE OR REPLACE comments SET content_hash = ?2 WHERE content_hash = ?1",
-            "UPDATE OR REPLACE file_tags SET content_hash = ?2 WHERE content_hash = ?1",
-            "UPDATE OR REPLACE collection_items SET content_hash = ?2 WHERE content_hash = ?1",
-            "DELETE FROM orientations WHERE content_hash = ?1",
-            "DELETE FROM crops WHERE content_hash = ?1",
-        ] {
-            conn.execute(sql, rusqlite::params![old, new])?;
+        // IMMEDIATE: this reads before it writes, and a deferred transaction
+        // that has to upgrade its lock fails outright instead of waiting.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result = (|| {
+            // `path IS NOT NULL` is always true, so with no saved path every
+            // present holder counts.
+            let shared: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM files
+                               WHERE content_hash = ?1 AND missing = 0 AND path IS NOT ?2)",
+                rusqlite::params![old, saved_path],
+                |r| r.get(0),
+            )?;
+            let statements: &[&str] = if shared {
+                &[
+                    "INSERT OR IGNORE INTO ratings(content_hash, rating, sync_state, updated_at)
+                     SELECT ?2, rating, sync_state, updated_at FROM ratings WHERE content_hash = ?1",
+                    "INSERT OR IGNORE INTO comments(content_hash, body, sync_state, updated_at)
+                     SELECT ?2, body, sync_state, updated_at FROM comments WHERE content_hash = ?1",
+                    "INSERT OR IGNORE INTO file_tags(content_hash, tag_id, sync_state, source, created_at)
+                     SELECT ?2, tag_id, sync_state, source, created_at FROM file_tags
+                     WHERE content_hash = ?1",
+                    "INSERT OR IGNORE INTO collection_items(collection_id, content_hash, position)
+                     SELECT collection_id, ?2, position FROM collection_items
+                     WHERE content_hash = ?1",
+                ]
+            } else {
+                &[
+                    "UPDATE OR REPLACE ratings SET content_hash = ?2 WHERE content_hash = ?1",
+                    "UPDATE OR REPLACE comments SET content_hash = ?2 WHERE content_hash = ?1",
+                    "UPDATE OR REPLACE file_tags SET content_hash = ?2 WHERE content_hash = ?1",
+                    "UPDATE OR REPLACE collection_items SET content_hash = ?2 WHERE content_hash = ?1",
+                ]
+            };
+            for sql in statements {
+                conn.execute(sql, rusqlite::params![old, new])?;
+            }
+            if !shared {
+                // One bound parameter here: handing these the pair is an
+                // InvalidParameterCount error, which is how they once never ran.
+                conn.execute("DELETE FROM orientations WHERE content_hash = ?1", [old])?;
+                conn.execute("DELETE FROM crops WHERE content_hash = ?1", [old])?;
+            }
+            Ok(())
+        })();
+        if result.is_ok() {
+            conn.execute_batch("COMMIT")?;
+        } else {
+            let _ = conn.execute_batch("ROLLBACK");
         }
-        Ok(())
+        result
     }
 
     /// `(path, content_hash, rating, orientation, crop)` for present files under
@@ -260,6 +325,166 @@ mod tests {
             "enriched file carries its date"
         );
         assert_eq!(rows[1].5, None, "un-enriched file has no date yet");
+    }
+
+    /// Seed `paths` as present rows holding `hash`, and give the hash one of
+    /// every annotation plus an orientation and a crop instruction.
+    fn annotated(paths: &[&str], hash: &str) -> (Db, i64) {
+        let db = Db::open_in_memory().unwrap();
+        for (i, path) in paths.iter().enumerate() {
+            db.conn()
+                .execute(
+                    "INSERT INTO files(path,content_hash,size,mtime,indexed_at,missing)
+                     VALUES (?1,?2,1,1,?3,0)",
+                    rusqlite::params![path, hash, i as i64],
+                )
+                .unwrap();
+        }
+        db.set_rating(hash, 4).unwrap();
+        db.set_comment(hash, "golden hour").unwrap();
+        db.apply_tag("keeper", &[hash.to_string()]).unwrap();
+        let cat = db.create_catalog("Best").unwrap();
+        db.add_to_catalog(cat, &[hash.to_string()]).unwrap();
+        db.set_orientation(hash, 6).unwrap();
+        db.set_crop(hash, (0.1, 0.1, 0.5, 0.5)).unwrap();
+        (db, cat)
+    }
+
+    /// What `hash` carries: rating, comment, tags, catalog membership, and
+    /// whether it has an orientation / a crop instruction.
+    type Carried = (Option<i64>, Option<String>, Vec<String>, bool, bool, bool);
+
+    fn carried(db: &Db, hash: &str, cat: i64) -> Carried {
+        let any = |sql: &str| -> bool {
+            db.conn()
+                .query_row(sql, rusqlite::params![hash], |r| r.get::<_, i64>(0))
+                .unwrap()
+                > 0
+        };
+        let in_catalog = db
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM collection_items
+                 WHERE collection_id = ?1 AND content_hash = ?2",
+                rusqlite::params![cat, hash],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        (
+            db.rating(hash).unwrap(),
+            db.comment(hash).unwrap(),
+            db.tags_for_hash(hash).unwrap(),
+            in_catalog,
+            any("SELECT count(*) FROM orientations WHERE content_hash = ?1"),
+            any("SELECT count(*) FROM crops WHERE content_hash = ?1"),
+        )
+    }
+
+    fn all_but_instructions() -> Carried {
+        (
+            Some(4),
+            Some("golden hour".into()),
+            vec!["keeper".into()],
+            true,
+            false,
+            false,
+        )
+    }
+
+    fn nothing() -> Carried {
+        (None, None, vec![], false, false, false)
+    }
+
+    #[test]
+    fn rekey_moves_when_the_saved_file_is_the_only_holder() {
+        let (db, cat) = annotated(&["/p/a.jpg"], "old");
+        db.rekey_annotations_from("/p/a.jpg", "old", "new").unwrap();
+        assert_eq!(
+            carried(&db, "new", cat),
+            all_but_instructions(),
+            "annotations follow the new identity; baked instructions are not carried"
+        );
+        assert_eq!(
+            carried(&db, "old", cat),
+            nothing(),
+            "nothing else held the old hash, so nothing is left on it"
+        );
+    }
+
+    #[test]
+    fn rekey_copies_when_a_duplicate_still_holds_the_old_hash() {
+        // Two copies of the same bytes share one hash, so they share its
+        // annotations. Saving an edit to one must not strip the other.
+        let (db, cat) = annotated(&["/p/a.jpg", "/backup/a.jpg"], "old");
+        db.rekey_annotations_from("/p/a.jpg", "old", "new").unwrap();
+        assert_eq!(
+            carried(&db, "new", cat),
+            all_but_instructions(),
+            "the saved file keeps its annotations under the new hash"
+        );
+        assert_eq!(
+            carried(&db, "old", cat),
+            (
+                Some(4),
+                Some("golden hour".into()),
+                vec!["keeper".into()],
+                true,
+                true,
+                true
+            ),
+            "the duplicate keeps everything, its unbaked instructions included"
+        );
+    }
+
+    #[test]
+    fn rekey_holder_check_ignores_missing_rows_and_the_saved_row() {
+        // A missing row is not a holder, and the saved file's own row (which a
+        // rescan may or may not have updated yet) is not "another" holder.
+        let (db, cat) = annotated(&["/p/a.jpg", "/gone/a.jpg"], "old");
+        db.mark_missing("/gone/a.jpg").unwrap();
+        db.rekey_annotations_from("/p/a.jpg", "old", "new").unwrap();
+        assert_eq!(carried(&db, "old", cat), nothing(), "moved, not copied");
+        assert_eq!(carried(&db, "new", cat), all_but_instructions());
+    }
+
+    #[test]
+    fn rekey_without_a_path_never_drops_a_holder() {
+        // The path-less form can't tell the saved row from a duplicate, so it
+        // keeps the old hash's annotations whenever any present row holds it.
+        let (db, cat) = annotated(&["/p/a.jpg"], "old");
+        db.rekey_annotations("old", "new").unwrap();
+        assert_eq!(carried(&db, "old", cat).0, Some(4));
+        assert_eq!(carried(&db, "new", cat), all_but_instructions());
+    }
+
+    #[test]
+    fn a_failed_rekey_changes_nothing() {
+        // Fail the catalog step, after ratings, comments and tags have already
+        // been rewritten, in both the move and the copy shape.
+        for paths in [&["/p/a.jpg"][..], &["/p/a.jpg", "/backup/a.jpg"][..]] {
+            let (db, cat) = annotated(paths, "old");
+            let before = carried(&db, "old", cat);
+            db.conn()
+                .execute_batch(
+                    "CREATE TEMP TRIGGER fail_ins BEFORE INSERT ON collection_items
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;
+                     CREATE TEMP TRIGGER fail_upd BEFORE UPDATE ON collection_items
+                     BEGIN SELECT RAISE(ABORT, 'injected'); END;",
+                )
+                .unwrap();
+            assert!(db.rekey_annotations_from("/p/a.jpg", "old", "new").is_err());
+            assert_eq!(carried(&db, "old", cat), before, "{paths:?}: old intact");
+            assert_eq!(
+                carried(&db, "new", cat),
+                nothing(),
+                "{paths:?}: nothing half-carried to the new hash"
+            );
+            assert!(
+                db.conn().is_autocommit(),
+                "{paths:?}: no transaction left open"
+            );
+        }
     }
 
     #[test]
