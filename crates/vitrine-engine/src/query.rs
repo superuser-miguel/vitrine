@@ -166,10 +166,11 @@ impl Query {
             ));
             params.extend(self.tags_any.iter().map(|n| Value::Text(n.clone())));
         }
+        // Same shape, same reason: the correlated `EXISTS` this used to be made
+        // `files` the outer loop (173ms vs 0.4ms on a 432k-row index).
         if let Some(min) = self.rating_min {
             sql.push_str(
-                " AND EXISTS (SELECT 1 FROM ratings r
-                              WHERE r.content_hash = files.content_hash AND r.rating >= ?)",
+                " AND content_hash IN (SELECT r.content_hash FROM ratings r WHERE r.rating >= ?)",
             );
             params.push(Value::Integer(min));
         }
@@ -505,20 +506,48 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let (sql, params) = q.build();
-            let conn = db.conn();
-            let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
-            let plan: Vec<String> = stmt
-                .query_map(rusqlite::params_from_iter(params), |r| {
-                    r.get::<_, String>(3)
-                })
-                .unwrap()
-                .map(Result::unwrap)
-                .collect();
+            let plan = query_plan(&db, &q);
             assert!(
                 !plan.iter().any(|s| s.starts_with("SCAN files")),
                 "tag filter must not scan the library, got: {plan:#?}"
             );
         }
+    }
+
+    #[test]
+    fn rating_filter_does_not_scan_the_whole_library() {
+        // Same trap as the tag filters: a correlated EXISTS on `ratings` made
+        // `files` the outer loop (173ms vs 0.4ms on a 432k-file index), and it
+        // runs on the UI thread whenever a "Top rated" smart collection opens.
+        let db = Db::open_in_memory().unwrap();
+        let plan = query_plan(
+            &db,
+            &Query {
+                rating_min: Some(4),
+                ..Default::default()
+            },
+        );
+        assert!(
+            !plan.iter().any(|s| s.starts_with("SCAN files")),
+            "rating filter must not scan the library, got: {plan:#?}"
+        );
+        assert!(
+            plan.iter()
+                .any(|s| s.starts_with("SEARCH files USING INDEX idx_files_hash")),
+            "rating filter should probe files by hash, got: {plan:#?}"
+        );
+    }
+
+    /// The `detail` column of `EXPLAIN QUERY PLAN` for a built query.
+    fn query_plan(db: &Db, q: &Query) -> Vec<String> {
+        let (sql, params) = q.build();
+        let conn = db.conn();
+        let mut stmt = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        stmt.query_map(rusqlite::params_from_iter(params), |r| {
+            r.get::<_, String>(3)
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
     }
 }
