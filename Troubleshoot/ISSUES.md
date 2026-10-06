@@ -526,7 +526,7 @@ so the cell requests were gone before the queue was built, not dropped later.
 
 ---
 
-### V-30 · Vitrine's "private" thumbnail cache was GNOME's shared cache · `MEASURED` (2026-10-05, inside the sandbox) · **FIXED (untested)**
+### V-30 · Vitrine's "private" thumbnail cache was GNOME's shared cache · `MEASURED` (2026-10-05, inside the sandbox) · **FIXED** — shipped in 0.3.1
 
 `private_dir()` was `glib::user_cache_dir().join("thumbnails")`. Under Flatpak
 that is `~/.var/app/io.github.superuser_miguel.Vitrine/cache/thumbnails` — and
@@ -561,7 +561,7 @@ Consequences, all silent:
 
 ---
 
-### V-31 · Thumbnail caches were indexed as library images · `MEASURED` (2026-10-05, in the DB) · **FIXED (untested)**
+### V-31 · Thumbnail caches were indexed as library images · `MEASURED` (2026-10-05, in the DB) · **FIXED — VERIFIED** (2026-10-06: the purge ran on the real index via run-dev.sh, 580,090 → 431,683 rows, 148,554 cache rows → 0, tags 35/1,304 intact; backup `index-backup-pre-cache-purge-20261006-124309.sqlite`)
 
 On **2026-07-21** a scan reached `~/.cache/thumbnails/**` and
 `~/.var/app/io.github.superuser_miguel.Vitrine/cache/thumbnails/**` and indexed
@@ -910,6 +910,86 @@ yesterday": **the running app is not necessarily the installed app.**
 > **Re-test:** rebuild, **restart the app** (a running instance keeps the old
 > constraints), then Super+← and Super+→. The window should take exactly half
 > the screen; dragging to a screen edge should tile too.
+
+---
+
+## Code review, 2026-10-06 — the 0.3.2 set
+
+From the three-part review (vault: *Vitrine - Code Review Findings - 2026-10-06*,
+34 findings; the rest are scheduled in `ROADMAP.md` §5). Each was traced in the
+code; numbers come from a read-only snapshot of the real index.
+
+### V-32 · Save in place moved annotations off a hash that duplicates still share · `CONFIRMED` · **FIXED (untested)**
+
+`rekey_annotations` moved ratings/comments/tags/collection membership from the
+old hash to the new with four `UPDATE OR REPLACE`s, no transaction. 53,371 hashes
+have more than one present row, so any duplicate lost its annotations; an error
+midway left tags moved but ratings not. Its orientation/crop `DELETE`s also
+passed two parameters for one placeholder, so every Save logged
+`InvalidParameterCount` and never cleared them.
+> **Fixed:** one `BEGIN IMMEDIATE` transaction with rollback; if another present
+> row (not the saved path) still holds the old hash, annotations are **copied**,
+> otherwise moved; orientation/crop cleared only when nothing else uses the old
+> hash. Save passes the saved path through the writer, and toasts if the writer
+> isn't running. Tests: move, copy-with-duplicate, failure leaves nothing changed.
+
+### V-33 · Save wrote PNG bytes under other extensions and dropped metadata silently · `CONFIRMED` · **FIXED (untested)**
+
+`encode_baked` knew jpeg/png; everything else fell into the PNG arm, so Save on
+`.avif/.webp/.heic/.jxl` wrote PNG bytes under the original name. All saves drop
+EXIF/XMP/ICC and the dialog didn't say so.
+> **Fixed:** the encoder refuses unsupported targets; Save in place only for
+> jpg/png (insensitive with a tooltip otherwise); Save As suggests a matching
+> name and refuses unsupported extensions with a toast; the confirm dialog adds
+> "Embedded metadata (camera, date taken, GPS, colour profile) will not be kept."
+
+### V-34 · Save As onto the original applied the edit twice · `CONFIRMED` · **FIXED (untested)**
+
+No `dest == source` check: a non-atomic write, no rekey, instructions not
+cleared. Write failures were only a `g_warning`.
+> **Fixed:** the source (same GFile, canonical path, or device+inode; portal
+> paths resolved through `user.document-portal.host-path`) routes to Save in
+> place. Both paths write atomically via `gio::File::replace_contents` and toast
+> on failure. Save in place now evicts every cache key in the image's edit
+> history (the old eviction missed edit-suffixed keys). *Portal case unverified.*
+
+### V-35 · Text dragged onto a catalog became a phantom member · `CONFIRMED` · **FIXED (untested)**
+
+The catalog row accepted any `String`; browser text was inserted as a "hash"
+and toasted "Added 1 image".
+> **Fixed:** a drop is accepted only if it is a well-formed hash that the index
+> or a grid item holds; otherwise refused silently.
+
+### V-36 · A failed scan left "Indexing…" up for the rest of the session · `CONFIRMED` · **FIXED (untested)**
+
+Any `?` in `scan()` returned before `Finished`.
+> **Fixed:** `scan()` wraps the body and always sends `Finished` with the count
+> actually written. Reconcile runs once before the file loop, so a failed scan
+> can't mark files missing from partial results. Tests force failures with a
+> SQLite trigger.
+
+### V-37 · A hung Lua sort could freeze the main thread · `CONFIRMED` · **FIXED**
+
+`sort_key` held the provider lock across the Lua call; a long C call can't be
+interrupted by the instruction hook, and the main thread then blocked on the
+next `providers()`.
+> **Fixed:** the key `Function` is cloned and the lock dropped before calling.
+> A test parks a key and proves `providers()` still returns (fails if the lock
+> is held).
+
+### V-38 · Viewer: Undo/Redo followed the last edited image; corrupt neighbours re-decoded · `CONFIRMED` · **FIXED (untested)**
+
+> **Fixed:** `show_position` syncs history buttons; a failed neighbour decode is
+> marked failed and skipped by prefetch.
+
+### V-39 · Main-thread and writer queries that scaled with the library · `MEASURED` (snapshot, 432k rows) · **FIXED**
+
+| | Before | After |
+|---|---|---|
+| Collection counts (`list_collections`, every Delete and drop) | materialised every member row | `count(*)` in SQL |
+| Ratings when opening a tag/collection | one query per image | one joined query |
+| `rating_min` predicate | 173–176 ms (`SCAN files`) | 0.1–0.4 ms (`IN (…)`) |
+| `paths_needing_enrichment`, per 64-file batch | 73–80 ms (`SCAN files`) | 0.03 ms (partial index, schema v6) |
 
 ---
 
