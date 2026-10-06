@@ -129,6 +129,11 @@ impl FileRecord {
 pub(crate) const SELECT_COLS: &str = "id, path, content_hash, phash, size, mtime, width, \
      height, format, date_taken, camera, orientation, indexed_at, missing";
 
+/// The next batch of the enrichment backlog. Its WHERE is exactly the partial
+/// index `idx_files_unenriched`'s (schema v6); change one, change both.
+const ENRICHMENT_QUEUE_SQL: &str = "SELECT path FROM files WHERE width IS NULL AND missing = 0
+     ORDER BY id LIMIT ?1";
+
 /// The decode-derived fields written by the app's enrichment pass, once per file
 /// (after identity indexing). `width`/`height` double as the "enriched" marker:
 /// they are `NULL` until enrichment runs (see [`Db::paths_needing_enrichment`]),
@@ -257,11 +262,12 @@ impl Db {
     /// Up to `limit` present files still awaiting enrichment (`width IS NULL`),
     /// oldest-indexed first. `width` is set (even to 0 on decode failure) once a
     /// file is processed, so this list drains monotonically as enrichment runs.
+    ///
+    /// The WHERE clause is exactly `idx_files_unenriched`'s (schema v6), which
+    /// is what lets this read the backlog instead of scanning `files`; keep the
+    /// two in step.
     pub fn paths_needing_enrichment(&self, limit: i64) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn().prepare(
-            "SELECT path FROM files WHERE width IS NULL AND missing = 0
-             ORDER BY id LIMIT ?1",
-        )?;
+        let mut stmt = self.conn().prepare(ENRICHMENT_QUEUE_SQL)?;
         let rows = stmt.query_map([limit], |r| r.get::<_, String>(0))?;
         rows.collect()
     }
@@ -384,6 +390,23 @@ mod tests {
         // width goes back to NULL, so it re-enters the enrichment queue.
         db.upsert_file(&rec("/a.jpg", "hA-v2")).unwrap();
         assert_eq!(db.paths_needing_enrichment(10).unwrap(), vec!["/a.jpg"]);
+    }
+
+    #[test]
+    fn the_enrichment_queue_reads_its_partial_index() {
+        // Asked once per batch for the whole enrichment pass; a plain SCAN of
+        // `files` was ~75ms on a 432k-row index. The partial index only applies
+        // while the query's WHERE matches its own, so this fails if either drifts.
+        let db = Db::open_in_memory().unwrap();
+        let plan: Vec<String> = db
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {ENRICHMENT_QUEUE_SQL}"))
+            .unwrap()
+            .query_map([64], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(plan, ["SCAN files USING INDEX idx_files_unenriched"]);
     }
 
     #[test]

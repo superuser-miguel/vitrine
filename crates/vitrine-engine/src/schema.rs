@@ -119,6 +119,19 @@ CREATE TABLE crops (
     r#"
 CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag_id);
 "#,
+    // v6 — a partial index over the enrichment backlog.
+    //
+    // `paths_needing_enrichment` asks for the next batch of present files with
+    // no `width` yet, in `id` order, once per 64-file batch. With nothing to
+    // narrow it SQLite scanned all of `files` each time: ~75ms on a 432k-row
+    // index, paid thousands of times over a full enrichment and on every check
+    // of an already-drained queue. This index holds only the backlog, already in
+    // `id` order, so the query reads its first rows and stops (~0.03ms). Its
+    // WHERE must stay identical to the query's for the planner to use it.
+    r#"
+CREATE INDEX IF NOT EXISTS idx_files_unenriched ON files(id)
+  WHERE width IS NULL AND missing = 0;
+"#,
 ];
 
 /// The schema version this build targets (number of migrations).
