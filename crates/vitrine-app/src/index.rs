@@ -769,12 +769,34 @@ fn phash_from_texture(texture: &gdk::Texture) -> Option<i64> {
 
 type ScanResult = Result<(), Box<dyn std::error::Error>>;
 
+/// Scan one folder, then tell the UI it is over — on *every* exit. A scan that
+/// failed partway (DB I/O, disk full) used to return before `Finished`, leaving
+/// the window's `scanning` flag stuck: "Indexing library…" forever and every
+/// refusal toast saying "Still indexing". `added` is the count written before
+/// any failure; the caller logs the error.
 fn scan(
     db: &Db,
     folder: &std::path::Path,
     exclusions: &IndexExclusions,
     progress: &async_channel::Sender<IndexProgress>,
     checkpoint: &mut dyn FnMut(),
+) -> ScanResult {
+    let mut added = 0usize;
+    let result = scan_folder(db, folder, exclusions, progress, checkpoint, &mut added);
+    let _ = progress.try_send(IndexProgress::Finished { added });
+    result
+}
+
+/// The body of [`scan`]. Reconcile runs before the per-file loop and nothing
+/// runs after an error, so a failed scan never marks rows missing on the
+/// strength of a partial pass (offline is not deleted).
+fn scan_folder(
+    db: &Db,
+    folder: &std::path::Path,
+    exclusions: &IndexExclusions,
+    progress: &async_channel::Sender<IndexProgress>,
+    checkpoint: &mut dyn FnMut(),
+    added: &mut usize,
 ) -> ScanResult {
     let files = walk_images(folder, exclusions);
     let total = files.len();
@@ -824,7 +846,6 @@ fn scan(
     checkpoint();
 
     let now = now_secs();
-    let mut added = 0usize;
 
     for (i, sf) in files.iter().enumerate() {
         let path = sf.path.to_string_lossy().to_string();
@@ -832,7 +853,6 @@ fn scan(
         let existing = db.file_by_path(&path)?;
         if classify(existing.as_ref(), sf.size, sf.mtime) != Change::Unchanged {
             if let Ok(hash) = vitrine_engine::blake3_file(&sf.path) {
-                added += 1;
                 // Same bytes at a vanished path → a move; relink to keep the row
                 // (and its indexed_at); otherwise upsert identity + fs facts.
                 match db.missing_file_by_hash(&hash)? {
@@ -850,6 +870,8 @@ fn scan(
                         })?;
                     }
                 }
+                // Counted once written, so a failed scan reports what landed.
+                *added += 1;
             }
         }
 
@@ -862,7 +884,6 @@ fn scan(
         }
     }
 
-    let _ = progress.try_send(IndexProgress::Finished { added });
     Ok(())
 }
 
@@ -943,4 +964,115 @@ fn now_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A throwaway folder holding one "image" (the walk goes by extension and
+    /// the hash by bytes, so any content will do).
+    fn temp_folder(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vitrine-index-test-{tag}-{}-{}",
+            std::process::id(),
+            now_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"not really a jpeg").unwrap();
+        dir
+    }
+
+    fn drain(rx: &async_channel::Receiver<IndexProgress>) -> Vec<IndexProgress> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    /// A write failing mid-scan (disk full, DB I/O) still ends with `Finished`,
+    /// or the window's `scanning` flag sticks and the banner never clears.
+    #[test]
+    fn failed_write_still_sends_finished() {
+        let dir = temp_folder("write");
+        let db = Db::open_in_memory().unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_insert BEFORE INSERT ON files
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let (tx, rx) = async_channel::unbounded();
+
+        let result = scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {});
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result.is_err());
+        let msgs = drain(&rx);
+        assert!(matches!(
+            msgs.first(),
+            Some(IndexProgress::Started { total: 1 })
+        ));
+        assert!(
+            matches!(msgs.last(), Some(IndexProgress::Finished { added: 0 })),
+            "{msgs:?}"
+        );
+    }
+
+    /// A reconcile that fails still ends with `Finished`, and nothing runs after
+    /// the error: no per-file writes on top of a half-applied reconcile.
+    #[test]
+    fn failed_reconcile_still_sends_finished_and_stops() {
+        let dir = temp_folder("reconcile");
+        let db = Db::open_in_memory().unwrap();
+        let gone = dir.join("gone.jpg").to_string_lossy().to_string();
+        db.upsert_file(&FileRecord {
+            path: gone.clone(),
+            content_hash: "h".into(),
+            size: 1,
+            mtime: 1,
+            indexed_at: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        db.conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_update BEFORE UPDATE ON files
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let (tx, rx) = async_channel::unbounded();
+
+        let result = scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {});
+        let a = dir.join("a.jpg").to_string_lossy().to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result.is_err());
+        let msgs = drain(&rx);
+        assert!(
+            matches!(msgs.last(), Some(IndexProgress::Finished { added: 0 })),
+            "{msgs:?}"
+        );
+        assert!(!db.file_by_path(&gone).unwrap().unwrap().missing);
+        assert!(
+            db.file_by_path(&a).unwrap().is_none(),
+            "loop ran after error"
+        );
+    }
+
+    /// The happy path still reports what it wrote.
+    #[test]
+    fn successful_scan_reports_added() {
+        let dir = temp_folder("ok");
+        let db = Db::open_in_memory().unwrap();
+        let (tx, rx) = async_channel::unbounded();
+
+        let result = scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {});
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result.is_ok());
+        let msgs = drain(&rx);
+        assert!(
+            matches!(msgs.last(), Some(IndexProgress::Finished { added: 1 })),
+            "{msgs:?}"
+        );
+    }
 }
