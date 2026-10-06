@@ -10,7 +10,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use adw::prelude::{ActionRowExt, AlertDialogExt, AlertDialogExtManual, EntryRowExt};
+use adw::prelude::{
+    ActionRowExt, AlertDialogExt, AlertDialogExtManual, EntryRowExt, NavigationPageExt,
+};
 use adw::subclass::prelude::*;
 use gtk::gdk;
 use gtk::prelude::*;
@@ -343,6 +345,7 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let obj = self.obj();
+            obj.setup_toasts();
             obj.setup_filmstrip();
             obj.setup_controls();
             obj.setup_review();
@@ -792,6 +795,31 @@ impl VitrineViewer {
         self.imp().redo_button.set_sensitive(can_redo);
     }
 
+    /// Save (in place) only where the bake path can write the file's own
+    /// format; the tooltip says why it's off and what to use instead.
+    fn sync_save_row(&self, item: &ImageObject) {
+        let refusal = save_in_place_refusal(&file_name(item));
+        let row = &self.imp().save_row;
+        row.set_sensitive(refusal.is_none());
+        row.set_tooltip_text(refusal.as_deref());
+    }
+
+    /// The viewer page covers the window's toast overlay, so it carries its
+    /// own: wrap the page content once, at construction.
+    fn setup_toasts(&self) {
+        let content = self.imp().toolbar_view.get();
+        let overlay = adw::ToastOverlay::new();
+        self.set_child(gtk::Widget::NONE);
+        overlay.set_child(Some(&content));
+        self.set_child(Some(&overlay));
+    }
+
+    fn toast(&self, message: &str) {
+        if let Some(overlay) = self.child().and_downcast::<adw::ToastOverlay>() {
+            overlay.add_toast(adw::Toast::new(message));
+        }
+    }
+
     fn history_step(&self, delta: i64) {
         let pos = self.current_position();
         let Some(item) = self.item_at(pos) else {
@@ -1114,6 +1142,8 @@ impl VitrineViewer {
                 None => (bytes, w, h),
             };
             vitrine_engine::encode_baked(&bytes, w, h, &dest_ext)
+                .map_err(|e| glib::g_warning!("vitrine", "bake: {e}"))
+                .ok()
         })
         .await
         .ok()
@@ -1125,14 +1155,9 @@ impl VitrineViewer {
         let Some(item) = self.item_at(pos) else {
             return;
         };
-        let name = item.display_name();
-        let (stem, ext) = match name.rsplit_once('.') {
-            Some((s, e)) => (s.to_string(), e.to_string()),
-            None => (name.clone(), "jpg".to_string()),
-        };
         let dialog = gtk::FileDialog::builder()
             .title(gettextrs::gettext("Save Edited Copy"))
-            .initial_name(format!("{stem}-edited.{ext}"))
+            .initial_name(save_as_default_name(&file_name(&item)))
             .build();
         let win = self.root().and_downcast::<gtk::Window>();
         glib::spawn_future_local(glib::clone!(
@@ -1143,10 +1168,15 @@ impl VitrineViewer {
                     return;
                 };
                 let Some(path) = dest.path() else { return };
-                let ext = path
-                    .extension()
-                    .map(|e| e.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "jpg".into());
+                let dest_name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                if let Some(refusal) = save_as_refusal(&dest_name) {
+                    v.toast(&refusal);
+                    return;
+                }
+                let ext = file_ext(&dest_name).unwrap_or_default().to_string();
                 match v.bake(&item, ext).await {
                     Some(bytes) => {
                         let ok = gio::spawn_blocking(move || std::fs::write(&path, bytes).is_ok())
@@ -1163,10 +1193,21 @@ impl VitrineViewer {
     }
 
     fn confirm_save(&self) {
+        // The row is insensitive for these; guard anyway — the bake path can
+        // only write JPEG/PNG, and in place the bytes must match the name.
+        let name = self
+            .item_at(self.current_position())
+            .map(|item| file_name(&item))
+            .unwrap_or_default();
+        if let Some(refusal) = save_in_place_refusal(&name) {
+            self.toast(&refusal);
+            return;
+        }
         let dialog = adw::AlertDialog::new(
             Some(&gettextrs::gettext("Save Edits?")),
             Some(&gettextrs::gettext(
-                "The edits will be baked into the original file. This cannot be undone.",
+                "The edits will be baked into the original file. This cannot be undone. \
+                 Embedded metadata (camera, date taken, GPS, colour profile) will not be kept.",
             )),
         );
         dialog.add_responses(&[
@@ -1195,10 +1236,11 @@ impl VitrineViewer {
         let Some(path) = item.file().path() else {
             return;
         };
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "jpg".into());
+        let name = file_name(&item);
+        if !can_save_in_place(&name) {
+            return;
+        }
+        let ext = file_ext(&name).unwrap_or_default().to_string();
         let Some(bytes) = self.bake(&item, ext).await else {
             glib::g_warning!("vitrine", "save bake failed");
             return;
@@ -1557,6 +1599,7 @@ impl VitrineViewer {
         let imp = self.imp();
 
         imp.title.set_title(&item.display_name());
+        self.sync_save_row(&item);
         let record = self.lookup_record(&item);
         self.update_metadata(&item, record.as_ref());
         self.update_review(record.as_ref());
@@ -2265,4 +2308,123 @@ fn orientation_label(o: i64) -> String {
         _ => "Normal",
     }
     .to_string()
+}
+
+/// The item's real on-disk name — what Save keys the format on (the display
+/// name can differ from the file's actual extension).
+fn file_name(item: &ImageObject) -> String {
+    item.file()
+        .basename()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| item.display_name())
+}
+
+/// The extension of a file name (no dot), if it has a non-empty one.
+fn file_ext(name: &str) -> Option<&str> {
+    name.rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .filter(|ext| !ext.is_empty())
+}
+
+/// Save in place re-encodes under the original name, so it's offered only
+/// where the bake path writes that very format (JPEG / PNG).
+fn can_save_in_place(name: &str) -> bool {
+    file_ext(name).is_some_and(vitrine_engine::resize::can_encode_baked)
+}
+
+/// Why Save in place refuses `name` (toast / tooltip text), or `None`.
+fn save_in_place_refusal(name: &str) -> Option<String> {
+    if can_save_in_place(name) {
+        return None;
+    }
+    Some(match file_ext(name) {
+        Some(ext) => format!("Can’t save .{ext} in place — use Save As"),
+        None => "Can’t save this file in place — use Save As".to_string(),
+    })
+}
+
+/// Save As's suggested name: `{stem}-edited.{ext}`, where `ext` is the
+/// source's own extension if the bake path writes it, otherwise `png` — the
+/// suggested name always matches the bytes that will be written.
+fn save_as_default_name(name: &str) -> String {
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem, ext),
+        _ => (name, ""),
+    };
+    let ext = if vitrine_engine::resize::can_encode_baked(ext) {
+        ext
+    } else {
+        "png"
+    };
+    format!("{stem}-edited.{ext}")
+}
+
+/// Why Save As refuses `dest_name` (toast text), or `None` if its extension is
+/// one the bake path writes.
+fn save_as_refusal(dest_name: &str) -> Option<String> {
+    match file_ext(dest_name) {
+        Some(ext) if vitrine_engine::resize::can_encode_baked(ext) => None,
+        Some(ext) => Some(format!("Can’t save as .{ext} — use .png or .jpg")),
+        None => Some("Can’t save without an extension — use .png or .jpg".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    #[test]
+    fn save_in_place_only_for_writable_formats() {
+        for name in ["a.jpg", "a.JPEG", "b.png", "x.y.Png"] {
+            assert!(can_save_in_place(name), "{name}");
+        }
+        for name in [
+            "a.avif",
+            "a.webp",
+            "a.heic",
+            "a.heif",
+            "a.jxl",
+            "a.gif",
+            "a.tif",
+            "a.bmp",
+            "noext",
+            "trailing.",
+        ] {
+            assert!(!can_save_in_place(name), "{name}");
+        }
+        assert_eq!(save_in_place_refusal("a.jpg"), None);
+        assert_eq!(
+            save_in_place_refusal("a.avif").as_deref(),
+            Some("Can’t save .avif in place — use Save As")
+        );
+        assert_eq!(
+            save_in_place_refusal("noext").as_deref(),
+            Some("Can’t save this file in place — use Save As")
+        );
+    }
+
+    #[test]
+    fn save_as_suggests_a_matching_extension() {
+        assert_eq!(save_as_default_name("cat.jpg"), "cat-edited.jpg");
+        assert_eq!(save_as_default_name("cat.JPEG"), "cat-edited.JPEG");
+        assert_eq!(save_as_default_name("cat.png"), "cat-edited.png");
+        assert_eq!(save_as_default_name("cat.avif"), "cat-edited.png");
+        assert_eq!(save_as_default_name("cat.tar.webp"), "cat.tar-edited.png");
+        assert_eq!(save_as_default_name("cat"), "cat-edited.png");
+        assert_eq!(save_as_default_name(".hidden"), ".hidden-edited.png");
+    }
+
+    #[test]
+    fn save_as_refuses_unwritable_extensions() {
+        assert_eq!(save_as_refusal("out.png"), None);
+        assert_eq!(save_as_refusal("out.JPG"), None);
+        assert_eq!(
+            save_as_refusal("out.webp").as_deref(),
+            Some("Can’t save as .webp — use .png or .jpg")
+        );
+        assert_eq!(
+            save_as_refusal("out").as_deref(),
+            Some("Can’t save without an extension — use .png or .jpg")
+        );
+    }
 }

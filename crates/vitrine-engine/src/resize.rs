@@ -238,29 +238,71 @@ pub fn crop_rgba(
     Some((out, cw as u32, ch as u32))
 }
 
-/// Encode tight RGBA8 for the bake path (Save / Save As). `format` is matched
-/// on the destination file extension: `jpg`/`jpeg` → JPEG q90 (alpha dropped),
-/// anything else → PNG. Pure CPU; run on a worker.
-pub fn encode_baked(rgba: &[u8], width: u32, height: u32, format: &str) -> Option<Vec<u8>> {
+/// Why [`encode_baked`] produced no bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BakeError {
+    /// The target extension names a format the bake path can't write. There is
+    /// no fallback format: the bytes must always match the file name.
+    Unsupported(String),
+    /// The encoder itself failed (e.g. a malformed buffer).
+    Encode(String),
+}
+
+impl std::fmt::Display for BakeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BakeError::Unsupported(ext) => write!(f, "can't encode .{ext}"),
+            BakeError::Encode(err) => write!(f, "encode failed: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for BakeError {}
+
+/// The bake path's writable formats, matched on a file extension
+/// (case-insensitive, no leading dot): JPEG and PNG. Formats glycin can *read*
+/// but we can't write (AVIF, WebP, HEIC, JXL, GIF, TIFF, BMP, …) are `false`.
+pub fn can_encode_baked(ext: &str) -> bool {
+    matches!(ext.to_ascii_lowercase().as_str(), "jpg" | "jpeg" | "png")
+}
+
+/// Encode tight RGBA8 for the bake path (Save / Save As). `ext` is the
+/// destination file's extension: `jpg`/`jpeg` → JPEG q90 (alpha dropped),
+/// `png` → PNG, anything else → [`BakeError::Unsupported`]. The output carries
+/// no EXIF/XMP/ICC. Pure CPU; run on a worker.
+pub fn encode_baked(rgba: &[u8], width: u32, height: u32, ext: &str) -> Result<Vec<u8>, BakeError> {
     use image::ImageEncoder;
+    // The encoders panic on a short buffer; turn that into an error.
+    if rgba.len() as u64 != width as u64 * height as u64 * 4 {
+        return Err(BakeError::Encode(format!(
+            "buffer is {} bytes, expected {width}x{height} RGBA",
+            rgba.len()
+        )));
+    }
     let mut out = Vec::new();
-    match format.to_ascii_lowercase().as_str() {
+    let encoded = match ext.to_ascii_lowercase().as_str() {
         "jpg" | "jpeg" => {
             let rgb: Vec<u8> = rgba
                 .chunks_exact(4)
                 .flat_map(|p| [p[0], p[1], p[2]])
                 .collect();
-            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
-                .write_image(&rgb, width, height, image::ExtendedColorType::Rgb8)
-                .ok()?;
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90).write_image(
+                &rgb,
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
         }
-        _ => {
-            image::codecs::png::PngEncoder::new(&mut out)
-                .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
-                .ok()?;
-        }
-    }
-    Some(out)
+        "png" => image::codecs::png::PngEncoder::new(&mut out).write_image(
+            rgba,
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        ),
+        _ => return Err(BakeError::Unsupported(ext.to_string())),
+    };
+    encoded.map_err(|e| BakeError::Encode(e.to_string()))?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -283,6 +325,45 @@ mod crop_tests {
         let png = encode_baked(&src, 2, 2, "png").unwrap();
         let img = image::load_from_memory(&png).unwrap().to_rgba8();
         assert_eq!(img.get_pixel(1, 1).0, [9, 9, 9, 9]);
-        assert!(encode_baked(&src, 2, 2, "jpg").is_some());
+        assert!(encode_baked(&src, 2, 2, "jpg").is_ok());
+    }
+
+    #[test]
+    fn encode_baked_bytes_match_the_extension() {
+        let src = vec![200u8; 4 * 4];
+        for ext in ["jpg", "jpeg", "JPG", "Jpeg"] {
+            let out = encode_baked(&src, 2, 2, ext).unwrap();
+            assert_eq!(&out[..3], &[0xFF, 0xD8, 0xFF], "{ext} should be JPEG");
+            assert!(can_encode_baked(ext));
+        }
+        for ext in ["png", "PNG"] {
+            let out = encode_baked(&src, 2, 2, ext).unwrap();
+            assert_eq!(&out[..8], b"\x89PNG\r\n\x1a\n", "{ext} should be PNG");
+            assert!(can_encode_baked(ext));
+        }
+    }
+
+    #[test]
+    fn encode_baked_refuses_formats_it_cannot_write() {
+        let src = vec![9u8; 4 * 4];
+        for ext in [
+            "avif", "webp", "heic", "heif", "jxl", "gif", "tif", "tiff", "bmp", "AVIF", "", ".png",
+        ] {
+            assert_eq!(
+                encode_baked(&src, 2, 2, ext),
+                Err(BakeError::Unsupported(ext.to_string())),
+                "{ext} must not fall back to PNG"
+            );
+            assert!(!can_encode_baked(ext));
+        }
+    }
+
+    #[test]
+    fn encode_baked_reports_encoder_failure() {
+        // Buffer too short for 4x4 RGBA.
+        assert!(matches!(
+            encode_baked(&[0u8; 8], 4, 4, "png"),
+            Err(BakeError::Encode(_))
+        ));
     }
 }
