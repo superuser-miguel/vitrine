@@ -58,7 +58,7 @@ pub use exif::{parse_exif, ExifData};
 pub use files::{
     drop_unreachable, is_portal_document_path, prefer_durable_paths, Enrichment, FileRecord,
 };
-pub use hash::{blake3_bytes, blake3_file, phash_distance, phash_rgb8};
+pub use hash::{blake3_bytes, blake3_file, is_content_hash, phash_distance, phash_rgb8};
 pub use query::{Direction, Query, SortKey};
 pub use resize::{crop_rgba, encode_baked, orient_rgba, resize_rgba};
 pub use scanner::{classify, walk_images, Change, ScannedFile};

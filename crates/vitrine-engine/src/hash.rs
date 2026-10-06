@@ -19,6 +19,13 @@ pub fn blake3_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
+/// Whether `s` has the shape of a content hash as this crate writes one: a
+/// BLAKE3 digest as 64 lowercase hex digits. A drop or other untyped input that
+/// claims to be a hash is checked against this before it can key anything.
+pub fn is_content_hash(s: &str) -> bool {
+    s.len() == blake3::OUT_LEN * 2 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// BLAKE3 hex digest of a reader, streamed (constant memory for huge files).
 pub fn blake3_reader<R: Read>(mut reader: R) -> std::io::Result<String> {
     let mut hasher = blake3::Hasher::new();
@@ -62,6 +69,28 @@ pub fn phash_distance(a: i64, b: i64) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn content_hash_shape_matches_what_blake3_writes() {
+        assert!(is_content_hash(&blake3_bytes(b"")));
+        assert!(is_content_hash(&blake3_bytes(b"any bytes at all")));
+        for not_a_hash in [
+            "",
+            "hello",
+            "https://example.com/cat.jpg",
+            // Right length, wrong alphabet / case.
+            "AF1349B9F5F9A1A6A0404DEA36DCC9499BCB25C9ADC112B7CC9A93CAE41F3262",
+            "zf1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+            // One short, one long, surrounding whitespace.
+            "f1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f32620",
+            " af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262",
+            // 64 bytes but not 64 ASCII hex digits.
+            "éf1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f326",
+        ] {
+            assert!(!is_content_hash(not_a_hash), "{not_a_hash:?}");
+        }
+    }
 
     #[test]
     fn blake3_is_stable_and_content_addressed() {

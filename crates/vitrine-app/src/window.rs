@@ -2899,6 +2899,14 @@ impl VitrineWindow {
                             crate::debug::drop_event("catalog", "unhandled", 0);
                             return false;
                         };
+                        // Text dragged in from anywhere else (a browser, an
+                        // editor) also arrives as a String. Only a hash the
+                        // index knows may key a member; anything else is
+                        // refused, not stored as a phantom image.
+                        if !hash.is_empty() && !window.is_indexed_hash(&hash) {
+                            crate::debug::drop_event("catalog", "foreign-text", 0);
+                            return false;
+                        }
                         // Dragging one of a multi-selection adds the whole
                         // selection (file-manager behaviour); otherwise just it.
                         let selected = window.selected_hashes();
@@ -3106,6 +3114,30 @@ impl VitrineWindow {
             .map(|item| item.content_hash())
             .filter(|h| !h.is_empty())
             .collect()
+    }
+
+    /// Whether a dropped string is a content hash Vitrine knows: shaped like one,
+    /// and either keyed to at least one index row (an offline row counts —
+    /// offline is not deleted) or carried by an item in the grid (a just-saved
+    /// image holds its new hash before the rescan indexes it). If the index
+    /// can't be asked, the shape alone decides.
+    fn is_indexed_hash(&self, hash: &str) -> bool {
+        if !vitrine_engine::is_content_hash(hash) {
+            return false;
+        }
+        self.ensure_read_db();
+        let indexed = match self.imp().read_db.borrow().as_ref() {
+            Some(db) => match db.files_by_hash(hash) {
+                Ok(rows) => !rows.is_empty(),
+                Err(_) => return true,
+            },
+            None => return true,
+        };
+        let store = &self.imp().store;
+        indexed
+            || (0..store.n_items())
+                .filter_map(|i| store.item(i).and_downcast::<ImageObject>())
+                .any(|item| item.content_hash() == hash)
     }
 
     /// Stamp each item with its content hash + rating from the index, so cell
