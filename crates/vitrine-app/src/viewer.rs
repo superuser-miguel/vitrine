@@ -1753,13 +1753,18 @@ impl VitrineViewer {
         glib::spawn_future_local(glib::clone!(
             #[weak(rename_to = viewer)]
             self,
+            #[strong]
+            item,
             async move {
                 let texture = decode_view(&file, orientation, crop, byte_size).await;
                 let imp = viewer.imp();
                 imp.decode_inflight.borrow_mut().remove(&uri);
                 let waited_on = imp.loading_uri.borrow().as_deref() == Some(uri.as_str());
                 let Some(texture) = texture else {
-                    // Decode failed: keep the placeholder, stop implying work.
+                    // Decode failed: keep the placeholder, stop implying work,
+                    // and mark it so prefetch stops retrying it (the grid and
+                    // filmstrip loaders share the flag).
+                    item.mark_failed();
                     if waited_on {
                         viewer.set_wait_state(None);
                     }
@@ -1777,7 +1782,10 @@ impl VitrineViewer {
         ));
     }
 
-    /// Warm the cache for ±2 neighbours so next/prev is flash-free.
+    /// Warm the cache for ±2 neighbours so next/prev is flash-free. A
+    /// neighbour that already failed to decode is skipped — otherwise a corrupt
+    /// file costs a glycin subprocess on every step near it. (Arriving on it
+    /// still decodes it, once per arrival.)
     fn prefetch(&self, pos: u32) {
         let n = self.n_items();
         for delta in [-2i64, -1, 1, 2] {
@@ -1789,6 +1797,9 @@ impl VitrineViewer {
             let Some(item) = self.item_at(p) else {
                 continue;
             };
+            if item.has_failed() {
+                continue;
+            }
             let uri = item.file().uri().to_string()
                 + &crate::thumbnails::edit_key(item.orientation(), item.crop());
             if self.imp().cache.borrow().contains(&uri) {
