@@ -33,6 +33,26 @@ impl Db {
             .optional()
     }
 
+    /// Star ratings for many hashes in one query — the batch form of
+    /// [`Db::rating`] for a view built from rows that span folders (a tag, a
+    /// collection), where per-row lookups would be thousands of round-trips on
+    /// the main thread. Unrated hashes are simply absent from the map.
+    pub fn ratings_for_hashes(
+        &self,
+        hashes: &[String],
+    ) -> rusqlite::Result<std::collections::HashMap<String, i64>> {
+        // The hashes travel as one JSON array parameter, so the batch size is
+        // not bounded by SQLite's host-parameter limit.
+        let json = serde_json::to_string(hashes)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+        let mut stmt = self.conn().prepare(
+            "SELECT content_hash, rating FROM ratings
+             WHERE content_hash IN (SELECT value FROM json_each(?1))",
+        )?;
+        let rows = stmt.query_map([json], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect()
+    }
+
     /// Remove the rating for a content hash (→ unrated).
     pub fn clear_rating(&self, content_hash: &str) -> rusqlite::Result<()> {
         self.conn().execute(
@@ -281,6 +301,30 @@ mod tests {
         assert_eq!(db.rating("h1").unwrap(), Some(5));
         db.clear_rating("h1").unwrap();
         assert_eq!(db.rating("h1").unwrap(), None);
+    }
+
+    #[test]
+    fn ratings_for_hashes_batches_the_lookup() {
+        let db = Db::open_in_memory().unwrap();
+        db.set_rating("ha", 4).unwrap();
+        db.set_rating("hb", 1).unwrap();
+        db.set_rating("not-asked", 5).unwrap();
+        let asked: Vec<String> = ["ha", "hb", "unrated", "ha", "it's \"quoted\""]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = db.ratings_for_hashes(&asked).unwrap();
+        assert_eq!(
+            got,
+            [("ha".to_string(), 4), ("hb".to_string(), 1)]
+                .into_iter()
+                .collect(),
+            "same answers as per-hash rating(), unrated and unasked absent"
+        );
+        for h in &asked {
+            assert_eq!(got.get(h).copied(), db.rating(h).unwrap());
+        }
+        assert!(db.ratings_for_hashes(&[]).unwrap().is_empty());
     }
 
     #[test]

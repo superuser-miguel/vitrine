@@ -1614,20 +1614,11 @@ impl VitrineWindow {
             let rows = vitrine_engine::drop_unreachable(vitrine_engine::prefer_durable_paths(
                 db.query(&query).unwrap_or_default(),
             ));
-            rows.into_iter()
+            let ratings = ratings_for(db, &rows);
+            rows.iter()
                 .map(|record| {
-                    let file = gio::File::for_path(&record.path);
-                    let display = std::path::Path::new(&record.path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| record.path.clone());
-                    let content_type = record.format.clone().unwrap_or_default();
-                    let item =
-                        ImageObject::new(file, &display, record.mtime, record.size, &content_type);
-                    item.set_content_hash(&record.content_hash);
+                    let item = indexed_item(record, &ratings);
                     item.set_date_taken(record.date_taken);
-                    let rating = db.rating(&record.content_hash).ok().flatten().unwrap_or(0);
-                    item.set_rating(rating as i32);
                     item
                 })
                 .collect()
@@ -2954,21 +2945,9 @@ impl VitrineWindow {
             let rows = vitrine_engine::drop_unreachable(vitrine_engine::prefer_durable_paths(
                 db.collection_files(id).unwrap_or_default(),
             ));
-            rows.into_iter()
-                .map(|record| {
-                    let file = gio::File::for_path(&record.path);
-                    let name = std::path::Path::new(&record.path)
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| record.path.clone());
-                    let content_type = record.format.clone().unwrap_or_default();
-                    let item =
-                        ImageObject::new(file, &name, record.mtime, record.size, &content_type);
-                    item.set_content_hash(&record.content_hash);
-                    let rating = db.rating(&record.content_hash).ok().flatten().unwrap_or(0);
-                    item.set_rating(rating as i32);
-                    item
-                })
+            let ratings = ratings_for(db, &rows);
+            rows.iter()
+                .map(|record| indexed_item(record, &ratings))
                 .collect()
         };
 
@@ -4774,6 +4753,33 @@ pub(crate) fn scope_display(path: &std::path::Path) -> String {
         }
     }
     s.into_owned()
+}
+
+/// The star ratings of `rows`, fetched in one query rather than one per row.
+/// A failed lookup reads as unrated, as the per-row lookup it replaces did.
+fn ratings_for(db: &Db, rows: &[vitrine_engine::FileRecord]) -> HashMap<String, i64> {
+    let hashes: Vec<String> = rows.iter().map(|r| r.content_hash.clone()).collect();
+    db.ratings_for_hashes(&hashes).unwrap_or_default()
+}
+
+/// A grid item for an indexed row in a view that spans folders (a tag, a
+/// collection). The folder-scoped annotation stamp doesn't apply there, so the
+/// hash and rating are stamped inline from the index.
+fn indexed_item(
+    record: &vitrine_engine::FileRecord,
+    ratings: &HashMap<String, i64>,
+) -> ImageObject {
+    let file = gio::File::for_path(&record.path);
+    let name = std::path::Path::new(&record.path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| record.path.clone());
+    let content_type = record.format.clone().unwrap_or_default();
+    let item = ImageObject::new(file, &name, record.mtime, record.size, &content_type);
+    item.set_content_hash(&record.content_hash);
+    let rating = ratings.get(&record.content_hash).copied().unwrap_or(0);
+    item.set_rating(rating as i32);
+    item
 }
 
 fn direction_id(descending: bool) -> &'static str {
