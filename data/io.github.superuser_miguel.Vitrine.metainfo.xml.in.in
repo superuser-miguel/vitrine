@@ -48,6 +48,25 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.3.1" date="2026-10-06">
+      <description>
+        <p>
+          A housekeeping release: Vitrine now keeps its own thumbnails apart
+          from the desktop's, cleans up after itself, and remembers more.
+        </p>
+        <p>New in this release:</p>
+        <ul>
+          <li>Preferences → Clean Up Thumbnails: remove thumbnails not used in 30, 60, 90 or 180 days, or ones whose image no longer exists. It shows what will go before anything is removed, and never treats a file on an unplugged drive as gone.</li>
+          <li>The thumbnail size is remembered between launches.</li>
+          <li>Dragging an image that is still being indexed now works, or explains why it can't instead of doing nothing.</li>
+        </ul>
+        <p>Fixed in this release:</p>
+        <ul>
+          <li>Vitrine's own large thumbnails were being stored in the desktop's shared cache, and its size limit could prune thumbnails that Files relies on. It now has a private cache and only shares the standard sizes.</li>
+          <li>Thumbnail cache folders could end up indexed as photos. They are excluded now, and any that were indexed are removed once, after a backup of the library.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-05">
       <description>
         <p>
