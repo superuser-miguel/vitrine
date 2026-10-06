@@ -3,7 +3,7 @@
 *The short, living answer to "what are we building, and what comes next?"
 `PLAN.md` holds the designs and the rationale; this file holds the goals and
 the order. Re-read this before picking the next piece of work. Update it when
-a release ships or a decision changes. Last revised 2026-10-06, after v0.3.1.*
+a release ships or a decision changes. Last revised 2026-10-06, after v0.3.1 (tagging moved to a design track).*
 
 ---
 
@@ -89,15 +89,15 @@ decides when each starts. Nothing below is scheduled until it is.
 
 | # | Version | Theme | What ships | Depends on | Goal it serves |
 |---|---|---|---|---|---|
-| 1 | **0.4** | **Tagging you can trust** | Tag-operation journal (invisible) → Undo on the toast + Ctrl+Z → typo-safe popover (Create row, recent tags, `T`) → merge/rename/delete wired to the existing engine calls → **Manage Tags** page from the main menu. | The owner's answers on the tagging decision page. | 1 (never lose), and the first real organising tool at library scale. |
-| 2 | **0.5** | **The index knows "offline"** | An explicit unreachable state instead of the 0×0 sentinel; `Reappeared` instead of re-hash; mount-point-aware reconcile; a one-time retry of the stuck files. The invalidation set (read `Thumb::MTime`; mtime in RAM/content keys). Navigation lifecycle fixes ride along. | — | 1. Structural debt that sidecars and rules would otherwise build on. |
-| 3 | **0.6** | **Your downloads know who made them** | gallery-dl sidecar ingest as one more enricher: `sidecar_meta` (creator, site, URL, posted) + `sidecar_tags` in their own tables; a read-only **Source** section in Properties; opt-in "map this creator to my person tag"; creator/site predicates for smart collections. | 0.4 (promotions are undoable), 0.5 (offline sidecars are safe), the tag-flood decision (Phase 1 data favours separate tables). | 1 and 3: metadata arrives without touching the curated tags. |
-| 4 | **0.7** | **E2: helpers** | The add-extension point (PLAN §16.2/16.3): external tools as Flatpak extensions published through `vitrine-repo`; a run dialog with progress and cancel; `register_batch` / `register_filter`. First helper: ffmpeg frame capture. | The packaging decision (extension via the hosted repo vs. a host tool on `$PATH`). | 3. The seam's second tenant, and E3's prerequisite. |
-| 5 | **0.8** | **E3: colour tools** | gThumb's set (Enhance, Adjust, Equalize, levels) as ImageMagick recipes on E2's machinery, in a Process view, non-destructive, with before/after (PLAN §16.4). Possibly `darktable-cli` develop batches. | 0.7. | The feature wanted since July, built the way it was decided: its own build, on top of E2. |
-| 6 | **0.9** | **Find anything** | The other half of V-11: structured search over the `Query` the engine already has (tag, comment, rating, date, camera, creator), saved searches as smart collections, tags in fuzzy find, multi-tag "with / without" filters (option J on the decision page). | 0.4 (tag model), 0.6 (creator predicate). | The index is the product; this is how it pays off at 288k files. |
-| 7 | **1.0** | **The 1.0** | A stability milestone, not a feature: every review finding closed; `window.rs` split (bookmarks, duplicates page, dev aids, a testable `LoadQueue`); CI with the Meson/metainfo job and the vendored-crate check; screenshots retaken; docs current; the two accepted `allow(dead_code)`s gone. **If the sidebar/folder-navigation rethink ever happens, this is the release it belongs to, and only if the owner raises it.** | 1–6 shipped and soaked. | 2 (never slower) made auditable. |
-| 8 | **1.1** | **Rules** | The Lua policy layer over the sidecar mirror: auto-promotion rules writing `source='rule'` tags, revocable in bulk by source; creator normalisation across sites; sidecar-aware sort keys. Specified by the hand-promotions actually made during 0.6–0.9, not on spec. | 0.6, and enough hand-promotions to know what the rules are. | 3. The E1 seam used for what it was designed for. |
-| 9 | **1.2** | **Interop** | XMP both ways: write `lr:hierarchicalSubject` if a tag convention exists, read `.xmp` back as `source='xmp'` with a conflict rule; embedded metadata write via rexiv2 (activates `sync_state`, PLAN §9); the JSON backup wired into the UI. | 0.4's tag model; a conflict rule the owner chooses. | 1 and 4: your data is readable by darktable, digiKam and Files. |
+| 1 | **0.4** | **The index knows "offline"** | An explicit unreachable state instead of the 0×0 sentinel; `Reappeared` instead of re-hash; mount-point-aware reconcile; a one-time retry of the stuck files. The invalidation set (read `Thumb::MTime`; mtime in RAM/content keys). Navigation lifecycle fixes ride along. | — | 1. Structural debt that sidecars and rules would otherwise build on. |
+| 2 | **0.5** | **Your downloads know who made them (read-only)** | gallery-dl sidecar ingest as one more enricher: `sidecar_meta` (creator, site, URL, posted) + `sidecar_tags` in their own tables; a read-only **Source** section in Properties; creator/site predicates for smart collections. *No promotion into curated tags yet: that waits for the tagging redesign.* | 0.4 (offline sidecars are safe); the tag-flood decision (Phase 1 data favours separate tables). | 1 and 3: metadata arrives without touching the curated tags. |
+| 3 | **0.6** | **E2: helpers** | The add-extension point (PLAN §16.2/16.3): external tools as Flatpak extensions published through `vitrine-repo`; a run dialog with progress and cancel; `register_batch` / `register_filter`. First helper: ffmpeg frame capture. | The packaging decision (extension via the hosted repo vs. a host tool on `$PATH`). | 3. The seam's second tenant, and E3's prerequisite. |
+| 4 | **0.7** | **E3: colour tools** | gThumb's set (Enhance, Adjust, Equalize, levels) as ImageMagick recipes on E2's machinery, in a Process view, non-destructive, with before/after (PLAN §16.4). Possibly `darktable-cli` develop batches. | 0.6. | The feature wanted since July, built the way it was decided: its own build, on top of E2. |
+| 5 | **0.8** | **Find anything** | The other half of V-11: structured search over the `Query` the engine already has (tag, comment, rating, date, camera, creator), saved searches as smart collections, tags in fuzzy find. Built against the *current* tag model; adopts the redesigned one later. | 0.5 (creator predicate). | The index is the product; this is how it pays off at 288k files. |
+| 6 | **0.9** | **Tagging, redesigned** (design track; slot provisional) | The outcome of the tagging UI/UX rethink (§6): how tags are applied during a migration, where they're visible, whether people/sites/descriptive are different kinds, how sidecar creators are promoted. Includes Manage Tags, the popover, the filter, and whatever the sidebar needs, designed together. **Design first, then one release.** | The design pass (owner-led); 0.5's sidecar data to design against. | 1, and the first organising tool at library scale. |
+| 7 | **1.0** | **The 1.0** | A stability milestone, not a feature: every review finding closed; `window.rs` split (bookmarks, duplicates page, dev aids, a testable `LoadQueue`); CI with the Meson/metainfo job and the vendored-crate check; screenshots retaken; docs current; the two accepted `allow(dead_code)`s gone. **If the sidebar/folder-navigation rethink happens, it belongs here or with 0.9's tagging redesign, since both reshape the sidebar; one deliberate release, not two accidental ones.** | 1–6 shipped and soaked. | 2 (never slower) made auditable. |
+| 8 | **1.1** | **Rules** | The Lua policy layer over the sidecar mirror: auto-promotion rules writing `source='rule'` tags, revocable in bulk by source; creator normalisation across sites; sidecar-aware sort keys. Specified by the hand-promotions actually made after 0.9, not on spec. | 0.9, and enough hand-promotions to know what the rules are. | 3. The E1 seam used for what it was designed for. |
+| 9 | **1.2** | **Interop** | XMP both ways: write `lr:hierarchicalSubject` if a tag convention exists, read `.xmp` back as `source='xmp'` with a conflict rule; embedded metadata write via rexiv2 (activates `sync_state`, PLAN §9); the JSON backup wired into the UI. | 0.9's tag model; a conflict rule the owner chooses. | 1 and 4: your data is readable by darktable, digiKam and Files. |
 | 10 | **1.3** | **Views** | Post-v1 navigation (PLAN §12): the address bar / breadcrumb first (small), then tabs (`AdwTabView`, the big architectural change: one window, several grid/store/filter/history sets). Viewer drag-pan redone (PLAN §14.1). | 1.0's `window.rs` split, so a second grid can exist. | 2, carefully: the only release in the ten that reshapes the browse view, and the last on purpose. |
 
 **Beyond ten:** E4, the WASM tier (PLAN §10.5/16.6), only when auto-tagging or
@@ -113,20 +113,25 @@ is the only overlap.
 |---|---|
 | Save in place moves annotations; Save writes PNG under other extensions; Save As onto the source | **0.3.2** (point release, now) |
 | Phantom hash from a text drop; stuck "Indexing…" banner; Lua guard held across a call; cheap perf wins (collection counts, N+1 ratings, partial index, `rating_min`) | **0.3.2** |
-| Enrichment sentinel for unreachable files + retry of the 63k rows; `Reappeared`; mount-point reconcile | **0.5** |
-| `Thumb::MTime` read back; mtime in RAM/content keys | **0.5** |
-| Folder-load generation token; viewer pop on every navigation; tag-filter reset | **0.5** |
-| `window.rs` extractions; CI jobs; test gaps; dead engine API | **1.0** (the tag calls earlier, in 0.4) |
+| Enrichment sentinel for unreachable files + retry of the 63k rows; `Reappeared`; mount-point reconcile | **0.4** |
+| `Thumb::MTime` read back; mtime in RAM/content keys | **0.4** |
+| Folder-load generation token; viewer pop on every navigation; tag-filter reset | **0.4** |
+| Tag-operation journal + Undo on the toast (engine + one button; commits to no tagging UI) | **0.3.x, if the owner confirms** |
+| `window.rs` extractions; CI jobs; test gaps; dead engine API | **1.0** (the engine tag calls with 0.9) |
 
 ---
 
 ## 6. Parked, and why
 
+- **Tagging as it is.** Decided 2026-10-06: the tagging system as a whole
+  (popover, sidebar chips, filter dropdown, discovery) needs a UI/UX rethink,
+  not incremental fixes, so the incremental plan from the decision page is
+  withdrawn. It becomes a design track with a provisional slot at 0.9. The
+  decision page remains the inventory of surfaces, numbers and questions.
 - **Folder navigation (the folders band) and a sidebar Tags section.** Deferred
   by the owner 2026-08-01 and again 2026-10-05: "it's huge, and right now I like
-  what we have." Both reshape the browse view. Tag discovery is covered by the
-  Manage Tags page (0.4). Revisit only when the owner raises it; home is 1.0 or
-  1.3.
+  what we have." Both reshape the browse view, as the tagging redesign will;
+  revisit together, only when the owner raises it; home is 0.9 or 1.0.
 - **Hierarchical tags / real tag kinds.** Only if the `person:` / `site:`
   prefix convention from 0.4 turns out too weak.
 - **Sidecar tags into `file_tags`.** Rejected by the Phase 1 data: it would
@@ -138,11 +143,10 @@ is the only overlap.
 
 ## 7. Open decisions (the owner's)
 
-1. **0.4's details:** undo scope (last operation vs. a short history), what
-   Enter does in the popover, prefix convention yes/no, how offline tag counts
-   read, fold `Starred` into ratings? (The tagging decision page.)
-2. **0.4 before 0.5, or the reverse?** Tagging is what you feel; the 63k stuck
-   files are what the data shows.
+1. **Does the tag-operation journal + Undo ship early (0.3.x)?** It's engine
+   work plus one toast button and commits to no tagging UI; it's also the one
+   thing that already cost an afternoon.
+2. **The tagging design pass:** when, and what it must answer (see 0.9's row).
 3. **E2 packaging (before 0.7):** helpers as extensions through `vitrine-repo`,
    or a host tool on `$PATH`.
 4. **XMP conflict rule (before 1.2):** Vitrine wins, file wins, or newest wins.
