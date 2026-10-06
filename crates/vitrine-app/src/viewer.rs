@@ -218,9 +218,7 @@ mod imp {
         /// Per-image session edit history for undo/redo: uri → (states, index
         /// into states of the current one). A state is (orientation, crop).
         #[allow(clippy::type_complexity)]
-        pub edit_history: RefCell<
-            std::collections::HashMap<String, (Vec<(i32, Option<(f64, f64, f64, f64)>)>, usize)>,
-        >,
+        pub edit_history: RefCell<std::collections::HashMap<String, EditHistory>>,
         /// In-progress crop selection in crop_area widget coords (x, y, w, h).
         pub crop_sel: Cell<Option<(f64, f64, f64, f64)>>,
         pub crop_drag_start: Cell<(f64, f64)>,
@@ -785,12 +783,12 @@ impl VitrineViewer {
         }
     }
 
+    /// Undo/Redo follow `item`'s own history (call on every image change).
     fn sync_history_buttons(&self, item: &ImageObject) {
-        let hist = self.imp().edit_history.borrow();
-        let (can_undo, can_redo) = match hist.get(&item.file().uri().to_string()) {
-            Some((states, idx)) => (*idx > 0, *idx + 1 < states.len()),
-            None => (false, false),
-        };
+        let (can_undo, can_redo) = history_sensitivity(
+            &self.imp().edit_history.borrow(),
+            item.file().uri().as_ref(),
+        );
         self.imp().undo_button.set_sensitive(can_undo);
         self.imp().redo_button.set_sensitive(can_redo);
     }
@@ -1650,6 +1648,7 @@ impl VitrineViewer {
 
         imp.title.set_title(&item.display_name());
         self.sync_save_row(&item);
+        self.sync_history_buttons(&item);
         let record = self.lookup_record(&item);
         self.update_metadata(&item, record.as_ref());
         self.update_review(record.as_ref());
@@ -2358,6 +2357,43 @@ fn orientation_label(o: i64) -> String {
         _ => "Normal",
     }
     .to_string()
+}
+
+/// One image's edit states and the index of the shown one.
+type EditHistory = (Vec<(i32, Option<(f64, f64, f64, f64)>)>, usize);
+
+/// `(can_undo, can_redo)` for the image at `uri`: only its own history counts,
+/// so an image never edited this session has both off.
+fn history_sensitivity(
+    hist: &std::collections::HashMap<String, EditHistory>,
+    uri: &str,
+) -> (bool, bool) {
+    match hist.get(uri) {
+        Some((states, idx)) => (*idx > 0, *idx + 1 < states.len()),
+        None => (false, false),
+    }
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+
+    #[test]
+    fn sensitivity_follows_the_shown_image() {
+        let mut hist = std::collections::HashMap::new();
+        // a.jpg: rotated twice, then one undo → both directions open.
+        hist.insert(
+            "file:///a.jpg".to_string(),
+            (vec![(1, None), (6, None), (3, None)], 1),
+        );
+        assert_eq!(history_sensitivity(&hist, "file:///a.jpg"), (true, true));
+        // Moving to an untouched neighbour: nothing to undo or redo there.
+        assert_eq!(history_sensitivity(&hist, "file:///b.jpg"), (false, false));
+        hist.insert("file:///c.jpg".to_string(), (vec![(1, None), (6, None)], 1));
+        assert_eq!(history_sensitivity(&hist, "file:///c.jpg"), (true, false));
+        hist.insert("file:///d.jpg".to_string(), (vec![(1, None), (6, None)], 0));
+        assert_eq!(history_sensitivity(&hist, "file:///d.jpg"), (false, true));
+    }
 }
 
 /// The item's real on-disk name — what Save keys the format on (the display
