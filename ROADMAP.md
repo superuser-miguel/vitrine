@@ -91,7 +91,7 @@ decides when each starts. Nothing below is scheduled until it is.
 |---|---|---|---|---|---|
 | 1 | **0.4** | **The index knows "offline"** | An explicit unreachable state instead of the 0×0 sentinel; `Reappeared` instead of re-hash; mount-point-aware reconcile; a one-time retry of the stuck files. The invalidation set (read `Thumb::MTime`; mtime in RAM/content keys). Navigation lifecycle fixes ride along. | — | 1. Structural debt that sidecars and rules would otherwise build on. |
 | 2 | **0.5** | **Your downloads know who made them (read-only)** | gallery-dl sidecar ingest as one more enricher: `sidecar_meta` (creator, site, URL, posted) + `sidecar_tags` in their own tables; a read-only **Source** section in Properties; creator/site predicates for smart collections. *No promotion into curated tags yet: that waits for the tagging redesign.* | 0.4 (offline sidecars are safe); the tag-flood decision (Phase 1 data favours separate tables). | 1 and 3: metadata arrives without touching the curated tags. |
-| 3 | **0.6** | **E2: helpers** | The add-extension point (PLAN §16.2/16.3): external tools as Flatpak extensions published through `vitrine-repo`; a run dialog with progress and cancel; `register_batch` / `register_filter`. First helper: ffmpeg frame capture. | The packaging decision (extension via the hosted repo vs. a host tool on `$PATH`). | 3. The seam's second tenant, and E3's prerequisite. |
+| 3 | **0.6** | **E2: helpers** | The add-extension point (PLAN §16.2/16.3): external tools as Flatpak extensions published through `vitrine-repo`; a run dialog with progress and cancel; `register_batch` / `register_filter`. First helper: ffmpeg frame capture, **or gallery-dl** (decided 2026-10-06: the download scripts and the download ledger belong in this tier; gallery-dl is the tool actually used daily, so it may be the better acceptance test). | The packaging decision (extension via the hosted repo vs. a host tool on `$PATH`), which gallery-dl makes harder: it is Python, and a fork. | 3. The seam's second tenant, and E3's prerequisite. |
 | 4 | **0.7** | **E3: colour tools** | gThumb's set (Enhance, Adjust, Equalize, levels) as ImageMagick recipes on E2's machinery, in a Process view, non-destructive, with before/after (PLAN §16.4). Possibly `darktable-cli` develop batches. | 0.6. | The feature wanted since July, built the way it was decided: its own build, on top of E2. |
 | 5 | **0.8** | **Find anything** | The other half of V-11: structured search over the `Query` the engine already has (tag, comment, rating, date, camera, creator), saved searches as smart collections, tags in fuzzy find. Built against the *current* tag model; adopts the redesigned one later. | 0.5 (creator predicate). | The index is the product; this is how it pays off at 288k files. |
 | 6 | **0.9** | **Tagging, redesigned** (design track; slot provisional) | The outcome of the tagging UI/UX rethink (§6): how tags are applied during a migration, where they're visible, whether people/sites/descriptive are different kinds, how sidecar creators are promoted. Includes Manage Tags, the popover, the filter, and whatever the sidebar needs, designed together. **Design first, then one release.** | The design pass (owner-led); 0.5's sidecar data to design against. | 1, and the first organising tool at library scale. |
@@ -102,8 +102,8 @@ decides when each starts. Nothing below is scheduled until it is.
 
 **Beyond ten:** E4, the WASM tier (PLAN §10.5/16.6), only when auto-tagging or
 face grouping is actually wanted; the GPU edit tier; device import. The
-**Video Gallery** is a sister app, not a Vitrine release; 0.7's ffmpeg helper
-is the only overlap.
+**Video Gallery** is a sister app, not a Vitrine release; 0.6's ffmpeg and
+gallery-dl helpers are the only overlap.
 
 ---
 
@@ -136,8 +136,12 @@ is the only overlap.
   prefix convention from 0.4 turns out too weak.
 - **Sidecar tags into `file_tags`.** Rejected by the Phase 1 data: it would
   double the vocabulary with promo hashtags. Separate tables, promote by hand.
-- **The download-ledger DB, the tagging of pre-sidecar TikToks.** gallery-dl
-  side projects; not Vitrine releases.
+- **The gallery-dl download scripts and the download-ledger DB** are no longer
+  side projects: decided 2026-10-06, they are **E2 helper territory** (0.6),
+  the same tier as ImageMagick and darktable. The ledger is the helper's own
+  state (gallery-dl's `archive.sqlite3` already is one; never merge it with the
+  index). Until 0.6 the scripts stay as they are.
+- **The tagging of pre-sidecar TikToks** stays a scripts-side forensics task.
 
 ---
 
@@ -147,10 +151,13 @@ is the only overlap.
    work plus one toast button and commits to no tagging UI; it's also the one
    thing that already cost an afternoon.
 2. **The tagging design pass:** when, and what it must answer (see 0.9's row).
-3. **E2 packaging (before 0.7):** helpers as extensions through `vitrine-repo`,
-   or a host tool on `$PATH`.
-4. **XMP conflict rule (before 1.2):** Vitrine wins, file wins, or newest wins.
-5. **When, if ever, the browse view changes** (1.0 or 1.3).
+3. **E2 packaging (before 0.6):** helpers as extensions through `vitrine-repo`,
+   or a host tool on `$PATH`. Decide with gallery-dl in mind (Python, a fork):
+   ffmpeg and magick are single binaries; gallery-dl is the hard case.
+4. **E2's first helper:** ffmpeg frame capture (simplest) or gallery-dl (the
+   daily tool; the stronger acceptance test).
+5. **XMP conflict rule (before 1.2):** Vitrine wins, file wins, or newest wins.
+6. **When, if ever, the browse view changes** (0.9, 1.0 or 1.3).
 
 ---
 
