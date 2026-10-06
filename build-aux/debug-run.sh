@@ -10,6 +10,7 @@
 #   build-aux/debug-run.sh [FOLDER]           # normal run (warm cache)
 #   build-aux/debug-run.sh --cold [FOLDER]    # force every thumbnail to decode
 #   build-aux/debug-run.sh --interact [FOLDER] # tag/drag/drop/write probes only
+#   build-aux/debug-run.sh --dev [...]        # the dev build in build-dir (run-dev.sh)
 #
 # Then just use the app normally, reproduce the slowdown, and watch the numbers.
 # --cold is non-destructive: it skips the cache *reads* (so everything decodes)
@@ -31,12 +32,14 @@ LOG="$LOGDIR/vitrine-debug_$(date +%Y-%m-%d_%H-%M-%S).log"
 RUNLOG="$(mktemp)"
 ENVFLAGS=(--env=VITRINE_DEBUG=1)
 MODE="warm"
+DEV=0
 # Everything worth keeping. --interact narrows this to the interaction probes.
 KEEP='VDBG|SOAK|OFTEST|panic|CRITICAL|WARNING'
 ARGS=()
 for a in "$@"; do
   case "$a" in
     --cold)   ENVFLAGS+=(--env=VITRINE_NOCACHE=1); MODE="cold" ;;
+    --dev)    DEV=1 ;;
     --interact)
       KEEP='VDBG-(WRITE|TAG|DROP|DRAG|SCANYIELD)|^VDBG fps|panic|CRITICAL|WARNING'
       MODE="interact" ;;
@@ -44,6 +47,7 @@ for a in "$@"; do
     *)        ARGS+=("$a") ;;
   esac
 done
+[ "$DEV" = 1 ] && MODE="$MODE, dev build"
 
 {
   echo
@@ -58,7 +62,17 @@ echo "  → use the app, reproduce the slowdown; Ctrl-C or close the app to stop
 echo
 
 # Merge stderr, keep only the HUD lines, show them live AND append to both logs.
-flatpak run "${ENVFLAGS[@]}" "$APP" "${ARGS[@]}" 2>&1 \
+# --dev runs the last build-aux/run-dev.sh build from build-dir instead of the
+# installed app (the stale-build trap: the installed app is NOT the tree).
+# run-dev.sh takes VITRINE_* from the environment, so the flags become env.
+if [ "$DEV" = 1 ]; then
+  ENVVARS=("${ENVFLAGS[@]#--env=}")
+  LAUNCH=(env "${ENVVARS[@]}" "$REPO/build-aux/run-dev.sh" --no-build "${ARGS[@]}")
+else
+  LAUNCH=(flatpak run "${ENVFLAGS[@]}" "$APP" "${ARGS[@]}")
+fi
+
+"${LAUNCH[@]}" 2>&1 \
   | grep --line-buffered -E "$KEEP" \
   | tee -a "$LOG" "$RUNLOG" || true
 

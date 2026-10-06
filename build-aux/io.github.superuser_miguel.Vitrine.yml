@@ -1,9 +1,10 @@
 # Flatpak manifest — Vitrine (GTK4/libadwaita image browser, Rust/gtk4-rs).
 #
-# Build & run (local dev iteration):
-#   flatpak-builder --user --install --force-clean build-dir \
-#     build-aux/io.github.superuser_miguel.Vitrine.yml
-#   flatpak run io.github.superuser_miguel.Vitrine
+# Build & run (local dev iteration), WITHOUT installing — the installed app is
+# the published one from vitrine-repo and stays untouched:
+#   build-aux/run-dev.sh              # build into build-dir, then run it
+#   build-aux/run-dev.sh --no-build   # run the last build
+#   build-aux/debug-run.sh --dev      # same, with the debug HUD + a log
 #
 # Sandbox posture is PLAN.md §4 (exact, complete set). Do NOT add
 # --filesystem=host, ever. Extra image roots are granted at runtime via the
