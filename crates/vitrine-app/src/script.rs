@@ -351,27 +351,35 @@ impl ScriptHost {
 
     /// Compute one item's sort key. Called once per item by the worker and
     /// memoised there; the comparator never reaches Lua.
+    ///
+    /// The provider lock is released *before* entering Lua. The instruction
+    /// hook cannot interrupt one long C call (a pathological pattern match),
+    /// so a hung key holding the lock would block the main thread on its next
+    /// [`ScriptHost::providers`] — the Sort By menu rebuild — forever. Cloning
+    /// the `Function` is a registry refcount bump and needs no Lua lock.
     pub fn sort_key(&self, index: usize, facts: &ItemFacts) -> Result<SortKey, ScriptError> {
-        let providers = self.lock();
-        let provider = providers.get(index).ok_or_else(|| ScriptError {
-            script: "<host>".into(),
-            message: format!("no sort provider at index {index}"),
-        })?;
-        let script = provider.script.clone();
-        let err = move |e: mlua::Error| ScriptError {
+        let (script, key) = {
+            let providers = self.lock();
+            let provider = providers.get(index).ok_or_else(|| ScriptError {
+                script: "<host>".into(),
+                message: format!("no sort provider at index {index}"),
+            })?;
+            (provider.script.clone(), provider.key.clone())
+        };
+        let err = |e: mlua::Error| ScriptError {
             script: script.clone(),
             message: e.to_string(),
         };
 
-        let table = self.facts_table(facts).map_err(err.clone())?;
+        let table = self.facts_table(facts).map_err(err)?;
         self.enter();
-        let value: Value = provider.key.call(table).map_err(err.clone())?;
+        let value: Value = key.call(table).map_err(err)?;
         match value {
             Value::Integer(i) => Ok(SortKey::Num(i as f64)),
             Value::Number(n) => Ok(SortKey::Num(n)),
             Value::String(s) => Ok(SortKey::Str(s.to_string_lossy().to_string())),
             other => Err(ScriptError {
-                script: provider.script.clone(),
+                script,
                 message: format!(
                     "sort key returned {}, expected a number or a string",
                     other.type_name()
@@ -825,5 +833,61 @@ mod tests {
             host.sort_key(0, &f).unwrap(),
             SortKey::Str("a.jpg|42|3|nil".into())
         );
+    }
+
+    /// A key stuck inside one long C call (the hook can't interrupt it) must
+    /// not hold the provider lock: the main thread's next `providers()` — the
+    /// Sort By menu rebuild — would block forever. The stuck call is modelled
+    /// by a test-only Rust function that parks until released, so the timing
+    /// is deterministic rather than a race against the instruction budget.
+    #[test]
+    fn stuck_key_does_not_block_providers() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let host = Arc::new(host_with(
+            r#"
+            vitrine.register_sort {
+              name = "Stuck",
+              key = function(item) park() return 1 end,
+            }
+            "#,
+        ));
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let release_rx = Mutex::new(release_rx);
+        let park = host
+            .lua
+            .create_function(move |_, ()| {
+                let _ = entered_tx.send(());
+                let _ = release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(10));
+                Ok(())
+            })
+            .unwrap();
+        host.lua.globals().set("park", park).unwrap();
+
+        let worker = {
+            let host = host.clone();
+            std::thread::spawn(move || host.sort_key(0, &facts("a.jpg")))
+        };
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("key never ran");
+
+        let (read_tx, read_rx) = mpsc::channel();
+        {
+            let host = host.clone();
+            std::thread::spawn(move || {
+                let _ = read_tx.send(host.providers().len());
+            });
+        }
+        let read = read_rx.recv_timeout(Duration::from_secs(2));
+
+        let _ = release_tx.send(());
+        assert_eq!(worker.join().unwrap().unwrap(), SortKey::Num(1.0));
+        assert_eq!(read, Ok(1), "providers() blocked behind a running key");
     }
 }
