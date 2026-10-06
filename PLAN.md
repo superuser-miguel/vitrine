@@ -20,8 +20,9 @@ phase's acceptance criteria pass. Within a phase, keep commits small and topical
 > `build-aux/publish-repo.sh`), with the `.flatpak` bundle on GitHub Releases as
 > the offline fallback. Releases so far: 0.1.0 (07-18), 0.2.0 (07-21), 0.3.0
 > (10-05, after a soak from 07-22). Commits and tags are GPG-signed from 0.3.0
-> on. Open defects live in `Troubleshoot/ISSUES.md`. The text below is the
-> July baseline, kept for its rationale.
+> on. Open defects live in `Troubleshoot/ISSUES.md`. **Goals and the
+> release order live in `ROADMAP.md`** (this file holds the designs). The
+> text below is the July baseline, kept for its rationale.
 
 **North Star.** Fast, *smooth* browsing of large image libraries — where
 Nautilus / Loupe / gThumb get sluggish on tens of thousands of images, Vitrine
