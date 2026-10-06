@@ -199,6 +199,16 @@ impl Db {
         let rows = stmt.query_map(rusqlite::params_from_iter(params), FileRecord::from_row)?;
         rows.collect()
     }
+
+    /// How many rows [`Db::query`] would return, without materialising them.
+    pub fn query_count(&self, query: &Query) -> rusqlite::Result<i64> {
+        let (sql, params) = query.build();
+        self.conn().query_row(
+            &format!("SELECT count(*) FROM ({sql})"),
+            rusqlite::params_from_iter(params),
+            |r| r.get(0),
+        )
+    }
 }
 
 /// `?,?,…` — `n` bound-parameter placeholders for an `IN (...)` list.

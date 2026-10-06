@@ -85,16 +85,58 @@ impl Db {
             .collect::<rusqlite::Result<_>>()?;
         let mut out = Vec::with_capacity(rows.len());
         for (id, name, kind, query) in rows {
-            let count = self.collection_files(id)?.len() as i64;
+            let kind = CollectionKind::from_str(&kind);
+            let count = self.collection_count(kind, query.as_deref(), id)?;
             out.push(Collection {
                 id,
                 name,
-                kind: CollectionKind::from_str(&kind),
+                kind,
                 query,
                 count,
             });
         }
         Ok(out)
+    }
+
+    /// The kind of collection `id`, or `None` if there is no such collection —
+    /// one row, for callers that only need to know what they're looking at.
+    pub fn collection_kind(&self, id: i64) -> rusqlite::Result<Option<CollectionKind>> {
+        self.conn()
+            .query_row("SELECT kind FROM collections WHERE id = ?1", [id], |r| {
+                r.get::<_, String>(0)
+            })
+            .optional()
+            .map(|kind| kind.as_deref().map(CollectionKind::from_str))
+    }
+
+    /// How many entries [`Db::collection_files`] would return, counted in SQL.
+    ///
+    /// The sidebar shows this for every collection on every refresh, so it must
+    /// not materialise the rows: a smart collection counts its query, and a
+    /// catalog counts its members that still have at least one present file
+    /// (one per hash, however many copies the hash has).
+    fn collection_count(
+        &self,
+        kind: CollectionKind,
+        query: Option<&str>,
+        id: i64,
+    ) -> rusqlite::Result<i64> {
+        match kind {
+            CollectionKind::Smart => {
+                let q: Query = match query {
+                    Some(json) => serde_json::from_str(json).map_err(ser_err)?,
+                    None => Query::default(),
+                };
+                self.query_count(&q)
+            }
+            CollectionKind::Catalog => self.conn().query_row(
+                "SELECT count(DISTINCT ci.content_hash) FROM collection_items ci
+                 JOIN files f ON f.content_hash = ci.content_hash AND f.missing = 0
+                 WHERE ci.collection_id = ?1",
+                [id],
+                |r| r.get(0),
+            ),
+        }
     }
 
     /// Resolve a collection to its present files: a smart collection runs its
@@ -392,6 +434,87 @@ mod tests {
             ],
             "durable path preferred; portal-only member still listed"
         );
+    }
+
+    #[test]
+    fn counts_match_the_rows_they_stand_for() {
+        // The sidebar count is computed in SQL; it must equal what opening the
+        // collection actually lists, across duplicates, portal handles, missing
+        // rows, members with no file at all, and a smart query with a limit.
+        let db = Db::open_in_memory().unwrap();
+        seed(&db, "/home/u/a.jpg", "h1");
+        seed(&db, "/home/u/copy/a.jpg", "h1");
+        seed(&db, "/run/user/1000/doc/x/a.jpg", "h1");
+        seed(&db, "/home/u/b.jpg", "h2");
+        seed(&db, "/home/u/c.jpg", "h3");
+        seed(&db, "/home/u/gone.jpg", "h4");
+        db.mark_missing("/home/u/gone.jpg").unwrap();
+        db.set_rating("h1", 5).unwrap();
+        db.set_rating("h2", 4).unwrap();
+        db.set_rating("h4", 5).unwrap();
+        db.apply_tag("trip", &h(&["h1", "h3"])).unwrap();
+
+        let cat = db.create_catalog("Trip").unwrap();
+        db.add_to_catalog(cat, &h(&["h1", "h2", "h4", "never-indexed"]))
+            .unwrap();
+        db.create_catalog("Empty").unwrap();
+        for q in [
+            Query::default(),
+            Query {
+                rating_min: Some(4),
+                ..Default::default()
+            },
+            Query {
+                tags_any: vec!["trip".into()],
+                ..Default::default()
+            },
+            Query {
+                limit: Some(2),
+                ..Default::default()
+            },
+            Query {
+                under: Some("/nowhere".into()),
+                ..Default::default()
+            },
+        ] {
+            db.create_smart_collection("Smart", &q).unwrap();
+        }
+
+        let listed = db.list_collections().unwrap();
+        assert_eq!(listed.len(), 7);
+        for c in &listed {
+            assert_eq!(
+                c.count,
+                db.collection_files(c.id).unwrap().len() as i64,
+                "{} {:?} {:?}",
+                c.name,
+                c.kind,
+                c.query
+            );
+        }
+        assert_eq!(
+            listed.iter().find(|c| c.id == cat).unwrap().count,
+            2,
+            "h1 once despite three copies, and h2; not the missing h4 or the unindexed hash"
+        );
+    }
+
+    #[test]
+    fn collection_kind_reads_one_row() {
+        let db = Db::open_in_memory().unwrap();
+        let cat = db.create_catalog("Trip").unwrap();
+        let smart = db
+            .create_smart_collection("All", &Query::default())
+            .unwrap();
+        assert_eq!(
+            db.collection_kind(cat).unwrap(),
+            Some(CollectionKind::Catalog)
+        );
+        assert_eq!(
+            db.collection_kind(smart).unwrap(),
+            Some(CollectionKind::Smart)
+        );
+        assert_eq!(db.collection_kind(9999).unwrap(), None);
     }
 
     #[test]

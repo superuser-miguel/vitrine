@@ -3424,12 +3424,8 @@ impl VitrineWindow {
         };
         self.ensure_read_db();
         let db = self.imp().read_db.borrow();
-        db.as_ref()?
-            .list_collections()
-            .ok()?
-            .into_iter()
-            .find(|c| c.id == id && c.kind == vitrine_engine::CollectionKind::Catalog)
-            .map(|c| c.id)
+        let kind = db.as_ref()?.collection_kind(id).ok()??;
+        (kind == vitrine_engine::CollectionKind::Catalog).then_some(id)
     }
 
     /// What Delete does depends on where you are.
