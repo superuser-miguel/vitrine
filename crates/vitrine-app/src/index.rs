@@ -98,6 +98,9 @@ enum Request {
         orientation: i64,
     },
     Rekey {
+        /// The saved file's own path: its row still holds `old` when this runs,
+        /// so it must not count as "another copy still uses the old hash".
+        path: String,
         old: String,
         new: String,
     },
@@ -186,12 +189,14 @@ impl Annotator {
         )
     }
 
-    /// Move all annotations to a baked file's new content hash (Save path).
-    pub fn rekey(&self, old: &str, new: &str) -> bool {
+    /// Carry all annotations to a baked file's new content hash (Save path):
+    /// moved, or copied when another copy of the image still holds `old`.
+    pub fn rekey(&self, path: &str, old: &str, new: &str) -> bool {
         self.send(
             "rekey",
             1,
             Request::Rekey {
+                path: path.to_string(),
                 old: old.to_string(),
                 new: new.to_string(),
             },
@@ -531,8 +536,8 @@ fn apply(
                     glib::g_warning!("vitrine", "set rating {hash}: {e}");
                 }
             }
-            Request::Rekey { old, new } => {
-                if let Err(e) = db.rekey_annotations(&old, &new) {
+            Request::Rekey { path, old, new } => {
+                if let Err(e) = db.rekey_annotations_from(&path, &old, &new) {
                     glib::g_warning!("vitrine", "rekey {old}->{new}: {e}");
                 }
             }

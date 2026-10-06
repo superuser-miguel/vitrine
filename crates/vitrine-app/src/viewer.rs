@@ -1294,8 +1294,21 @@ impl VitrineViewer {
                 // The writer's rekey moves the annotations and drops the old
                 // hash's instructions.
                 if !old_hash.is_empty() {
-                    if let Some(annotator) = self.imp().annotator.borrow().as_ref() {
-                        annotator.rekey(&old_hash, &new_hash);
+                    let path = item
+                        .file()
+                        .path()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let accepted = self
+                        .imp()
+                        .annotator
+                        .borrow()
+                        .as_ref()
+                        .is_some_and(|annotator| annotator.rekey(&path, &old_hash, &new_hash));
+                    if !accepted {
+                        self.toast(
+                            "Saved, but its tags and ratings couldn’t be moved to the new version",
+                        );
                     }
                 }
                 item.set_content_hash(&new_hash);
