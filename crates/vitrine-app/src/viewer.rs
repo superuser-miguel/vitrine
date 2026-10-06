@@ -1167,26 +1167,40 @@ impl VitrineViewer {
                 let Ok(dest) = dialog.save_future(win.as_ref()).await else {
                     return;
                 };
-                let Some(path) = dest.path() else { return };
-                let dest_name = path
-                    .file_name()
+                let dest_name = dest
+                    .basename()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
                 if let Some(refusal) = save_as_refusal(&dest_name) {
                     v.toast(&refusal);
                     return;
                 }
-                let ext = file_ext(&dest_name).unwrap_or_default().to_string();
-                match v.bake(&item, ext).await {
-                    Some(bytes) => {
-                        let ok = gio::spawn_blocking(move || std::fs::write(&path, bytes).is_ok())
-                            .await
-                            .unwrap_or(false);
-                        if !ok {
-                            glib::g_warning!("vitrine", "save-as write failed");
-                        }
+                // Saving the copy over the original is Save in place: that
+                // path rekeys the annotations and clears the instructions (a
+                // plain write would show the edit twice, tags on the old hash).
+                let (src, dst) = (item.file(), dest.clone());
+                let onto_source = gio::spawn_blocking(move || same_file(&src, &dst))
+                    .await
+                    .unwrap_or(false);
+                if onto_source {
+                    if v.item_at(v.current_position()).as_ref() == Some(&item) {
+                        v.confirm_save();
                     }
-                    None => glib::g_warning!("vitrine", "save-as bake failed"),
+                    return;
+                }
+                let ext = file_ext(&dest_name).unwrap_or_default().to_string();
+                let Some(bytes) = v.bake(&item, ext).await else {
+                    v.toast("Couldn’t save — the image couldn’t be re-encoded");
+                    return;
+                };
+                let written = gio::spawn_blocking(move || {
+                    write_replace(&dest, &bytes).map_err(|e| e.message().to_string())
+                })
+                .await
+                .unwrap_or_else(|_| Err("worker failed".into()));
+                if let Err(err) = written {
+                    glib::g_warning!("vitrine", "save-as write failed: {err}");
+                    v.toast(&format!("Couldn’t save: {err}"));
                 }
             }
         ));
@@ -1226,7 +1240,7 @@ impl VitrineViewer {
         ));
     }
 
-    /// Bake into the original file: write-temp + rename, re-hash, move the
+    /// Bake into the original file: atomic replace, re-hash, move the
     /// annotations to the new identity, clear the (now baked-in) instructions.
     async fn save_in_place(&self) {
         let pos = self.current_position();
@@ -1243,46 +1257,82 @@ impl VitrineViewer {
         let ext = file_ext(&name).unwrap_or_default().to_string();
         let Some(bytes) = self.bake(&item, ext).await else {
             glib::g_warning!("vitrine", "save bake failed");
+            self.toast("Couldn’t save — the image couldn’t be re-encoded");
             return;
         };
         let old_hash = item.content_hash();
-        let write_path = path.clone();
-        let new_hash = gio::spawn_blocking(move || {
-            let tmp = write_path.with_extension("vitrine-tmp");
-            std::fs::write(&tmp, &bytes).ok()?;
-            std::fs::rename(&tmp, &write_path).ok()?;
-            vitrine_engine::blake3_file(&write_path).ok()
+        let file = item.file();
+        let written = gio::spawn_blocking(move || {
+            write_replace(&file, &bytes).map_err(|e| e.message().to_string())?;
+            // The bytes are on disk; a failed re-hash must not read as "not saved".
+            Ok::<_, String>(vitrine_engine::blake3_file(&path).ok())
         })
         .await
-        .ok()
-        .flatten();
-        let Some(new_hash) = new_hash else {
-            glib::g_warning!("vitrine", "save write/rehash failed");
-            return;
+        .unwrap_or_else(|_| Err("worker failed".into()));
+        let new_hash = match written {
+            Ok(hash) => hash,
+            Err(err) => {
+                glib::g_warning!("vitrine", "save write failed: {err}");
+                self.toast(&format!("Couldn’t save: {err}"));
+                return;
+            }
         };
-        if !old_hash.is_empty() {
-            if let Some(annotator) = self.imp().annotator.borrow().as_ref() {
-                annotator.rekey(&old_hash, &new_hash);
+        let uri = item.file().uri().to_string();
+        // Every cache key this uri was shown under: the identity state (the
+        // pre-save pixels) plus each edit state in its history.
+        let mut suffixes = vec![
+            String::new(),
+            crate::thumbnails::edit_key(item.orientation(), item.crop()),
+        ];
+        if let Some((states, _)) = self.imp().edit_history.borrow().get(&uri) {
+            suffixes.extend(
+                states
+                    .iter()
+                    .map(|(o, c)| crate::thumbnails::edit_key(*o, *c)),
+            );
+        }
+        match new_hash {
+            Some(new_hash) => {
+                // The writer's rekey moves the annotations and drops the old
+                // hash's instructions.
+                if !old_hash.is_empty() {
+                    if let Some(annotator) = self.imp().annotator.borrow().as_ref() {
+                        annotator.rekey(&old_hash, &new_hash);
+                    }
+                }
+                item.set_content_hash(&new_hash);
+            }
+            None => {
+                // Saved but unreadable just now: still drop the instructions
+                // (under the old hash) so the edit isn't applied twice.
+                glib::g_warning!("vitrine", "save rehash failed");
+                self.set_edit_state(&item, 1, None);
             }
         }
-        item.set_content_hash(&new_hash);
         // Instructions are in the pixels now — identity state, fresh history.
         item.set_orientation(1);
         item.set_crop(None);
-        self.imp()
-            .edit_history
-            .borrow_mut()
-            .remove(&item.file().uri().to_string());
+        self.imp().edit_history.borrow_mut().remove(&uri);
         self.sync_history_buttons(&item);
-        // Evict RAM entries for this uri (viewer + thumbs at common buckets),
-        // then re-show; the disk cache self-invalidates via the mtime check.
-        let uri = item.file().uri().to_string();
-        self.imp().cache.borrow_mut().remove(&uri);
+        // Evict RAM entries for this uri (viewer + thumbs at common buckets,
+        // under every suffix it was shown with), then re-show; the disk cache
+        // self-invalidates via the mtime check.
+        {
+            let mut cache = self.imp().cache.borrow_mut();
+            let mut hists = self.imp().hist_cache.borrow_mut();
+            for suffix in &suffixes {
+                let key = format!("{uri}{suffix}");
+                cache.remove(&key);
+                hists.remove(&key);
+            }
+        }
         if let Some(thumbs) = self.imp().thumb_cache.borrow().as_ref() {
+            let mut thumbs = thumbs.borrow_mut();
             for px in [128u32, 256, 512, 1024] {
-                thumbs
-                    .borrow_mut()
-                    .remove(&crate::thumbnails::ram_key(&uri, px));
+                let base = crate::thumbnails::ram_key(&uri, px);
+                for suffix in &suffixes {
+                    thumbs.remove(&format!("{base}{suffix}"));
+                }
             }
         }
         self.show_position(pos);
@@ -2369,9 +2419,188 @@ fn save_as_refusal(dest_name: &str) -> Option<String> {
     }
 }
 
+/// Replace `file`'s contents with `bytes` without ever leaving it half
+/// written: GIO writes a temp file beside it and renames it over the original
+/// (keeping the original's mode and owner). Inside a document-portal
+/// directory the portal's FUSE accepts that temp file + rename too, which a
+/// hand-rolled sibling temp also gets but without the mode/owner care.
+/// Blocking — call on a worker.
+fn write_replace(file: &gio::File, bytes: &[u8]) -> Result<(), glib::Error> {
+    file.replace_contents(
+        bytes,
+        None,
+        false,
+        gio::FileCreateFlags::NONE,
+        gio::Cancellable::NONE,
+    )
+    .map(|_| ())
+}
+
+/// The portal's xattr naming the real file behind a `/run/user/…/doc/` path.
+const PORTAL_HOST_PATH: &str = "xattr::document-portal.host-path";
+
+/// The host path behind a document-portal file, if `file` is one.
+fn portal_host_path(file: &gio::File) -> Option<std::path::PathBuf> {
+    let info = file
+        .query_info(
+            PORTAL_HOST_PATH,
+            gio::FileQueryInfoFlags::NONE,
+            gio::Cancellable::NONE,
+        )
+        .ok()?;
+    let raw = info.attribute_as_string(PORTAL_HOST_PATH)?;
+    use std::os::unix::ffi::OsStringExt;
+    let bytes = unescape_xattr(&raw);
+    (!bytes.is_empty()).then(|| std::ffi::OsString::from_vec(bytes).into())
+}
+
+/// Undo GIO's `xattr::` value escaping (`\xNN` for non-printable bytes and
+/// the backslash), dropping trailing NULs.
+fn unescape_xattr(value: &str) -> Vec<u8> {
+    let src = value.as_bytes();
+    let mut out = Vec::with_capacity(src.len());
+    let mut i = 0;
+    while i < src.len() {
+        if src[i] == b'\\' && src.get(i + 1) == Some(&b'x') {
+            if let Some(b) = src
+                .get(i + 2..i + 4)
+                .and_then(|h| std::str::from_utf8(h).ok())
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
+            {
+                out.push(b);
+                i += 4;
+                continue;
+            }
+        }
+        out.push(src[i]);
+        i += 1;
+    }
+    while out.last() == Some(&0) {
+        out.pop();
+    }
+    out
+}
+
+/// Whether `a` and `b` are the same file for Save's purposes. Equal GFiles;
+/// or, with document-portal paths resolved to their host paths, the same
+/// directory entry ([`same_entry`]). Blocking (stats, xattrs).
+fn same_file(a: &gio::File, b: &gio::File) -> bool {
+    if a.equal(b) {
+        return true;
+    }
+    let resolve = |f: &gio::File| portal_host_path(f).or_else(|| f.path());
+    match (resolve(a), resolve(b)) {
+        (Some(pa), Some(pb)) => same_entry(&pa, &pb),
+        _ => false,
+    }
+}
+
+/// Whether two paths name the same directory entry: identical once
+/// canonicalized (symlinks), or the same name — ASCII case aside, if it
+/// resolves to the same inode (case-insensitive drives) — in the same
+/// directory by device + inode (bind mounts). A hard link under another name
+/// is a different entry: replacing it leaves the original untouched.
+fn same_entry(a: &std::path::Path, b: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    if a == b {
+        return true;
+    }
+    if let (Ok(ca), Ok(cb)) = (a.canonicalize(), b.canonicalize()) {
+        if ca == cb {
+            return true;
+        }
+    }
+    let id = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| (m.dev(), m.ino()));
+    let dir_id = |p: &std::path::Path| p.parent().and_then(id);
+    let (Some(na), Some(nb)) = (a.file_name(), b.file_name()) else {
+        return false;
+    };
+    let same_dir = matches!((dir_id(a), dir_id(b)), (Some(x), Some(y)) if x == y);
+    if !same_dir {
+        return false;
+    }
+    na == nb
+        || (na.eq_ignore_ascii_case(nb) && matches!((id(a), id(b)), (Some(x), Some(y)) if x == y))
+}
+
 #[cfg(test)]
 mod save_tests {
     use super::*;
+
+    /// A fresh scratch dir under the system temp dir (never user files).
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("vitrine-save-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn same_entry_sees_through_symlinks_but_not_hard_links() {
+        let dir = scratch("entry");
+        let src = dir.join("a.jpg");
+        std::fs::write(&src, b"x").unwrap();
+        // Spelled differently, same entry.
+        assert!(same_entry(&src, &dir.join(".").join("a.jpg")));
+        let link_dir = dir.join("via-link");
+        std::os::unix::fs::symlink(&dir, &link_dir).unwrap();
+        assert!(same_entry(&src, &link_dir.join("a.jpg")));
+        std::os::unix::fs::symlink(&src, dir.join("b.jpg")).unwrap();
+        assert!(same_entry(&src, &dir.join("b.jpg")));
+        // A hard link is another name: writing it doesn't touch a.jpg.
+        std::fs::hard_link(&src, dir.join("c.jpg")).unwrap();
+        assert!(!same_entry(&src, &dir.join("c.jpg")));
+        // Different / not-yet-existing files.
+        assert!(!same_entry(&src, &dir.join("a-edited.jpg")));
+        std::fs::write(dir.join("d.jpg"), b"x").unwrap();
+        assert!(!same_entry(&src, &dir.join("d.jpg")));
+        // Same GFile through two spellings.
+        let (fa, fb) = (
+            gio::File::for_path(&src),
+            gio::File::for_path(link_dir.join("a.jpg")),
+        );
+        assert!(same_file(&fa, &fb));
+        assert!(!same_file(&fa, &gio::File::for_path(dir.join("d.jpg"))));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unescape_xattr_decodes_gio_escapes() {
+        assert_eq!(unescape_xattr("/home/u/a.jpg"), b"/home/u/a.jpg");
+        assert_eq!(
+            unescape_xattr("/home/u/caf\\xc3\\xa9.jpg\\x00"),
+            "/home/u/café.jpg".as_bytes()
+        );
+        assert_eq!(unescape_xattr("a\\x5cb"), b"a\\b");
+        assert_eq!(unescape_xattr("trailing\\x"), b"trailing\\x");
+    }
+
+    #[test]
+    fn write_replace_is_atomic_and_keeps_the_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("replace");
+        let path = dir.join("a.png");
+        std::fs::write(&path, b"old bytes, longer than the new").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let before = std::fs::metadata(&path).unwrap();
+        write_replace(&gio::File::for_path(&path), b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(after.permissions().mode() & 0o777, 0o600);
+        // Replaced by rename (a new inode), not truncated in place.
+        use std::os::unix::fs::MetadataExt;
+        assert_ne!(before.ino(), after.ino());
+        // No temp file left behind.
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("a.png")]);
+        // A new file is created; an unwritable target is an error, not a panic.
+        write_replace(&gio::File::for_path(dir.join("b.jpg")), b"b").unwrap();
+        assert!(write_replace(&gio::File::for_path(dir.join("no/such/dir.png")), b"x").is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn save_in_place_only_for_writable_formats() {
