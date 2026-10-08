@@ -48,6 +48,26 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.3.2" date="2026-10-08">
+      <description>
+        <p>
+          A safety release: saving an edited image no longer risks your tags,
+          your file format or the edit itself, and large libraries respond
+          faster.
+        </p>
+        <p>Fixed in this release:</p>
+        <ul>
+          <li>Saving an edited image keeps the tags and ratings of any other copy of it in your library.</li>
+          <li>Save is only offered in place for JPEG and PNG; other formats use Save As with a matching file type, and the dialog says embedded metadata won't be kept.</li>
+          <li>Choosing the original file in Save As saves it in place properly, and a failed save now says so.</li>
+          <li>Text dragged from a browser onto a catalog is no longer added as an image.</li>
+          <li>A scan that fails no longer leaves "Indexing library…" showing.</li>
+          <li>A misbehaving sort script can no longer freeze the window.</li>
+          <li>Undo and Redo follow the image you're looking at.</li>
+          <li>Rating filters, collection counts and opening a tag or collection are much faster in large libraries.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.1" date="2026-10-06">
       <description>
         <p>
