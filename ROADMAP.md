@@ -72,6 +72,7 @@ They don't change between releases.
 | *soak* | 07-22 → 10-05 | Fuzzy find, histogram, removable + content-hash thumbnail tiers, Lua sorts (E1), bulk tag removal, V-25/26/28/29. |
 | 0.3.0 | 2026-10-05 | All of the above shipped; the signed hosted repo; site refresh; CI fixed. |
 | 0.3.1 | 2026-10-06 | Private thumbnail cache (V-30), cache rows purged from the index (V-31), Clean Up Thumbnails, V-05, remembered icon size, `release.sh`, `run-dev.sh`. |
+| 0.3.2 | 2026-10-08 | The review's data-safety set: Save keeps duplicates' annotations and never writes the wrong format (V-32–34), phantom catalog drops, the stuck banner, the Lua lock (V-35–37), viewer undo/prefetch (V-38), the scale fixes (V-39). Shipped with hand checks deferred to `Troubleshoot/SOAK-CHECKLIST.md`. |
 
 **Known debt (code review, 2026-10-06; full list in the vault note):**
 the engine can't express "unreachable", so 63k offline/portal files are stuck
@@ -111,8 +112,8 @@ gallery-dl helpers are the only overlap.
 
 | Review finding (vault note, 2026-10-06) | Release |
 |---|---|
-| Save in place moves annotations; Save writes PNG under other extensions; Save As onto the source | **0.3.2** (point release, now) |
-| Phantom hash from a text drop; stuck "Indexing…" banner; Lua guard held across a call; cheap perf wins (collection counts, N+1 ratings, partial index, `rating_min`) | **0.3.2** |
+| Save in place moves annotations; Save writes PNG under other extensions; Save As onto the source | **0.3.2 — shipped** |
+| Phantom hash from a text drop; stuck "Indexing…" banner; Lua guard held across a call; cheap perf wins (collection counts, N+1 ratings, partial index, `rating_min`) | **0.3.2 — shipped** |
 | Enrichment sentinel for unreachable files + retry of the 63k rows; `Reappeared`; mount-point reconcile | **0.4** |
 | `Thumb::MTime` read back; mtime in RAM/content keys | **0.4** |
 | Folder-load generation token; viewer pop on every navigation; tag-filter reset | **0.4** |
@@ -162,6 +163,10 @@ gallery-dl helpers are the only overlap.
 ---
 
 ## 8. How to use this file
+
+- **Soak items:** anything a release couldn't verify by machine goes into
+  `Troubleshoot/SOAK-CHECKLIST.md` the day it ships; the next soak works
+  through it.
 
 - Starting a session: read §1, §3, then the first unshipped row of §4.
 - Shipping a release: move its row into §3, bump the status note in `PLAN.md`,
