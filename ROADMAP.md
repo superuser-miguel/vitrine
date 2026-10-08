@@ -72,7 +72,7 @@ They don't change between releases.
 | *soak* | 07-22 → 10-05 | Fuzzy find, histogram, removable + content-hash thumbnail tiers, Lua sorts (E1), bulk tag removal, V-25/26/28/29. |
 | 0.3.0 | 2026-10-05 | All of the above shipped; the signed hosted repo; site refresh; CI fixed. |
 | 0.3.1 | 2026-10-06 | Private thumbnail cache (V-30), cache rows purged from the index (V-31), Clean Up Thumbnails, V-05, remembered icon size, `release.sh`, `run-dev.sh`. |
-| 0.3.2 | 2026-10-08 | The review's data-safety set: Save keeps duplicates' annotations and never writes the wrong format (V-32–34), phantom catalog drops, the stuck banner, the Lua lock (V-35–37), viewer undo/prefetch (V-38), the scale fixes (V-39). Shipped with hand checks deferred to `Troubleshoot/SOAK-CHECKLIST.md`. |
+| 0.3.2 | 2026-10-08 | The review's data-safety set: Save keeps duplicates' annotations and never writes the wrong format (V-32–34), phantom catalog drops, the stuck banner, the Lua lock (V-35–37), viewer undo/prefetch (V-38), the scale fixes (V-39). Shipped with hand checks deferred to the soak checklist (owner's notes). |
 
 **Known debt (code review, 2026-10-06; full list in the vault note):**
 the engine can't express "unreachable", so 63k offline/portal files are stuck
@@ -165,8 +165,9 @@ gallery-dl helpers are the only overlap.
 ## 8. How to use this file
 
 - **Soak items:** anything a release couldn't verify by machine goes into
-  `Troubleshoot/SOAK-CHECKLIST.md` the day it ships; the next soak works
-  through it.
+  the soak checklist in the owner's notes (the Obsidian vault, so it can be
+  ticked off on a phone) the day it ships; the next soak works through it.
+  Failures come back here as ISSUES entries.
 
 - Starting a session: read §1, §3, then the first unshipped row of §4.
 - Shipping a release: move its row into §3, bump the status note in `PLAN.md`,
