@@ -314,7 +314,7 @@ pub fn store_content(hash: &str, target_px: u32, texture: &gdk::Texture) {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let wrote = texture.save_to_png(&path).is_ok();
+        let wrote = write_atomic(&path, &texture.save_to_png_bytes()).is_ok();
         if wrote && crate::debug::enabled() {
             use std::sync::atomic::{AtomicBool, Ordering};
             static LOGGED: AtomicBool = AtomicBool::new(false);
@@ -778,9 +778,55 @@ fn write_thumb(
     for root in roots {
         let dir = root.join(bucket.dir());
         if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = std::fs::write(dir.join(&rel), &png);
+            let _ = write_atomic(&dir.join(&rel), &png);
         }
     }
+}
+
+/// Write `bytes` to `path` so that a reader only ever sees a whole file: write
+/// a temporary in the same directory, then `rename` over the final name — the
+/// spec's "Concurrent Thumbnail Creation" procedure. A crash mid-write leaves
+/// at most a stray temporary, never a truncated thumbnail under a real key.
+///
+/// The temporary is named the spec's way (program name, process id, the
+/// key) and hidden: `.<key>.png.vitrine-<pid>-<n>`. No thumbnail reader opens
+/// it — they only open `<key>.png` — and it doesn't end in `.png`. Created
+/// `0600`, as the spec asks of every thumbnail. Blocking.
+fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    write_atomic_with(path, |file| file.write_all(bytes))
+}
+
+/// [`write_atomic`] with the write itself supplied, so a test can fail it
+/// halfway.
+fn write_atomic_with(
+    path: &std::path::Path,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    };
+    let tmp = dir.join(format!(
+        ".{}.vitrine-{}-{}",
+        name.to_string_lossy(),
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut file| write(&mut file))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 /// Write `texture` to the thumbnail cache(s), tagged with the freedesktop
@@ -1149,6 +1195,52 @@ mod tests {
         file.set_modified(std::time::SystemTime::now()).unwrap();
         assert!(mtime_secs(&std::fs::metadata(&path).unwrap()) > 1_000_000);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// #18: a thumbnail appears at its final name whole or not at all, and a
+    /// failed write leaves nothing behind — not even the temporary.
+    #[test]
+    fn atomic_write_never_exposes_a_partial_file() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("vitrine-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("d40775e596682f2a16d1b834c221c0a2.png");
+        let listing = || {
+            let mut names: Vec<String> = std::fs::read_dir(&dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            names
+        };
+
+        // Fails halfway: half the bytes went to the temporary, none of them
+        // to the final name, and the temporary is cleaned up.
+        let err = write_atomic_with(&path, |file| {
+            file.write_all(b"\x89PNG half")?;
+            assert!(!path.exists(), "nothing at the final name mid-write");
+            Err(std::io::Error::other("disk full"))
+        });
+        assert!(err.is_err());
+        assert!(listing().is_empty(), "{:?}", listing());
+
+        // An existing thumbnail stays whole while its replacement is written.
+        std::fs::write(&path, b"old thumbnail").unwrap();
+        write_atomic_with(&path, |file| {
+            file.write_all(b"new ")?;
+            assert_eq!(std::fs::read(&path).unwrap(), b"old thumbnail");
+            file.write_all(b"thumbnail")
+        })
+        .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new thumbnail");
+        assert_eq!(listing(), vec![path.file_name().unwrap().to_string_lossy()]);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+
+        write_atomic(&path, b"whole").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"whole");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     fn thumb(tier: Tier, name: &str, size: u64, mtime: i64) -> CachedThumb {
