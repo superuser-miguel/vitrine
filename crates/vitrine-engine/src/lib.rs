@@ -62,7 +62,7 @@ pub use files::{
 pub use hash::{blake3_bytes, blake3_file, is_content_hash, phash_distance, phash_rgb8};
 pub use query::{Direction, Query, SortKey};
 pub use resize::{crop_rgba, encode_baked, orient_rgba, resize_rgba};
-pub use scanner::{classify, walk_images, Change, ScannedFile};
+pub use scanner::{classify, walk_images, walk_library, Change, Reconcile, ScannedFile, Walk};
 pub use tags::Tag;
 pub use xmp::{sidecar_path, XmpMetadata};
 

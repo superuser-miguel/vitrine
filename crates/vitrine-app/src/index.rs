@@ -24,7 +24,7 @@ use gtk::prelude::*;
 
 use vitrine_engine::scanner::Change;
 use vitrine_engine::{
-    classify, walk_images, Db, EnrichOutcome, Enrichment, FileRecord, IndexExclusions, Query,
+    classify, walk_library, Db, EnrichOutcome, Enrichment, FileRecord, IndexExclusions, Query,
 };
 
 /// The library index database path (app-private under Flatpak). Shared by the
@@ -820,8 +820,8 @@ fn scan_folder(
     checkpoint: &mut dyn FnMut(),
     added: &mut usize,
 ) -> ScanResult {
-    let files = walk_images(folder, exclusions);
-    let total = files.len();
+    let walk = walk_library(folder, exclusions);
+    let total = walk.files.len();
     let _ = progress.try_send(IndexProgress::Started {
         folder: folder.to_path_buf(),
         total,
@@ -832,37 +832,38 @@ fn scan_folder(
     // file's old name is now a "missing" row whose content_hash the new name can
     // reclaim, keeping one row (and its indexed_at) instead of leaving a stale
     // missing row beside a fresh one.
-    let seen: HashSet<String> = files
+    let seen: HashSet<String> = walk
+        .files
         .iter()
         .map(|sf| sf.path.to_string_lossy().to_string())
         .collect();
 
-    // Reconcile only when the root is actually readable. An unplugged drive — or
+    // Reconcile only what the walk could actually see. An unplugged drive — or
     // a document-portal handle whose volume is gone — walks as *zero files*,
     // which is indistinguishable from "the user deleted everything" unless we
     // look. Reconciling then would mark the whole subtree missing: on this
     // author's index a single unplugged 8TB drive accounts for 44,340 rows, and
-    // `missing` is what reconciliation acts on afterwards.
-    //
-    // The distinguishing signal is the *error*, not emptiness. An unmounted
-    // volume makes the indexed folder vanish outright — the parent
-    // document-portal directory survives but the granted subtree is gone — so
-    // `read_dir` fails. A folder the user genuinely emptied still opens fine and
-    // must still reconcile, or real deletions would never be recorded.
-    let root_readable = std::fs::read_dir(folder).is_ok();
-    if root_readable {
-        // Rows under an excluded (cache) path are left alone — the walk
-        // skipped them, so their absence from `seen` means nothing.
-        db.reconcile_deleted_excluding(&folder.to_string_lossy(), &seen, exclusions)?;
-    } else {
+    // `missing` is what reconciliation acts on afterwards. The same holds for a
+    // mount point *inside* a readable root, an unreadable subfolder, or a
+    // different disk on a known mount point: `reconcile_walk` holds those
+    // subtrees back (code review #6). Rows under an excluded (cache) path are
+    // left alone too — the walk skipped them.
+    let reconciled = db.reconcile_walk(folder, &walk, exclusions)?;
+    if reconciled.root_unavailable {
         glib::g_warning!(
             "vitrine",
-            "skipping deletion reconcile for {}: root unreadable (unmounted volume?) — \
+            "skipping deletion reconcile for {}: root unavailable (unmounted volume?) — \
              {} indexed rows left untouched",
             folder.display(),
-            db.paths_under(&folder.to_string_lossy())
-                .map(|v| v.len())
-                .unwrap_or(0)
+            reconciled.held_back
+        );
+    } else if reconciled.held_back > 0 {
+        glib::g_message!(
+            "vitrine",
+            "reconcile {}: {} marked missing, {} left alone under unmounted or unreadable folders",
+            folder.display(),
+            reconciled.flagged,
+            reconciled.held_back
         );
     }
 
@@ -876,7 +877,7 @@ fn scan_folder(
 
     let now = now_secs();
 
-    for (i, sf) in files.iter().enumerate() {
+    for (i, sf) in walk.files.iter().enumerate() {
         let path = sf.path.to_string_lossy().to_string();
 
         let existing = db.file_by_path(&path)?;
@@ -1182,5 +1183,34 @@ mod tests {
         assert_eq!(back.date_taken, Some(1_000_000_000));
         assert_eq!(back.camera.as_deref(), Some("CAM"));
         assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
+    }
+
+    /// #6 end to end: a drive mounted inside the root is unplugged, leaving
+    /// its empty mount point. The rescan leaves its rows present; when it is
+    /// plugged back unchanged, its files simply reappear.
+    #[test]
+    fn a_rescan_with_an_inner_drive_unplugged_marks_nothing_missing() {
+        let dir = temp_folder("inner-drive");
+        let drive = dir.join("drive");
+        std::fs::create_dir_all(drive.join("2024")).unwrap();
+        std::fs::write(drive.join("2024/x.jpg"), b"on the drive").unwrap();
+        let x = drive.join("2024/x.jpg").to_string_lossy().to_string();
+        let db = Db::open_in_memory().unwrap();
+        let (tx, _rx) = async_channel::unbounded();
+        scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {}).unwrap();
+        let before = db.file_by_path(&x).unwrap().unwrap();
+
+        // Unplug: the mount point stays behind, empty.
+        std::fs::rename(&drive, dir.with_extension("offline")).unwrap();
+        std::fs::create_dir(&drive).unwrap();
+        scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {}).unwrap();
+        assert!(!db.file_by_path(&x).unwrap().unwrap().missing);
+
+        // Replug.
+        std::fs::remove_dir(&drive).unwrap();
+        std::fs::rename(dir.with_extension("offline"), &drive).unwrap();
+        scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {}).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(db.file_by_path(&x).unwrap().unwrap(), before);
     }
 }

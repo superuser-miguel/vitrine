@@ -51,31 +51,154 @@ pub fn is_image_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Everything one walk of a library root learned: the image files, and where
+/// the tree it saw may not be the whole story (code review #6).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Walk {
+    pub files: Vec<ScannedFile>,
+    /// Directories on a different device from their parent: mount points,
+    /// including the root itself when it is one.
+    pub mounts: Vec<PathBuf>,
+    /// Directories the walk could not list (permissions, I/O errors).
+    pub unreadable: Vec<PathBuf>,
+}
+
 /// Recursively list image files under `root` (following the tree, skipping
 /// unreadable entries). Order is filesystem-dependent. Excluded paths (caches,
 /// V-31) are pruned as whole subtrees, so a `~/.cache` under the root costs one
 /// check, not a walk of every thumbnail in it.
 pub fn walk_images(root: &Path, exclusions: &IndexExclusions) -> Vec<ScannedFile> {
-    WalkDir::new(root)
+    walk_library(root, exclusions).files
+}
+
+/// [`walk_images`], also noting the mount points it crossed and the
+/// directories it could not read — what [`Db::reconcile_walk`] needs to tell
+/// "deleted" from "not here right now". One extra `stat` per directory.
+pub fn walk_library(root: &Path, exclusions: &IndexExclusions) -> Walk {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut walk = Walk::default();
+    if is_mount_point(root) {
+        walk.mounts.push(root.to_path_buf());
+    }
+    // Device of each directory on the current path, indexed by depth.
+    let mut devs: Vec<Option<u64>> = Vec::new();
+    for entry in WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| !exclusions.excludes(e.path()))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file() && is_image_path(e.path()))
-        .filter_map(|e| {
-            let meta = e.metadata().ok()?;
-            let mtime = meta
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
-                .as_secs() as i64;
-            Some(ScannedFile {
-                path: e.into_path(),
-                size: meta.len() as i64,
-                mtime,
-            })
-        })
-        .collect()
+    {
+        let e = match entry {
+            Ok(e) => e,
+            Err(err) => {
+                if let Some(path) = err.path() {
+                    walk.unreadable.push(path.to_path_buf());
+                }
+                continue;
+            }
+        };
+        if e.file_type().is_dir() {
+            let dev = e.metadata().ok().map(|m| m.dev());
+            devs.truncate(e.depth());
+            let parent = e.depth().checked_sub(1).and_then(|d| devs.get(d).copied());
+            if let (Some(Some(parent)), Some(dev)) = (parent, dev) {
+                if parent != dev {
+                    walk.mounts.push(e.path().to_path_buf());
+                }
+            }
+            devs.push(dev);
+            continue;
+        }
+        if !(e.file_type().is_file() && is_image_path(e.path())) {
+            continue;
+        }
+        let Ok(meta) = e.metadata() else { continue };
+        let Some(mtime) = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        else {
+            continue;
+        };
+        walk.files.push(ScannedFile {
+            path: e.into_path(),
+            size: meta.len() as i64,
+            mtime: mtime.as_secs() as i64,
+        });
+    }
+    walk
+}
+
+/// Whether `dir` sits on a different device from its parent.
+fn is_mount_point(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Some(parent) = dir.parent() else {
+        return false;
+    };
+    match (std::fs::metadata(dir), std::fs::metadata(parent)) {
+        (Ok(d), Ok(p)) => d.dev() != p.dev(),
+        _ => false,
+    }
+}
+
+/// Whether `dir` looks like nothing is there right now: gone, unreadable, or
+/// an empty directory — what a mount point is when its volume is unplugged.
+fn looks_absent(dir: &Path) -> bool {
+    match std::fs::read_dir(dir) {
+        Ok(mut entries) => entries.next().is_none(),
+        Err(_) => true,
+    }
+}
+
+/// Whether the nearest still-existing ancestor of `file`, strictly below
+/// `root`, looks absent (empty or unreadable). `cache` remembers the answer
+/// per directory, so a whole unplugged subtree costs one look per directory.
+fn inside_absent_dir(
+    file: &Path,
+    root: &Path,
+    cache: &mut std::collections::HashMap<PathBuf, bool>,
+) -> bool {
+    let mut climbed = Vec::new();
+    let mut answer = false;
+    let mut dir = file.parent();
+    while let Some(d) = dir {
+        if d == root || !d.starts_with(root) {
+            break;
+        }
+        if let Some(&known) = cache.get(d) {
+            answer = known;
+            break;
+        }
+        climbed.push(d.to_path_buf());
+        match std::fs::symlink_metadata(d) {
+            Ok(meta) => {
+                answer = meta.is_dir() && looks_absent(d);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir = d.parent(),
+            // Can't even tell whether it exists: hold.
+            Err(_) => {
+                answer = true;
+                break;
+            }
+        }
+    }
+    for d in climbed {
+        cache.insert(d, answer);
+    }
+    answer
+}
+
+/// The outcome of [`Db::reconcile_walk`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reconcile {
+    /// Rows marked missing: verified gone.
+    pub flagged: usize,
+    /// Unseen rows left alone because the part of the tree they live in was
+    /// not there to look at (offline is not deleted).
+    pub held_back: usize,
+    /// The root itself could not be read (or is a known mount point that is
+    /// not mounted); everything under it was held back.
+    pub root_unavailable: bool,
 }
 
 /// Classify a scanned file against its existing index row (if any).
@@ -128,6 +251,104 @@ impl Db {
         Ok(flagged)
     }
 
+    /// The "deleted" arm of a rescan, aware that a tree can be partly offline
+    /// (code review #6). Marks missing every unseen row under `root`, except
+    /// where the walk's view of the tree can't be trusted:
+    ///
+    /// - **The root is unavailable** — unreadable, or a known mount point that
+    ///   now looks absent. Everything is held.
+    /// - **An unreadable directory** — its subtree is held.
+    /// - **A known mount point that now looks absent** (gone, unreadable or
+    ///   empty — an unmounted volume leaves an empty directory behind). Mount
+    ///   points are remembered in `mount_points` from every walk that crossed
+    ///   one, so this holds however the directory looks today.
+    /// - **A foreign mount** — a mount the walk did cross, under which rows
+    ///   are indexed but *none* of them was seen: a different disk on the same
+    ///   mount point, not the one whose files the index knows. (This applies
+    ///   to a root that is itself a mount point, too.)
+    /// - **A directory that looks like an unmounted mount point** we have never
+    ///   seen mounted: the nearest still-existing ancestor of the unseen file,
+    ///   strictly below the root, is empty or unreadable. An emptied folder
+    ///   looks the same, so its rows wait until it is removed or refilled —
+    ///   when in doubt, don't mark missing. The root itself is exempt: a root
+    ///   the user emptied still reconciles, as before.
+    ///
+    /// Rows under excluded (cache) paths are left alone as well: the walk
+    /// skipped them, so their absence from it means nothing.
+    pub fn reconcile_walk(
+        &self,
+        root: &Path,
+        walk: &Walk,
+        exclusions: &IndexExclusions,
+    ) -> rusqlite::Result<Reconcile> {
+        let now = crate::db::now_secs();
+        for mount in &walk.mounts {
+            self.conn().execute(
+                "INSERT INTO mount_points(path, last_seen) VALUES (?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET last_seen = excluded.last_seen",
+                rusqlite::params![mount.to_string_lossy(), now],
+            )?;
+        }
+        let known: Vec<PathBuf> = {
+            let mut stmt = self.conn().prepare("SELECT path FROM mount_points")?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.map(|r| r.map(PathBuf::from))
+                .collect::<rusqlite::Result<_>>()?
+        };
+
+        let seen: HashSet<&Path> = walk.files.iter().map(|f| f.path.as_path()).collect();
+        let indexed = self.paths_under(&root.to_string_lossy())?;
+        let unseen: Vec<&String> = indexed
+            .iter()
+            .filter(|p| !seen.contains(Path::new(p.as_str())))
+            .filter(|p| !exclusions.excludes(Path::new(p.as_str())))
+            .collect();
+        if unseen.is_empty() {
+            return Ok(Reconcile::default());
+        }
+
+        let root_unavailable = std::fs::read_dir(root).is_err()
+            || known.iter().any(|m| root.starts_with(m) && looks_absent(m));
+        if root_unavailable {
+            return Ok(Reconcile {
+                flagged: 0,
+                held_back: unseen.len(),
+                root_unavailable: true,
+            });
+        }
+
+        // Subtrees whose unseen rows prove nothing.
+        let mut held: Vec<&Path> = walk.unreadable.iter().map(PathBuf::as_path).collect();
+        for m in &known {
+            if m.starts_with(root) && m.as_path() != root && looks_absent(m) {
+                held.push(m);
+            }
+        }
+        for m in &walk.mounts {
+            let under: Vec<&String> = indexed
+                .iter()
+                .filter(|p| Path::new(p.as_str()).starts_with(m))
+                .collect();
+            if !under.is_empty() && !under.iter().any(|p| seen.contains(Path::new(p.as_str()))) {
+                held.push(m);
+            }
+        }
+
+        let mut report = Reconcile::default();
+        let mut absent_dirs: std::collections::HashMap<PathBuf, bool> = Default::default();
+        for path in unseen {
+            let p = Path::new(path.as_str());
+            if held.iter().any(|h| p.starts_with(h)) || inside_absent_dir(p, root, &mut absent_dirs)
+            {
+                report.held_back += 1;
+            } else {
+                self.mark_missing(path)?;
+                report.flagged += 1;
+            }
+        }
+        Ok(report)
+    }
+
     /// A `missing` file with this content hash — a candidate move source, so a
     /// newly-seen file with the same bytes can be relinked instead of re-added.
     pub fn missing_file_by_hash(&self, content_hash: &str) -> rusqlite::Result<Option<FileRecord>> {
@@ -149,6 +370,213 @@ mod tests {
             indexed_at: 1,
             ..Default::default()
         }
+    }
+
+    /// A fresh library root under the temp dir holding `a.jpg`.
+    fn temp_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vitrine-scan-{tag}-{}-{}",
+            std::process::id(),
+            crate::db::now_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"x").unwrap();
+        dir
+    }
+
+    /// Index `rel` (relative to `root`) as a present row.
+    fn index(db: &Db, root: &Path, rel: &str) -> String {
+        let path = root.join(rel).to_string_lossy().into_owned();
+        db.upsert_file(&rec(&path, rel)).unwrap();
+        path
+    }
+
+    fn is_missing(db: &Db, path: &str) -> bool {
+        db.file_by_path(path).unwrap().unwrap().missing
+    }
+
+    /// #6: a mount point inside a readable root, unmounted. It walks as an
+    /// empty directory; its rows must not be marked missing. Real deletions
+    /// beside it still are.
+    #[test]
+    fn an_unmounted_inner_mount_point_is_not_a_deletion() {
+        let root = temp_root("inner-mount");
+        std::fs::create_dir(root.join("drive")).unwrap(); // left empty by the unmount
+        let db = Db::open_in_memory().unwrap();
+        let a = index(&db, &root, "a.jpg");
+        let on_drive = index(&db, &root, "drive/x.jpg");
+        let deep = index(&db, &root, "drive/2024/y.jpg");
+        let deleted = index(&db, &root, "b.jpg");
+        let deleted_folder = index(&db, &root, "old/c.jpg");
+
+        let walk = walk_library(&root, &IndexExclusions::none());
+        let got = db
+            .reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+
+        assert_eq!(
+            got,
+            Reconcile {
+                flagged: 2,
+                held_back: 2,
+                root_unavailable: false
+            }
+        );
+        assert!(!is_missing(&db, &a));
+        assert!(!is_missing(&db, &on_drive), "offline is not deleted");
+        assert!(!is_missing(&db, &deep));
+        assert!(is_missing(&db, &deleted), "a real deletion still records");
+        assert!(is_missing(&db, &deleted_folder), "so does a deleted folder");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// #6: a mount point the index has seen before is held whenever it looks
+    /// absent — even when the unmount removed the directory itself, which an
+    /// emptiness check alone would miss.
+    #[test]
+    fn a_known_mount_point_that_is_gone_holds_its_subtree() {
+        let root = temp_root("known-mount");
+        std::fs::create_dir(root.join("other")).unwrap();
+        std::fs::write(root.join("other/keep.txt"), b"not empty").unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let drive = root.join("other/usb");
+        let on_drive = index(&db, &root, "other/usb/x.jpg");
+        let mut walk = walk_library(&root, &IndexExclusions::none());
+        // An earlier walk crossed it while it was mounted.
+        walk.mounts.push(drive.clone());
+        db.reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+        assert!(!is_missing(&db, &on_drive));
+
+        // Unplugged: the directory is gone and the parent is not empty.
+        let walk = walk_library(&root, &IndexExclusions::none());
+        assert!(walk.mounts.is_empty());
+        let got = db
+            .reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+        assert_eq!(got.held_back, 1);
+        assert!(!is_missing(&db, &on_drive), "offline is not deleted");
+
+        // Back, and the file really was deleted from it: now it reconciles.
+        std::fs::create_dir_all(&drive).unwrap();
+        std::fs::write(drive.join("other.jpg"), b"y").unwrap();
+        let walk = walk_library(&root, &IndexExclusions::none());
+        let got = db
+            .reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+        assert_eq!(got.flagged, 1);
+        assert!(is_missing(&db, &on_drive));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// #6: a mount the walk did cross, under which none of the indexed rows
+    /// was seen, is a different disk on the same mount point — hold. Once any
+    /// indexed file under it is seen, it is the known disk and reconciles.
+    #[test]
+    fn a_foreign_disk_on_a_mount_point_is_held() {
+        let root = temp_root("foreign");
+        let usb = root.join("usb");
+        std::fs::create_dir(&usb).unwrap();
+        std::fs::write(usb.join("stick-b.jpg"), b"b").unwrap();
+        let db = Db::open_in_memory().unwrap();
+        let stick_a = index(&db, &root, "usb/stick-a.jpg");
+        let stick_a2 = index(&db, &root, "usb/stick-a2.jpg");
+
+        let mut walk = walk_library(&root, &IndexExclusions::none());
+        walk.mounts.push(usb.clone()); // the walk saw a device change here
+        let got = db
+            .reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+        assert_eq!(got.held_back, 2);
+        assert!(!is_missing(&db, &stick_a) && !is_missing(&db, &stick_a2));
+
+        // Stick A is back, minus one file: the other is a real deletion.
+        std::fs::remove_file(usb.join("stick-b.jpg")).unwrap();
+        std::fs::write(usb.join("stick-a.jpg"), b"a").unwrap();
+        let mut walk = walk_library(&root, &IndexExclusions::none());
+        walk.mounts.push(usb.clone());
+        let got = db
+            .reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+        assert_eq!(got.flagged, 1);
+        assert!(!is_missing(&db, &stick_a));
+        assert!(is_missing(&db, &stick_a2));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// #6: a subfolder the walk can't read holds its subtree.
+    #[test]
+    fn an_unreadable_subfolder_is_not_a_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root("unreadable");
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::write(locked.join("x.jpg"), b"x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_dir(&locked).is_ok() {
+            // Running as root: permissions don't bite, nothing to test.
+            std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::remove_dir_all(&root).ok();
+            return;
+        }
+        let db = Db::open_in_memory().unwrap();
+        let inside = index(&db, &root, "locked/x.jpg");
+
+        let walk = walk_library(&root, &IndexExclusions::none());
+        let readable = std::fs::Permissions::from_mode(0o755);
+        assert_eq!(walk.unreadable, vec![locked.clone()]);
+        let got = db
+            .reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+        std::fs::set_permissions(&locked, readable).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(got.held_back, 1);
+        assert!(!is_missing(&db, &inside));
+    }
+
+    /// The root itself: unreadable, or a known mount point now empty — hold
+    /// everything. A root the user emptied (not a known mount) still
+    /// reconciles, as before.
+    #[test]
+    fn an_unavailable_root_holds_everything_an_emptied_one_does_not() {
+        let root = temp_root("root");
+        let db = Db::open_in_memory().unwrap();
+        let x = index(&db, &root, "x.jpg");
+
+        let gone = root.join("nonexistent");
+        let y = index(&db, &gone, "y.jpg");
+        let walk = walk_library(&gone, &IndexExclusions::none());
+        let got = db
+            .reconcile_walk(&gone, &walk, &IndexExclusions::none())
+            .unwrap();
+        assert!(got.root_unavailable);
+        assert!(!is_missing(&db, &y));
+
+        // Emptied by the user (a.jpg removed): x.jpg is a real deletion.
+        std::fs::remove_file(root.join("a.jpg")).unwrap();
+        let empty = Walk::default();
+        let got = db
+            .reconcile_walk(&root, &empty, &IndexExclusions::none())
+            .unwrap();
+        assert!(!got.root_unavailable);
+        assert!(is_missing(&db, &x));
+
+        // The same empty root, once seen as a mount point: held.
+        db.clear_missing(&x).unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO mount_points(path, last_seen) VALUES (?1, 1)",
+                [root.to_string_lossy()],
+            )
+            .unwrap();
+        let got = db
+            .reconcile_walk(&root, &empty, &IndexExclusions::none())
+            .unwrap();
+        assert!(got.root_unavailable);
+        assert!(!is_missing(&db, &x));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
