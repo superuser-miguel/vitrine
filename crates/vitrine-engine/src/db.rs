@@ -45,16 +45,27 @@ impl Db {
     }
 
     /// Apply any migrations newer than the database's current `user_version`,
-    /// each atomically, then advance the version.
+    /// atomically, advancing the version with each.
+    ///
+    /// Two connections can open an old database at once (the indexer thread and
+    /// the window's read connection, at launch). The version is therefore
+    /// re-read *under the write lock* (`BEGIN IMMEDIATE`): the loser of the race
+    /// waits, then finds nothing left to do. Before v7 every migration happened
+    /// to be idempotent (`IF NOT EXISTS`), which hid this; `ALTER TABLE … ADD
+    /// COLUMN` is not, and would fail the second opener.
     fn migrate(&self) -> rusqlite::Result<()> {
+        if self.schema_version()? >= MIGRATIONS.len() {
+            return Ok(());
+        }
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.conn,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
         let current = self.schema_version()?;
         for (i, sql) in MIGRATIONS.iter().enumerate().skip(current) {
-            self.conn.execute_batch(&format!(
-                "BEGIN;\n{sql}\nPRAGMA user_version = {};\nCOMMIT;",
-                i + 1
-            ))?;
+            tx.execute_batch(&format!("{sql}\nPRAGMA user_version = {};", i + 1))?;
         }
-        Ok(())
+        tx.commit()
     }
 
     /// The database's current schema version.
@@ -157,6 +168,46 @@ mod tests {
         let db = Db::open(&path).unwrap();
         assert_eq!(db.schema_version().unwrap(), crate::schema::SCHEMA_VERSION);
         assert_eq!(db.meta("k").unwrap().as_deref(), Some("v"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two connections opening an old database at once: the second must wait
+    /// for the first's migration and then find nothing to do, not re-run a
+    /// non-idempotent step (v7's `ADD COLUMN`) and fail to open.
+    #[test]
+    fn a_racing_opener_does_not_rerun_migrations() {
+        let dir = std::env::temp_dir().join(format!("vitrine-db-race-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.sqlite");
+        let _ = std::fs::remove_file(&path);
+
+        // A database left at v6 by an older build.
+        let holder = Connection::open(&path).unwrap();
+        holder.pragma_update(None, "journal_mode", "WAL").unwrap();
+        for sql in &MIGRATIONS[..6] {
+            holder.execute_batch(sql).unwrap();
+        }
+        holder.pragma_update(None, "user_version", 6).unwrap();
+
+        // The first opener holds the write lock mid-migration…
+        holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+        // …while a second one reads v6 and queues behind it.
+        let contender = path.clone();
+        let handle = std::thread::spawn(move || Db::open(&contender)?.schema_version());
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        for (i, sql) in MIGRATIONS.iter().enumerate().skip(6) {
+            holder
+                .execute_batch(&format!("{sql}\nPRAGMA user_version = {};", i + 1))
+                .unwrap();
+        }
+        holder.execute_batch("COMMIT").unwrap();
+
+        let opened = handle.join().unwrap();
+        assert_eq!(
+            opened.as_ref().ok(),
+            Some(&crate::schema::SCHEMA_VERSION),
+            "{opened:?}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
