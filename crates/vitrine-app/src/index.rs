@@ -49,12 +49,16 @@ const ENRICH_BATCH: i64 = 64;
 /// Progress emitted by the indexer for the UI.
 #[derive(Debug, Clone)]
 pub enum IndexProgress {
-    /// A scan started for a folder with `total` image files.
-    Started { total: usize },
+    /// A scan of `folder` started, over `total` image files.
+    Started { folder: PathBuf, total: usize },
     /// `done` of `total` processed so far.
     Advanced { done: usize, total: usize },
-    /// The current scan finished; `added` new/changed rows were written.
-    Finished { added: usize },
+    /// The scan of `folder` finished; `added` new/changed rows were written.
+    ///
+    /// Scans nest and queue, so this ends *that* scan only — the window counts
+    /// `Started`/`Finished` pairs for the banner, and re-stamps the grid only
+    /// when `folder` covers the folder on screen.
+    Finished { folder: PathBuf, added: usize },
     /// A collection was created/changed — the sidebar should refresh.
     ///
     /// `gained` names a catalog that just took on new members. A collection view
@@ -788,7 +792,10 @@ fn scan(
 ) -> ScanResult {
     let mut added = 0usize;
     let result = scan_folder(db, folder, exclusions, progress, checkpoint, &mut added);
-    let _ = progress.try_send(IndexProgress::Finished { added });
+    let _ = progress.try_send(IndexProgress::Finished {
+        folder: folder.to_path_buf(),
+        added,
+    });
     result
 }
 
@@ -805,7 +812,10 @@ fn scan_folder(
 ) -> ScanResult {
     let files = walk_images(folder, exclusions);
     let total = files.len();
-    let _ = progress.try_send(IndexProgress::Started { total });
+    let _ = progress.try_send(IndexProgress::Started {
+        folder: folder.to_path_buf(),
+        total,
+    });
 
     // Reconcile deletions *first*: mark every DB path under this root that is no
     // longer present as missing. This is what lets a rename relink below — the
@@ -1014,10 +1024,10 @@ mod tests {
         let msgs = drain(&rx);
         assert!(matches!(
             msgs.first(),
-            Some(IndexProgress::Started { total: 1 })
+            Some(IndexProgress::Started { total: 1, .. })
         ));
         assert!(
-            matches!(msgs.last(), Some(IndexProgress::Finished { added: 0 })),
+            matches!(msgs.last(), Some(IndexProgress::Finished { added: 0, .. })),
             "{msgs:?}"
         );
     }
@@ -1053,7 +1063,7 @@ mod tests {
         assert!(result.is_err());
         let msgs = drain(&rx);
         assert!(
-            matches!(msgs.last(), Some(IndexProgress::Finished { added: 0 })),
+            matches!(msgs.last(), Some(IndexProgress::Finished { added: 0, .. })),
             "{msgs:?}"
         );
         assert!(!db.file_by_path(&gone).unwrap().unwrap().missing);
@@ -1076,7 +1086,16 @@ mod tests {
         assert!(result.is_ok());
         let msgs = drain(&rx);
         assert!(
-            matches!(msgs.last(), Some(IndexProgress::Finished { added: 1 })),
+            matches!(msgs.last(), Some(IndexProgress::Finished { added: 1, .. })),
+            "{msgs:?}"
+        );
+        // Both ends name the folder, so the window can tell whose scan ended.
+        assert!(
+            matches!(msgs.first(), Some(IndexProgress::Started { folder, .. }) if *folder == dir),
+            "{msgs:?}"
+        );
+        assert!(
+            matches!(msgs.last(), Some(IndexProgress::Finished { folder, .. }) if *folder == dir),
             "{msgs:?}"
         );
     }

@@ -220,10 +220,14 @@ mod imp {
         pub current_location: RefCell<Option<Location>>,
         /// True while navigating via Back/Forward, so it doesn't re-record history.
         pub navigating_back: Cell<bool>,
-        /// True between a scan's Started and Finished. Items only carry a
+        /// True while any scan is running (see `scans`). Items only carry a
         /// content hash once they are indexed, so this is what separates
         /// "nothing selected" from "not indexed *yet*" in user-facing messages.
         pub scanning: Cell<bool>,
+        /// Running scans, counted by Started/Finished pairs: one scan ending
+        /// while another (a queued root, or the outer scan of a nested user
+        /// folder) is still going must not hide the banner (#8).
+        pub scans: crate::navigation::ScanTracker,
         /// Bumped by every navigation (`begin_navigation`); async loads carry
         /// the value they started with and drop their result if it moved on.
         pub load_generation: crate::navigation::LoadGeneration,
@@ -388,6 +392,7 @@ mod imp {
                 current_location: RefCell::new(None),
                 navigating_back: Cell::new(false),
                 scanning: Cell::new(false),
+                scans: Default::default(),
                 load_generation: Default::default(),
                 refreshing_tag_filter: Cell::new(false),
                 last_restamp: Cell::new(None),
@@ -4244,7 +4249,8 @@ impl VitrineWindow {
     fn on_index_progress(&self, msg: IndexProgress) {
         let banner = &self.imp().index_banner;
         match msg {
-            IndexProgress::Started { total } => {
+            IndexProgress::Started { total, .. } => {
+                self.imp().scans.started();
                 self.imp().scanning.set(true);
                 if total > 0 {
                     banner.set_title(&gettextrs::gettext("Indexing library…"));
@@ -4272,14 +4278,27 @@ impl VitrineWindow {
                     self.stamp_pending_items();
                 }
             }
-            IndexProgress::Finished { .. } => {
-                self.imp().scanning.set(false);
-                self.imp().last_restamp.set(None);
-                banner.set_revealed(false);
+            IndexProgress::Finished { folder, .. } => {
+                let imp = self.imp();
+                // One scan ending is not indexing ending: the launch roots run
+                // one after another and a user folder nests inside a root scan.
+                // Every `Finished` used to drop the banner and the flag (#8).
+                if imp.scans.finished() {
+                    imp.scanning.set(false);
+                    imp.last_restamp.set(None);
+                    banner.set_revealed(false);
+                }
                 // Identity rows exist now → stamp the grid's items with their
                 // content hash + rating (star overlays appear; keyboard rating
-                // can key writes). Then backfill dimensions/EXIF/pHash.
-                self.restamp_store();
+                // can key writes). Only when this scan covers the folder on
+                // screen: the full pass re-sorts the whole store, and three
+                // roots used to buy three of them (plus enrichment's) for a
+                // grid none of them touched. Then backfill dimensions/EXIF/pHash.
+                let covers =
+                    crate::navigation::scan_covers(&folder, imp.current_folder.borrow().as_deref());
+                if covers {
+                    self.restamp_store();
+                }
                 if let Some(indexer) = self.imp().indexer.borrow().as_ref() {
                     indexer.start_enrichment(glib::clone!(
                         #[weak(rename_to = window)]
