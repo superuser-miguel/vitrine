@@ -224,6 +224,9 @@ mod imp {
         /// content hash once they are indexed, so this is what separates
         /// "nothing selected" from "not indexed *yet*" in user-facing messages.
         pub scanning: Cell<bool>,
+        /// Bumped by every navigation (`begin_navigation`); async loads carry
+        /// the value they started with and drop their result if it moved on.
+        pub load_generation: crate::navigation::LoadGeneration,
         /// Throttle for progressive re-stamping during a long scan.
         pub last_restamp: Cell<Option<std::time::Instant>>,
         /// The last "can't drag this" toast, so repeated attempts replace it
@@ -382,6 +385,7 @@ mod imp {
                 current_location: RefCell::new(None),
                 navigating_back: Cell::new(false),
                 scanning: Cell::new(false),
+                load_generation: Default::default(),
                 last_restamp: Cell::new(None),
                 drag_toast: RefCell::new(None),
                 duplicates_page: RefCell::new(None),
@@ -1582,6 +1586,9 @@ impl VitrineWindow {
                 // this is a filter change, not closing a folder, so Back should
                 // still return to wherever you came from.
                 None => {
+                    // Still a move away from what was shown: a slower load
+                    // must not land in the emptied grid.
+                    self.begin_navigation();
                     imp.store.remove_all();
                     imp.content_stack.set_visible_child_name("empty");
                     imp.current_location.borrow_mut().take();
@@ -1624,6 +1631,7 @@ impl VitrineWindow {
                 .collect()
         };
 
+        self.begin_navigation();
         self.set_location(Location::Tag(name.to_string()));
         let imp = self.imp();
         // Spans folders, so the folder-scoped annotation stamp does not apply.
@@ -1940,6 +1948,24 @@ impl VitrineWindow {
         ));
     }
 
+    /// Every navigation that replaces the grid's contents starts here (#13).
+    ///
+    /// - Returns to the grid if the viewer is open. The viewer shows the grid's
+    ///   own model, so swapping the store under it left it on the *old*
+    ///   location's image and Properties with a half-swapped filmstrip; the
+    ///   sidebar stays clickable under the viewer, so this was easy to reach.
+    ///   Re-entering the viewer reopens it fresh on the new location.
+    /// - Bumps the load generation, so an async load from an earlier navigation
+    ///   that finishes late is dropped (#12). Returns the new token for loads
+    ///   that are themselves async.
+    fn begin_navigation(&self) -> u64 {
+        let imp = self.imp();
+        if self.nav_stack_contains("viewer") {
+            imp.nav_view.pop_to_tag("browser");
+        }
+        imp.load_generation.bump()
+    }
+
     /// Move to `new`, pushing the current location onto the Back history (unless
     /// we're navigating via Back/Forward). A fresh navigation invalidates the
     /// Forward stack, as in a web browser. No-op if it's where we already are.
@@ -2016,9 +2042,7 @@ impl VitrineWindow {
     /// folder you just closed reads as the close not having worked.
     fn clear_viewport(&self) {
         let imp = self.imp();
-        if self.nav_stack_contains("viewer") {
-            imp.nav_view.pop_to_tag("browser");
-        }
+        self.begin_navigation();
         imp.store.remove_all();
         imp.content_stack.set_visible_child_name("empty");
         imp.current_location.borrow_mut().take();
@@ -2946,19 +2970,11 @@ impl VitrineWindow {
     /// browse, so the folder-scoped rating stamp is skipped — items are stamped
     /// inline from the index instead).
     fn open_collection(&self, id: i64) {
-        self.ensure_read_db();
-        let items: Vec<ImageObject> = {
-            let db = self.imp().read_db.borrow();
-            let Some(db) = db.as_ref() else { return };
-            let rows = vitrine_engine::drop_unreachable(vitrine_engine::prefer_durable_paths(
-                db.collection_files(id).unwrap_or_default(),
-            ));
-            let ratings = ratings_for(db, &rows);
-            rows.iter()
-                .map(|record| indexed_item(record, &ratings))
-                .collect()
+        let Some(items) = self.collection_items(id) else {
+            return;
         };
 
+        self.begin_navigation();
         // Record the collection as a location so Back returns to the folder you
         // were in (and to it, if you navigate on).
         self.set_location(Location::Collection(id));
@@ -2968,6 +2984,57 @@ impl VitrineWindow {
         imp.store.extend_from_slice(&items);
         imp.content_stack
             .set_visible_child_name(if items.is_empty() { "empty" } else { "grid" });
+    }
+
+    /// A collection's reachable members as grid items, stamped from the index
+    /// (`None` when the index can't be read).
+    fn collection_items(&self, id: i64) -> Option<Vec<ImageObject>> {
+        self.ensure_read_db();
+        let db = self.imp().read_db.borrow();
+        let db = db.as_ref()?;
+        let rows = vitrine_engine::drop_unreachable(vitrine_engine::prefer_durable_paths(
+            db.collection_files(id).unwrap_or_default(),
+        ));
+        let ratings = ratings_for(db, &rows);
+        Some(
+            rows.iter()
+                .map(|record| indexed_item(record, &ratings))
+                .collect(),
+        )
+    }
+
+    /// Add a catalog's new members to the open view of it, leaving everything
+    /// already there — including the image the viewer is showing — in place.
+    ///
+    /// Used when the catalog on screen gains members while the viewer is up.
+    /// A full `open_collection` would empty the store under the viewer (its
+    /// model is the grid's), and popping the viewer to rebuild would throw the
+    /// user out of the image they were looking at for having added others.
+    /// `gained` only ever reports additions, so nothing on screen can have
+    /// left the catalog; appending is the whole change.
+    fn merge_collection_members(&self, id: i64) {
+        let Some(items) = self.collection_items(id) else {
+            return;
+        };
+        let imp = self.imp();
+        let shown: HashSet<String> = (0..imp.store.n_items())
+            .filter_map(|i| imp.store.item(i).and_downcast::<ImageObject>())
+            .filter_map(|item| item.file().path())
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        let new: Vec<ImageObject> = items
+            .into_iter()
+            .filter(|item| {
+                item.file()
+                    .path()
+                    .is_none_or(|path| !shown.contains(path.to_string_lossy().as_ref()))
+            })
+            .collect();
+        if new.is_empty() {
+            return;
+        }
+        imp.store.extend_from_slice(&new);
+        imp.content_stack.set_visible_child_name("grid");
     }
 
     /// Show the right-click menu for a collection row: delete, and for catalogs
@@ -4202,11 +4269,17 @@ impl VitrineWindow {
                 // catalog that just gained members has to be rebuilt while it is
                 // on screen — otherwise a drop lands in the index but not in the
                 // grid, and only shows up after leaving and returning.
+                // With the viewer up, add the new members in place instead:
+                // see `merge_collection_members`.
                 if let (Some(gained), Some(Location::Collection(open))) =
                     (gained, self.imp().current_location.borrow().clone())
                 {
                     if gained == open {
-                        self.open_collection(open);
+                        if self.nav_stack_contains("viewer") {
+                            self.merge_collection_members(open);
+                        } else {
+                            self.open_collection(open);
+                        }
                     }
                 }
             }
@@ -4265,19 +4338,7 @@ impl VitrineWindow {
 
     /// Enumerate `folder`'s image children asynchronously and populate the grid.
     fn load_folder(&self, folder: gio::File) {
-        // Opening a new folder while the single-image viewer is up returns to the
-        // grid — otherwise the viewer would keep showing the *old* folder's image
-        // and Properties (show_position never re-runs) with a half-swapped
-        // filmstrip. Re-entering the viewer then reopens it fresh on the new folder.
-        let nav = &self.imp().nav_view;
-        if nav
-            .visible_page()
-            .and_then(|p| p.tag())
-            .map(|t| t == "viewer")
-            .unwrap_or(false)
-        {
-            nav.pop_to_tag("browser");
-        }
+        let generation = self.begin_navigation();
 
         let new_path = folder.path();
         // Record the move (for Back) and remember the folder (for the rating
@@ -4293,15 +4354,23 @@ impl VitrineWindow {
             self,
             async move {
                 match collect_images(&folder).await {
-                    Ok(items) => window.populate(items),
+                    Ok(items) => window.populate(generation, items),
                     Err(err) => eprintln!("enumerate {}: {err}", folder.uri()),
                 }
             }
         ));
     }
 
-    fn populate(&self, items: Vec<ImageObject>) {
+    /// Show a finished folder enumeration — unless the user has navigated on
+    /// since it started (#12). Two enumerations can be in flight at once (a
+    /// slow USB folder, then a fast bookmark), and without this the *last to
+    /// finish* won: the grid showed the USB folder while the location, Back and
+    /// the delete scope all said bookmark.
+    fn populate(&self, generation: u64, items: Vec<ImageObject>) {
         let imp = self.imp();
+        if !imp.load_generation.is_current(generation) {
+            return;
+        }
         // Stamp hash + rating before the items are shown, so cells paint their
         // star overlay on first bind (a re-stamp follows once indexing catches up).
         self.stamp_annotations(&items);

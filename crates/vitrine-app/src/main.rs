@@ -14,6 +14,7 @@ mod grid_cell;
 mod histogram;
 mod image_object;
 mod index;
+mod navigation;
 mod preferences;
 mod script;
 mod settings;
