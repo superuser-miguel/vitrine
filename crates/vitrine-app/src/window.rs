@@ -227,6 +227,9 @@ mod imp {
         /// Bumped by every navigation (`begin_navigation`); async loads carry
         /// the value they started with and drop their result if it moved on.
         pub load_generation: crate::navigation::LoadGeneration,
+        /// Set while `refresh_tag_filter` swaps the dropdown's model, so the
+        /// selection reset that `set_model` causes is not taken as a choice.
+        pub refreshing_tag_filter: Cell<bool>,
         /// Throttle for progressive re-stamping during a long scan.
         pub last_restamp: Cell<Option<std::time::Instant>>,
         /// The last "can't drag this" toast, so repeated attempts replace it
@@ -386,6 +389,7 @@ mod imp {
                 navigating_back: Cell::new(false),
                 scanning: Cell::new(false),
                 load_generation: Default::default(),
+                refreshing_tag_filter: Cell::new(false),
                 last_restamp: Cell::new(None),
                 drag_toast: RefCell::new(None),
                 duplicates_page: RefCell::new(None),
@@ -1543,14 +1547,35 @@ impl VitrineWindow {
         let mut labels = vec![gettextrs::gettext("All tags")];
         labels.extend(tags.iter().cloned());
         let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
-        imp.tag_filter.set_model(Some(&gtk::StringList::new(&refs)));
+
+        // This runs on every reveal of the bar, so it must not change what is
+        // shown. `set_model` resets the selection to row 0 ("All tags"), and
+        // taking that as a choice cleared the tag filter — or, while browsing a
+        // tag, emptied the grid outright (#14). So swap the model with the
+        // notify handler muted and put the applied tag back.
+        let applied = imp.filter_state.borrow().tag_name.clone();
+        let row = applied
+            .as_ref()
+            .and_then(|name| tags.iter().position(|t| t == name))
+            .map(|i| i as u32 + 1);
         *imp.tag_names.borrow_mut() = tags;
-        // set_model resets selection to 0 → clears any prior tag filter.
+        imp.refreshing_tag_filter.set(true);
+        imp.tag_filter.set_model(Some(&gtk::StringList::new(&refs)));
+        imp.tag_filter.set_selected(row.unwrap_or(0));
+        imp.refreshing_tag_filter.set(false);
+        // The applied tag no longer exists (removed from every image): fall
+        // back to "All tags" for real, as picking it would.
+        if applied.is_some() && row.is_none() {
+            self.apply_tag_filter(0);
+        }
     }
 
     /// Apply the tag dropdown selection (0 = All tags → no tag filter).
     fn apply_tag_filter(&self, selected: u32) {
         let imp = self.imp();
+        if imp.refreshing_tag_filter.get() {
+            return;
+        }
         let name = if selected == 0 {
             None
         } else {
