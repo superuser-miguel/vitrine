@@ -35,8 +35,12 @@ pub enum Change {
     Unchanged,
     /// Not in the index — decode + hash + insert.
     New,
-    /// Path known but size/mtime differ (or was missing) — re-decode + re-hash.
+    /// Path known but size/mtime differ — re-decode + re-hash.
     Modified,
+    /// Path known as missing, back with the same size and mtime (a replugged
+    /// drive) — clear `missing`, keep hash and enrichment: `(size, mtime)` is
+    /// trusted here exactly as it is for [`Change::Unchanged`].
+    Reappeared,
 }
 
 /// True if `path` has an indexable image extension.
@@ -78,7 +82,13 @@ pub fn walk_images(root: &Path, exclusions: &IndexExclusions) -> Vec<ScannedFile
 pub fn classify(existing: Option<&FileRecord>, size: i64, mtime: i64) -> Change {
     match existing {
         None => Change::New,
-        Some(r) if !r.missing && r.size == size && r.mtime == mtime => Change::Unchanged,
+        Some(r) if r.size == size && r.mtime == mtime => {
+            if r.missing {
+                Change::Reappeared
+            } else {
+                Change::Unchanged
+            }
+        }
         Some(_) => Change::Modified,
     }
 }
@@ -150,7 +160,40 @@ mod tests {
         assert_eq!(classify(Some(&r), 100, 99), Change::Modified); // mtime changed
         let mut missing = r.clone();
         missing.missing = true;
-        assert_eq!(classify(Some(&missing), 100, 42), Change::Modified); // was missing
+        assert_eq!(classify(Some(&missing), 100, 42), Change::Reappeared); // back as it was
+        assert_eq!(classify(Some(&missing), 100, 99), Change::Modified); // back, but changed
+    }
+
+    /// #5: clearing `missing` on a reappeared row keeps everything else.
+    #[test]
+    fn reappeared_row_keeps_hash_and_enrichment() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_file(&rec("/drive/a.jpg", "HASH")).unwrap();
+        db.set_enrichment(
+            "/drive/a.jpg",
+            &crate::files::Enrichment {
+                width: 10,
+                height: 20,
+                camera: Some("CAM".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.reconcile_deleted("/drive", &HashSet::new()).unwrap();
+        let gone = db.file_by_path("/drive/a.jpg").unwrap().unwrap();
+        assert!(gone.missing);
+
+        assert_eq!(classify(Some(&gone), 100, 42), Change::Reappeared);
+        assert!(db.clear_missing("/drive/a.jpg").unwrap());
+        let back = db.file_by_path("/drive/a.jpg").unwrap().unwrap();
+        assert_eq!(
+            back,
+            FileRecord {
+                missing: false,
+                ..gone
+            }
+        );
+        assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
     }
 
     #[test]

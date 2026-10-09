@@ -880,7 +880,14 @@ fn scan_folder(
         let path = sf.path.to_string_lossy().to_string();
 
         let existing = db.file_by_path(&path)?;
-        if classify(existing.as_ref(), sf.size, sf.mtime) != Change::Unchanged {
+        let change = classify(existing.as_ref(), sf.size, sf.mtime);
+        if change == Change::Reappeared {
+            // A replugged drive: same path, size and mtime. Trust it as an
+            // unchanged file is trusted — no re-hash, enrichment kept.
+            if db.clear_missing(&path)? {
+                *added += 1;
+            }
+        } else if change != Change::Unchanged {
             if let Ok(hash) = vitrine_engine::blake3_file(&sf.path) {
                 // Same bytes at a vanished path → a move; relink to keep the row
                 // (and its indexed_at); otherwise upsert identity + fs facts.
@@ -1135,5 +1142,45 @@ mod tests {
             matches!(msgs.last(), Some(IndexProgress::Finished { folder, .. }) if *folder == dir),
             "{msgs:?}"
         );
+    }
+
+    /// #5: a replugged drive. The file is back at its old path with the same
+    /// size and mtime, so the rescan clears `missing` and keeps the row as it
+    /// was — no re-hash (the stored hash is deliberately not the bytes' hash,
+    /// so a re-hash would show), enrichment kept, not re-queued.
+    #[test]
+    fn a_reappeared_file_keeps_its_hash_and_enrichment() {
+        let dir = temp_folder("reappear");
+        let path = dir.join("a.jpg").to_string_lossy().to_string();
+        let db = Db::open_in_memory().unwrap();
+        let (tx, _rx) = async_channel::unbounded();
+        scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {}).unwrap();
+
+        let mut row = db.file_by_path(&path).unwrap().unwrap();
+        row.content_hash = "not-the-bytes-hash".into();
+        db.upsert_file(&row).unwrap();
+        db.set_enrichment(
+            &path,
+            &Enrichment {
+                width: 4000,
+                height: 3000,
+                date_taken: Some(1_000_000_000),
+                camera: Some("CAM".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.mark_missing(&path).unwrap();
+
+        scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {}).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let back = db.file_by_path(&path).unwrap().unwrap();
+        assert!(!back.missing);
+        assert_eq!(back.content_hash, "not-the-bytes-hash", "re-hashed");
+        assert_eq!((back.width, back.height), (Some(4000), Some(3000)));
+        assert_eq!(back.date_taken, Some(1_000_000_000));
+        assert_eq!(back.camera.as_deref(), Some("CAM"));
+        assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
     }
 }
