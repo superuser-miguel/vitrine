@@ -23,7 +23,9 @@ use gtk::glib;
 use gtk::prelude::*;
 
 use vitrine_engine::scanner::Change;
-use vitrine_engine::{classify, walk_images, Db, Enrichment, FileRecord, IndexExclusions, Query};
+use vitrine_engine::{
+    classify, walk_images, Db, EnrichOutcome, Enrichment, FileRecord, IndexExclusions, Query,
+};
 
 /// The library index database path (app-private under Flatpak). Shared by the
 /// writer thread and the window's read-only query connection.
@@ -86,7 +88,7 @@ enum Request {
     },
     Enrich {
         path: String,
-        enrichment: Enrichment,
+        outcome: EnrichOutcome,
     },
     TakeBatch {
         reply: async_channel::Sender<Vec<String>>,
@@ -434,6 +436,7 @@ fn worker(
 
     // One-time maintenance, on the writer before any scan or write (V-31).
     purge_cache_rows_once(&db, &db_path, &exclusions);
+    requeue_sentinels_once(&db);
 
     // Single writer, but no head-of-line blocking (V-04, measured 2026-07-21:
     // the launch roots rescan held the worker ~11 minutes and a 2-file user
@@ -520,8 +523,8 @@ fn apply(
                     }
                 }
             }
-            Request::Enrich { path, enrichment } => {
-                if let Err(e) = db.set_enrichment(&path, &enrichment) {
+            Request::Enrich { path, outcome } => {
+                if let Err(e) = db.record_enrichment(&path, &outcome) {
                     glib::g_warning!("vitrine", "enrich {path}: {e}");
                 }
             }
@@ -681,10 +684,10 @@ async fn run_enrichment(requests: async_channel::Sender<Request>) {
                         break;
                     };
                     crate::debug::enrich_begin();
-                    let enrichment = enrich_one(&path).await;
+                    let outcome = enrich_one(&path).await;
                     crate::debug::enrich_end();
                     if requests
-                        .send(Request::Enrich { path, enrichment })
+                        .send(Request::Enrich { path, outcome })
                         .await
                         .is_err()
                     {
@@ -699,16 +702,21 @@ async fn run_enrichment(requests: async_channel::Sender<Request>) {
     }
 }
 
-/// Decode one file and derive its enrichment. A decode failure yields the 0×0
-/// sentinel so the writer still clears `width IS NULL` and the file isn't
-/// retried forever.
-async fn enrich_one(path: &str) -> Enrichment {
+/// Decode one file and derive its enrichment. A file that can't be stat'ed or
+/// opened is [`EnrichOutcome::Unreachable`] — offline, retried when a walk
+/// sees it again. One that opens but won't decode is
+/// [`EnrichOutcome::Undecodable`], the 0×0 sentinel that is never retried.
+async fn enrich_one(path: &str) -> EnrichOutcome {
     let file = gio::File::for_path(path);
     // One stat serves both the heavy-lane routing and the cache-validity mtime.
-    let meta = std::fs::metadata(path).ok();
-    let byte_size = meta.as_ref().map(|m| m.len() as i64).unwrap_or(0);
+    // No stat, no decode: an unplugged drive fails here, cheaply.
+    let Ok(meta) = std::fs::metadata(path) else {
+        return EnrichOutcome::Unreachable;
+    };
+    let byte_size = meta.len() as i64;
     let mtime = meta
-        .and_then(|m| m.modified().ok())
+        .modified()
+        .ok()
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
@@ -716,7 +724,9 @@ async fn enrich_one(path: &str) -> Enrichment {
     // decode now serves both the pHash *and* the warmed display thumbnail (#3).
     let Some(probe) = crate::decode::probe(&file, crate::thumbnails::WARM_PX, byte_size).await
     else {
-        return Enrichment::default();
+        // Asked after the failure, so a drive pulled mid-decode is not
+        // mistaken for a broken file.
+        return EnrichOutcome::after_failed_decode(std::path::Path::new(path));
     };
     let exif = probe
         .exif
@@ -741,13 +751,13 @@ async fn enrich_one(path: &str) -> Enrichment {
     let Some(frame) =
         crate::thumbnails::downscale_cpu(probe.frame, crate::thumbnails::WARM_PX).await
     else {
-        return enrichment;
+        return EnrichOutcome::Enriched(enrichment);
     };
     enrichment.phash = phash_from_texture(&frame);
     // #3: warm the on-disk thumbnail cache from this decode so browsing an indexed
     // folder needs no on-demand decode. Uses the source's mtime for cache validity.
     crate::thumbnails::warm_cache(&file, mtime, byte_size, &frame).await;
-    enrichment
+    EnrichOutcome::Enriched(enrichment)
 }
 
 /// Compute the perceptual hash of a decoded frame by downloading its pixels as
@@ -855,6 +865,10 @@ fn scan_folder(
                 .unwrap_or(0)
         );
     }
+
+    // A file the walk just listed is reachable, whatever enrichment found
+    // before: rows parked as unreachable go back in the enrichment queue.
+    db.requeue_unreachable_seen(&folder.to_string_lossy(), &seen)?;
 
     // The walk + reconcile above can take a while on a large root; let any
     // writes that arrived meanwhile land before the per-file loop starts.
@@ -971,6 +985,29 @@ fn purge_cache_rows_once(db: &Db, db_path: &std::path::Path, exclusions: &IndexE
     }
     if let Err(e) = db.set_meta(CACHE_PURGE_KEY, &now_secs().to_string()) {
         glib::g_warning!("vitrine", "cache-row purge: marking done: {e}");
+    }
+}
+
+/// Give every 0×0 row one more enrichment attempt under the 0.4 rules (code
+/// review #1, #4): before them an unplugged drive or a lapsed portal grant got
+/// the same never-retry sentinel as a broken file. Runs once per database, on
+/// the writer before any scan, in a single transaction with its done-marker
+/// (~1s for 64k rows, one `open` check each); nothing is deleted or marked
+/// missing, so it takes no backup. Reachable rows go back to the enrichment
+/// driver started at launch (they enrich, or get 0×0 again if truly broken);
+/// unreachable ones are parked until a walk sees them.
+fn requeue_sentinels_once(db: &Db) {
+    let started = std::time::Instant::now();
+    match db.requeue_enrichment_sentinels_once() {
+        Ok(Some(done)) => glib::g_message!(
+            "vitrine",
+            "0×0 rows: {} requeued for enrichment, {} parked as unreachable ({} ms)",
+            done.requeued,
+            done.parked,
+            started.elapsed().as_millis()
+        ),
+        Ok(None) => {}
+        Err(e) => glib::g_warning!("vitrine", "0×0 requeue failed (retries next launch): {e}"),
     }
 }
 

@@ -131,13 +131,17 @@ pub(crate) const SELECT_COLS: &str = "id, path, content_hash, phash, size, mtime
 
 /// The next batch of the enrichment backlog. Its WHERE is exactly the partial
 /// index `idx_files_unenriched`'s (schema v6); change one, change both.
-const ENRICHMENT_QUEUE_SQL: &str = "SELECT path FROM files WHERE width IS NULL AND missing = 0
+const ENRICHMENT_QUEUE_SQL: &str = "SELECT path FROM files
+     WHERE width IS NULL AND missing = 0 AND unreachable_at IS NULL
      ORDER BY id LIMIT ?1";
 
 /// The decode-derived fields written by the app's enrichment pass, once per file
 /// (after identity indexing). `width`/`height` double as the "enriched" marker:
 /// they are `NULL` until enrichment runs (see [`Db::paths_needing_enrichment`]),
 /// so a failed decode still writes `0`×`0` to avoid re-attempting forever.
+///
+/// A file that could not even be *opened* is not a failed decode: see
+/// [`EnrichOutcome::Unreachable`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Enrichment {
     pub width: i64,
@@ -147,6 +151,58 @@ pub struct Enrichment {
     pub date_taken: Option<i64>,
     pub camera: Option<String>,
     pub orientation: Option<i64>,
+}
+
+/// What one enrichment attempt found, as the writer records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnrichOutcome {
+    /// Decoded: dimensions and whatever metadata came with them.
+    Enriched(Enrichment),
+    /// The file opened but would not decode. Written as the `0`×`0` sentinel,
+    /// so it is never attempted again (until its bytes change).
+    Undecodable,
+    /// The file could not be stat'ed or opened: an unplugged drive, an expired
+    /// portal grant, a dropped network share. Offline, not broken — the row
+    /// keeps `width IS NULL` and leaves the queue until a walk sees the file
+    /// again (see [`Db::requeue_unreachable_seen`]).
+    Unreachable,
+}
+
+/// Whether `path` can be opened for reading right now.
+///
+/// The enrichment pass asks this when a decode fails, to tell "this file is
+/// broken" (opens, won't decode → 0×0, never retried) from "this file is not
+/// here right now" (unreachable → retried when it comes back). Any open error
+/// counts as unreachable — ENOENT, EACCES, EIO, ENXIO, ESTALE, ENOTCONN alike:
+/// a wrong guess that way costs one cheap failed `open` per walk, while a wrong
+/// guess the other way buries a good file under a permanent 0×0.
+pub fn is_reachable(path: &std::path::Path) -> bool {
+    std::fs::File::open(path).is_ok()
+}
+
+impl EnrichOutcome {
+    /// The outcome for a file whose decode just failed: undecodable if it can
+    /// still be opened, unreachable if not. Checked *after* the failure, so a
+    /// drive pulled mid-decode lands on the right side too.
+    pub fn after_failed_decode(path: &std::path::Path) -> EnrichOutcome {
+        if is_reachable(path) {
+            EnrichOutcome::Undecodable
+        } else {
+            EnrichOutcome::Unreachable
+        }
+    }
+}
+
+/// `meta` key marking the one-time requeue of 0×0 rows as done (0.4).
+pub const SENTINEL_REQUEUE_KEY: &str = "maintenance.enrichment-sentinels-requeued.v1";
+
+/// What [`Db::requeue_enrichment_sentinels_once`] did with the 0×0 rows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SentinelRequeue {
+    /// Reachable now: back in the enrichment queue.
+    pub requeued: usize,
+    /// Not reachable now: parked as unreachable until a walk sees them.
+    pub parked: usize,
 }
 
 impl Db {
@@ -164,7 +220,7 @@ impl Db {
                height=excluded.height, format=excluded.format,
                date_taken=excluded.date_taken, camera=excluded.camera,
                orientation=excluded.orientation, indexed_at=excluded.indexed_at,
-               missing=excluded.missing",
+               missing=excluded.missing, unreachable_at=NULL",
             rusqlite::params![
                 record.path,
                 record.content_hash,
@@ -218,7 +274,8 @@ impl Db {
         mtime: i64,
     ) -> rusqlite::Result<bool> {
         let n = self.conn().execute(
-            "UPDATE files SET path = ?2, mtime = ?3, missing = 0 WHERE path = ?1",
+            "UPDATE files SET path = ?2, mtime = ?3, missing = 0, unreachable_at = NULL
+             WHERE path = ?1",
             rusqlite::params![old_path, new_path, mtime],
         )?;
         Ok(n > 0)
@@ -229,6 +286,19 @@ impl Db {
         self.conn()
             .execute("UPDATE files SET missing = 1 WHERE path = ?1", [path])?;
         Ok(())
+    }
+
+    /// A missing file is back at its old path with the same size and mtime
+    /// (a replugged drive): clear `missing`, keeping its hash and enrichment —
+    /// the same trust `(size, mtime)` earns an unchanged file. It is visibly
+    /// reachable, so any unreachable mark goes too. Returns true if a row
+    /// changed.
+    pub fn clear_missing(&self, path: &str) -> rusqlite::Result<bool> {
+        let n = self.conn().execute(
+            "UPDATE files SET missing = 0, unreachable_at = NULL WHERE path = ?1",
+            [path],
+        )?;
+        Ok(n > 0)
     }
 
     /// Total number of indexed (non-missing) files.
@@ -244,7 +314,8 @@ impl Db {
     pub fn set_enrichment(&self, path: &str, e: &Enrichment) -> rusqlite::Result<()> {
         self.conn().execute(
             "UPDATE files SET width=?2, height=?3, phash=?4, format=?5,
-                 date_taken=?6, camera=?7, orientation=?8 WHERE path=?1",
+                 date_taken=?6, camera=?7, orientation=?8, unreachable_at=NULL
+             WHERE path=?1",
             rusqlite::params![
                 path,
                 e.width,
@@ -259,9 +330,111 @@ impl Db {
         Ok(())
     }
 
-    /// Up to `limit` present files still awaiting enrichment (`width IS NULL`),
-    /// oldest-indexed first. `width` is set (even to 0 on decode failure) once a
-    /// file is processed, so this list drains monotonically as enrichment runs.
+    /// Record one enrichment attempt for `path`: the decoded fields, the 0×0
+    /// "undecodable" sentinel, or the unreachable mark. Either way the row
+    /// leaves the queue, so the backlog still drains monotonically.
+    pub fn record_enrichment(&self, path: &str, outcome: &EnrichOutcome) -> rusqlite::Result<()> {
+        match outcome {
+            EnrichOutcome::Enriched(e) => self.set_enrichment(path, e),
+            EnrichOutcome::Undecodable => self.set_enrichment(path, &Enrichment::default()),
+            EnrichOutcome::Unreachable => self.mark_unreachable(path, crate::db::now_secs()),
+        }
+    }
+
+    /// Note that `path` could not be opened at `when`. Leaves `width` (and every
+    /// other enrichment column) untouched: an earlier good enrichment stays, and
+    /// an un-enriched row stays `NULL` — never a size the UI could show.
+    pub fn mark_unreachable(&self, path: &str, when: i64) -> rusqlite::Result<()> {
+        self.conn().execute(
+            "UPDATE files SET unreachable_at = ?2 WHERE path = ?1",
+            rusqlite::params![path, when],
+        )?;
+        Ok(())
+    }
+
+    /// Put back in the enrichment queue every unreachable row under `root`
+    /// that this walk saw: being listed by the walk is proof it is reachable
+    /// again. Returns how many rows were requeued.
+    pub fn requeue_unreachable_seen(
+        &self,
+        root: &str,
+        seen: &std::collections::HashSet<String>,
+    ) -> rusqlite::Result<usize> {
+        let (lo, hi) = crate::query::subtree_range(root);
+        let parked: Vec<String> = {
+            let mut stmt = self.conn().prepare(
+                "SELECT path FROM files
+                 WHERE unreachable_at IS NOT NULL AND path >= ?1 AND path < ?2",
+            )?;
+            let rows = stmt.query_map([lo, hi], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut requeued = 0;
+        for path in parked.iter().filter(|p| seen.contains(*p)) {
+            requeued += self.conn().execute(
+                "UPDATE files SET unreachable_at = NULL WHERE path = ?1",
+                [path],
+            )?;
+        }
+        Ok(requeued)
+    }
+
+    /// One-time (0.4): give every 0×0 row a fresh start under the rules that
+    /// tell unreachable from undecodable. Before 0.4 an unreachable file got
+    /// the "decode failed, never retry" sentinel too, and nothing ever looked
+    /// at it again.
+    ///
+    /// Each row is triaged with one [`is_reachable`] check, the same test the
+    /// enrichment pass applies: a file that opens goes back in the enrichment
+    /// queue (it enriches, or earns 0×0 again if it really is broken); one that
+    /// doesn't is parked as unreachable straight away, to be retried when a
+    /// walk sees it. Doing that here, in one transaction, costs about a second
+    /// for 64k rows; leaving it to the enrichment pass meant one committed
+    /// write per dead path, ~3 minutes of writer time.
+    ///
+    /// Missing rows are triaged too, so a reappearing file gets its retry then.
+    /// Nothing is deleted or marked missing, and no annotation is touched: the
+    /// only values cleared are 0×0 sentinels, which carry no information. The
+    /// changes and the done-marker commit together.
+    ///
+    /// Returns `None` if it already ran.
+    pub fn requeue_enrichment_sentinels_once(&self) -> rusqlite::Result<Option<SentinelRequeue>> {
+        if self.meta(SENTINEL_REQUEUE_KEY)?.is_some() {
+            return Ok(None);
+        }
+        let now = crate::db::now_secs();
+        let tx = self.conn().unchecked_transaction()?;
+        let stuck: Vec<(i64, String)> = {
+            let mut stmt =
+                tx.prepare("SELECT id, path FROM files WHERE width = 0 AND height = 0")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let mut done = SentinelRequeue::default();
+        {
+            let mut reset = tx.prepare(
+                "UPDATE files SET width = NULL, height = NULL, unreachable_at = ?2
+                 WHERE id = ?1",
+            )?;
+            for (id, path) in &stuck {
+                if is_reachable(std::path::Path::new(path)) {
+                    reset.execute(rusqlite::params![id, None::<i64>])?;
+                    done.requeued += 1;
+                } else {
+                    reset.execute(rusqlite::params![id, now])?;
+                    done.parked += 1;
+                }
+            }
+        }
+        self.set_meta(SENTINEL_REQUEUE_KEY, &now.to_string())?;
+        tx.commit()?;
+        Ok(Some(done))
+    }
+
+    /// Up to `limit` present files still awaiting enrichment (`width IS NULL`,
+    /// not parked as unreachable), oldest-indexed first. Every attempt either
+    /// sets `width` (even to 0 on decode failure) or parks the row as
+    /// unreachable, so this list drains monotonically as enrichment runs.
     ///
     /// The WHERE clause is exactly `idx_files_unenriched`'s (schema v6), which
     /// is what lets this read the backlog instead of scanning `files`; keep the
@@ -276,6 +449,7 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn rec(path: &str, hash: &str) -> FileRecord {
         FileRecord {
@@ -369,6 +543,228 @@ mod tests {
         db.set_enrichment("/broken.jpg", &Enrichment::default())
             .unwrap();
         assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
+    }
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "vitrine-files-{tag}-{}-{}",
+            std::process::id(),
+            crate::db::now_secs()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn width_height(db: &Db, path: &str) -> (Option<i64>, Option<i64>) {
+        let r = db.file_by_path(path).unwrap().unwrap();
+        (r.width, r.height)
+    }
+
+    /// #1: a file that can't be opened at enrichment time (unplugged drive,
+    /// lapsed portal grant) is parked, not given the never-retry 0×0 — and a
+    /// later walk that sees it puts it back in the queue.
+    #[test]
+    fn unreachable_file_is_parked_then_retried_when_seen() {
+        let dir = temp_dir("unreachable");
+        let file = dir.join("offline.jpg");
+        let path = file.to_string_lossy().into_owned();
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_file(&rec(&path, "hU")).unwrap();
+
+        // The drive is gone: the decode fails and the file won't open.
+        let outcome = EnrichOutcome::after_failed_decode(&file);
+        assert_eq!(outcome, EnrichOutcome::Unreachable);
+        db.record_enrichment(&path, &outcome).unwrap();
+
+        assert_eq!(width_height(&db, &path), (None, None), "no 0×0 sentinel");
+        assert!(
+            db.paths_needing_enrichment(10).unwrap().is_empty(),
+            "parked rows leave the queue, or the driver would spin on them"
+        );
+
+        // A walk that doesn't list it changes nothing.
+        let root = dir.to_string_lossy();
+        assert_eq!(
+            db.requeue_unreachable_seen(&root, &HashSet::new()).unwrap(),
+            0
+        );
+        assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
+
+        // The drive is back: the walk lists the file, which requeues it…
+        std::fs::write(&file, b"bytes").unwrap();
+        let seen: HashSet<String> = [path.clone()].into_iter().collect();
+        assert_eq!(db.requeue_unreachable_seen(&root, &seen).unwrap(), 1);
+        assert_eq!(db.paths_needing_enrichment(10).unwrap(), vec![path.clone()]);
+
+        // …and this time it enriches.
+        db.record_enrichment(
+            &path,
+            &EnrichOutcome::Enriched(Enrichment {
+                width: 640,
+                height: 480,
+                ..Default::default()
+            }),
+        )
+        .unwrap();
+        assert_eq!(width_height(&db, &path), (Some(640), Some(480)));
+        assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An unreachable mark never erases an earlier good enrichment.
+    #[test]
+    fn unreachable_keeps_an_earlier_enrichment() {
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_file(&rec("/a.jpg", "hA")).unwrap();
+        db.set_enrichment(
+            "/a.jpg",
+            &Enrichment {
+                width: 10,
+                height: 20,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.record_enrichment("/a.jpg", &EnrichOutcome::Unreachable)
+            .unwrap();
+        assert_eq!(width_height(&db, "/a.jpg"), (Some(10), Some(20)));
+    }
+
+    /// A file that opens but won't decode keeps the never-retry 0×0, and a
+    /// walk seeing it again does not requeue it.
+    #[test]
+    fn undecodable_file_still_gets_the_zero_sentinel() {
+        let dir = temp_dir("undecodable");
+        let file = dir.join("broken.jpg");
+        std::fs::write(&file, b"not an image").unwrap();
+        let path = file.to_string_lossy().into_owned();
+        let db = Db::open_in_memory().unwrap();
+        db.upsert_file(&rec(&path, "hB")).unwrap();
+
+        let outcome = EnrichOutcome::after_failed_decode(&file);
+        assert_eq!(outcome, EnrichOutcome::Undecodable);
+        db.record_enrichment(&path, &outcome).unwrap();
+
+        assert_eq!(width_height(&db, &path), (Some(0), Some(0)));
+        assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
+        let seen: HashSet<String> = [path.clone()].into_iter().collect();
+        assert_eq!(
+            db.requeue_unreachable_seen(&dir.to_string_lossy(), &seen)
+                .unwrap(),
+            0
+        );
+        assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// #4: the one-time step triages every 0×0 row (present or missing):
+    /// reachable ones go back in the queue, unreachable ones are parked (and
+    /// come back when a walk sees them). It leaves real enrichments and
+    /// annotations alone, deletes nothing, marks nothing missing, and runs
+    /// exactly once.
+    #[test]
+    fn sentinel_requeue_runs_once_and_triages_zero_rows() {
+        let dir = temp_dir("requeue");
+        let p = |name: &str| dir.join(name).to_string_lossy().into_owned();
+        let (stuck, dead, gone, good, new) = (
+            p("stuck.jpg"),
+            p("dead.jpg"),
+            p("gone.jpg"),
+            p("good.jpg"),
+            p("new.jpg"),
+        );
+        // Only `stuck` is on disk: an old 0×0 that is reachable after all.
+        std::fs::write(&stuck, b"bytes").unwrap();
+
+        let db = Db::open_in_memory().unwrap();
+        for (path, h) in [
+            (&stuck, "h1"),
+            (&dead, "h2"),
+            (&gone, "h3"),
+            (&good, "h4"),
+            (&new, "h5"),
+        ] {
+            db.upsert_file(&rec(path, h)).unwrap();
+        }
+        for path in [&stuck, &dead, &gone] {
+            db.set_enrichment(path, &Enrichment::default()).unwrap();
+        }
+        db.mark_missing(&gone).unwrap();
+        db.set_enrichment(
+            &good,
+            &Enrichment {
+                width: 3,
+                height: 4,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        db.set_rating("h2", 4).unwrap();
+        assert_eq!(db.paths_needing_enrichment(10).unwrap(), vec![new.clone()]);
+
+        assert_eq!(
+            db.requeue_enrichment_sentinels_once().unwrap(),
+            Some(SentinelRequeue {
+                requeued: 1,
+                parked: 2
+            })
+        );
+        assert_eq!(
+            db.paths_needing_enrichment(10).unwrap(),
+            vec![stuck.clone(), new.clone()],
+            "the reachable 0×0 row is back in the queue, oldest first"
+        );
+        for path in [&stuck, &dead, &gone] {
+            assert_eq!(width_height(&db, path), (None, None), "{path}");
+        }
+        assert!(db.file_by_path(&gone).unwrap().unwrap().missing);
+        assert!(!db.file_by_path(&dead).unwrap().unwrap().missing);
+        assert_eq!(width_height(&db, &good), (Some(3), Some(4)));
+        assert_eq!(db.rating("h2").unwrap(), Some(4));
+        let rows: i64 = db
+            .conn()
+            .query_row("SELECT count(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 5);
+
+        // The parked row returns the moment a walk lists it.
+        let seen: HashSet<String> = [dead.clone()].into_iter().collect();
+        assert_eq!(
+            db.requeue_unreachable_seen(&dir.to_string_lossy(), &seen)
+                .unwrap(),
+            1
+        );
+        assert!(db.paths_needing_enrichment(10).unwrap().contains(&dead));
+
+        // Re-enriched as undecodable, a row must stay that way: the step does
+        // not run twice.
+        db.set_enrichment(&stuck, &Enrichment::default()).unwrap();
+        assert_eq!(db.requeue_enrichment_sentinels_once().unwrap(), None);
+        assert_eq!(width_height(&db, &stuck), (Some(0), Some(0)));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The per-scan requeue reads the small partial index of parked rows, not
+    /// the whole subtree of `files`.
+    #[test]
+    fn the_parked_rows_query_reads_its_partial_index() {
+        let db = Db::open_in_memory().unwrap();
+        let plan: Vec<String> = db
+            .conn()
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT path FROM files
+                 WHERE unreachable_at IS NOT NULL AND path >= ?1 AND path < ?2",
+            )
+            .unwrap()
+            .query_map(["/a/", "/a0"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(
+            plan,
+            ["SEARCH files USING INDEX idx_files_unreachable (path>? AND path<?)"]
+        );
     }
 
     #[test]

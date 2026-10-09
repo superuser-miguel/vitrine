@@ -56,7 +56,8 @@ pub use dedup::DuplicateCluster;
 pub use exclusions::{CachePurge, IndexExclusions};
 pub use exif::{parse_exif, ExifData};
 pub use files::{
-    drop_unreachable, is_portal_document_path, prefer_durable_paths, Enrichment, FileRecord,
+    drop_unreachable, is_portal_document_path, is_reachable, prefer_durable_paths, EnrichOutcome,
+    Enrichment, FileRecord, SentinelRequeue,
 };
 pub use hash::{blake3_bytes, blake3_file, is_content_hash, phash_distance, phash_rgb8};
 pub use query::{Direction, Query, SortKey};

@@ -132,6 +132,36 @@ CREATE INDEX IF NOT EXISTS idx_file_tags_tag ON file_tags(tag_id);
 CREATE INDEX IF NOT EXISTS idx_files_unenriched ON files(id)
   WHERE width IS NULL AND missing = 0;
 "#,
+    // v7 — the index knows "offline" (code review #1, #6).
+    //
+    // `unreachable_at` records the last time enrichment could not stat/open a
+    // file (unplugged drive, lapsed portal grant). It is a separate column, not a
+    // sentinel in `width`, so that `width IS NULL` keeps meaning "dimensions
+    // unknown" to every reader — the grid, Properties, the Area sort and pHash
+    // dedup need no special case — while 0×0 stays reserved for "decoded and
+    // failed, never retry". A walk that sees the file again clears the column,
+    // which puts the row back in the enrichment queue.
+    //
+    // The queue's partial index is rebuilt to leave unreachable rows out, so
+    // a backlog of 60k dead paths costs the per-batch query nothing. Its WHERE
+    // must stay identical to `ENRICHMENT_QUEUE_SQL`'s.
+    //
+    // `mount_points` remembers every directory a walk has seen on a different
+    // device from its parent. When one of them is later absent (unmounted, the
+    // directory left behind empty), reconcile leaves its subtree alone instead
+    // of marking it missing.
+    r#"
+ALTER TABLE files ADD COLUMN unreachable_at INTEGER;
+DROP INDEX IF EXISTS idx_files_unenriched;
+CREATE INDEX idx_files_unenriched ON files(id)
+  WHERE width IS NULL AND missing = 0 AND unreachable_at IS NULL;
+CREATE INDEX idx_files_unreachable ON files(path)
+  WHERE unreachable_at IS NOT NULL;
+CREATE TABLE mount_points (
+  path       TEXT PRIMARY KEY,
+  last_seen  INTEGER NOT NULL
+);
+"#,
 ];
 
 /// The schema version this build targets (number of migrations).
