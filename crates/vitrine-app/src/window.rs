@@ -3248,25 +3248,17 @@ impl VitrineWindow {
         self.ensure_read_db();
         let db = self.imp().read_db.borrow();
         let Some(db) = db.as_ref() else { return };
-        type Stamp = (String, i64, i64, Option<(f64, f64, f64, f64)>, Option<i64>);
-        let map: std::collections::HashMap<String, Stamp> = db
+        let map: std::collections::HashMap<String, vitrine_engine::FolderStamp> = db
             .ratings_under(&folder.to_string_lossy())
             .unwrap_or_default()
             .into_iter()
-            .map(|(path, hash, rating, orientation, crop, date_taken)| {
-                (path, (hash, rating, orientation, crop, date_taken))
-            })
+            .map(|row| (row.path.clone(), row))
             .collect();
         for item in items {
             if let Some(path) = item.file().path() {
-                if let Some((hash, rating, orientation, crop, date_taken)) =
-                    map.get(&path.to_string_lossy().into_owned())
-                {
-                    item.set_content_hash(hash);
-                    item.set_rating(*rating as i32);
-                    item.set_orientation(*orientation as i32);
-                    item.set_crop(*crop);
-                    item.set_date_taken(*date_taken);
+                if let Some(row) = map.get(&path.to_string_lossy().into_owned()) {
+                    // Skipped when the file changed since it was hashed (#11).
+                    item.stamp_from_index(row);
                 }
             }
         }
@@ -3368,7 +3360,16 @@ impl VitrineWindow {
                 .flatten()
         });
         match record {
-            Some(r) if !r.missing && !r.content_hash.is_empty() => {
+            Some(r)
+                if !r.missing
+                    && !r.content_hash.is_empty()
+                    && crate::thumbnails::row_matches_file(
+                        r.size,
+                        r.mtime,
+                        item.size(),
+                        item.mtime(),
+                    ) =>
+            {
                 item.set_content_hash(&r.content_hash);
                 true
             }

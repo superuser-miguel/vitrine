@@ -133,6 +133,24 @@ impl ImageObject {
         self.imp().size.get()
     }
 
+    /// Stamp the hash and its annotations from the file's index row — only if
+    /// the row still describes the file as it is: same `(size, mtime)` as the
+    /// enumerate saw (see [`crate::thumbnails::row_matches_file`]). A file
+    /// edited since it was hashed is left unstamped, exactly like one the
+    /// scan hasn't reached yet: the rescan re-hashes it and the restamp on
+    /// scan completion stamps the new hash. Returns whether it stamped.
+    pub fn stamp_from_index(&self, row: &vitrine_engine::FolderStamp) -> bool {
+        if !crate::thumbnails::row_matches_file(row.size, row.mtime, self.size(), self.mtime()) {
+            return false;
+        }
+        self.set_content_hash(&row.content_hash);
+        self.set_rating(row.rating as i32);
+        self.set_orientation(row.orientation as i32);
+        self.set_crop(row.crop);
+        self.set_date_taken(row.date_taken);
+        true
+    }
+
     pub fn content_type(&self) -> String {
         self.imp().content_type.borrow().clone()
     }
@@ -191,5 +209,52 @@ impl ImageObject {
 
     pub fn has_failed(&self) -> bool {
         self.imp().failed.get()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(size: i64, mtime: i64) -> vitrine_engine::FolderStamp {
+        vitrine_engine::FolderStamp {
+            path: "/p/a.jpg".into(),
+            content_hash: "old-content".into(),
+            rating: 4,
+            orientation: 6,
+            crop: Some((0.1, 0.1, 0.5, 0.5)),
+            date_taken: Some(1_700_000_000),
+            size,
+            mtime,
+        }
+    }
+
+    fn item(size: i64, mtime: i64) -> ImageObject {
+        let file = gio::File::for_path("/p/a.jpg");
+        ImageObject::new(file, "a.jpg", mtime, size, "image/jpeg")
+    }
+
+    #[test]
+    fn stamps_an_unchanged_file() {
+        let item = item(4096, 1000);
+        assert!(item.stamp_from_index(&row(4096, 1000)));
+        assert_eq!(item.content_hash(), "old-content");
+        assert_eq!(item.rating(), 4);
+        assert_eq!(item.orientation(), 6);
+    }
+
+    /// #11: a file edited under the same name since it was hashed keeps no
+    /// hash, so the grid's content tier (`read_content` of an empty hash) is
+    /// skipped and the URI tiers — validated by Thumb::MTime — decide.
+    #[test]
+    fn edited_file_skips_the_content_tier() {
+        for (size, mtime) in [(4096, 1001), (5000, 1000), (4096, 900)] {
+            let item = item(size, mtime);
+            assert!(!item.stamp_from_index(&row(4096, 1000)));
+            assert!(item.content_hash().is_empty());
+            assert_eq!(item.rating(), 0, "the old content's rating isn't shown");
+            assert_eq!(item.orientation(), 1);
+            assert_eq!(item.crop(), None);
+        }
     }
 }

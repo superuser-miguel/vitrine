@@ -49,7 +49,7 @@ pub mod thumb_cleanup;
 pub mod thumbnail_cache;
 pub mod xmp;
 
-pub use annotations::{compose_orientation, OrientOp};
+pub use annotations::{compose_orientation, FolderStamp, OrientOp};
 pub use collections::{Collection, CollectionKind};
 pub use db::Db;
 pub use dedup::DuplicateCluster;

@@ -221,31 +221,17 @@ impl Db {
         result
     }
 
-    /// `(path, content_hash, rating, orientation, crop)` for present files under
-    /// `folder` — one query to stamp the grid's in-memory items, so cell rating
-    /// overlays and rating writes need no per-cell database hit. `rating` is 0
-    /// when unrated; `orientation` is 1 (identity) when never rotated.
-    #[allow(clippy::type_complexity)]
-    pub fn ratings_under(
-        &self,
-        folder: &str,
-    ) -> rusqlite::Result<
-        Vec<(
-            String,
-            String,
-            i64,
-            i64,
-            Option<(f64, f64, f64, f64)>,
-            Option<i64>,
-        )>,
-    > {
+    /// A [`FolderStamp`] for every present file under `folder` — one query to
+    /// stamp the grid's in-memory items, so cell rating overlays and rating
+    /// writes need no per-cell database hit.
+    pub fn ratings_under(&self, folder: &str) -> rusqlite::Result<Vec<FolderStamp>> {
         // Runs on the main thread at every folder open — the path range (vs a
         // LIKE prefix) is what lets it use the path index instead of scanning
         // the whole files table (see `subtree_range`).
         let (lo, hi) = crate::query::subtree_range(folder);
         let mut stmt = self.conn().prepare(
             "SELECT f.path, f.content_hash, COALESCE(r.rating, 0), COALESCE(o.orientation, 1),
-                    c.x, c.y, c.w, c.h, f.date_taken
+                    c.x, c.y, c.w, c.h, f.date_taken, f.size, f.mtime
              FROM files f
              LEFT JOIN ratings r ON r.content_hash = f.content_hash
              LEFT JOIN orientations o ON o.content_hash = f.content_hash
@@ -257,10 +243,37 @@ impl Db {
                 (Some(x), Some(y), Some(w), Some(h)) => Some((x, y, w, h)),
                 _ => None,
             };
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, crop, r.get(8)?))
+            Ok(FolderStamp {
+                path: r.get(0)?,
+                content_hash: r.get(1)?,
+                rating: r.get(2)?,
+                orientation: r.get(3)?,
+                crop,
+                date_taken: r.get(8)?,
+                size: r.get(9)?,
+                mtime: r.get(10)?,
+            })
         })?;
         rows.collect()
     }
+}
+
+/// What the index knows about one file, for stamping a grid item
+/// ([`Db::ratings_under`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FolderStamp {
+    pub path: String,
+    pub content_hash: String,
+    /// 0 when unrated.
+    pub rating: i64,
+    /// 1 (identity) when never rotated.
+    pub orientation: i64,
+    pub crop: Option<(f64, f64, f64, f64)>,
+    pub date_taken: Option<i64>,
+    /// The file's size and mtime when it was hashed: the hash (and everything
+    /// keyed by it) describes the file only while these still match it.
+    pub size: i64,
+    pub mtime: i64,
 }
 
 /// A user transform op from the edit card, composed onto an EXIF 1–8 state.
@@ -333,18 +346,28 @@ mod tests {
         db.conn()
             .execute_batch(
                 "INSERT INTO files(path,content_hash,size,mtime,indexed_at,missing) VALUES
-                 ('/p/a.jpg','ha',1,1,1,0),('/p/b.jpg','hb',1,1,1,0),
+                 ('/p/a.jpg','ha',10,100,1,0),('/p/b.jpg','hb',20,200,1,0),
                  ('/other/c.jpg','hc',1,1,1,0);",
             )
             .unwrap();
         db.set_rating("ha", 4).unwrap();
         let mut rows = db.ratings_under("/p").unwrap();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
+        let stamp = |path: &str, hash: &str, rating, size, mtime| FolderStamp {
+            path: path.into(),
+            content_hash: hash.into(),
+            rating,
+            orientation: 1,
+            crop: None,
+            date_taken: None,
+            size,
+            mtime,
+        };
         assert_eq!(
             rows,
             vec![
-                ("/p/a.jpg".to_string(), "ha".to_string(), 4, 1, None, None),
-                ("/p/b.jpg".to_string(), "hb".to_string(), 0, 1, None, None),
+                stamp("/p/a.jpg", "ha", 4, 10, 100),
+                stamp("/p/b.jpg", "hb", 0, 20, 200),
             ]
         );
     }
@@ -362,13 +385,13 @@ mod tests {
             )
             .unwrap();
         let mut rows = db.ratings_under("/p").unwrap();
-        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows.sort_by(|a, b| a.path.cmp(&b.path));
         assert_eq!(
-            rows[0].5,
+            rows[0].date_taken,
             Some(1700000000),
             "enriched file carries its date"
         );
-        assert_eq!(rows[1].5, None, "un-enriched file has no date yet");
+        assert_eq!(rows[1].date_taken, None, "un-enriched file has no date yet");
     }
 
     /// Seed `paths` as present rows holding `hash`, and give the hash one of

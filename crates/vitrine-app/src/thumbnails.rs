@@ -73,6 +73,17 @@ pub fn ram_key(uri: &str, target_px: u32) -> String {
     format!("{uri}#{}", ThumbBucket::for_target(target_px).pixels())
 }
 
+/// Whether an index row's content hash can be trusted for the file as it is
+/// now: the row's `(size, mtime)` must be the file's current `(size, mtime)`
+/// — the same test the scanner uses to call a file unchanged. A file edited
+/// since it was hashed still carries the old hash in the index until the
+/// rescan reaches it; trusting that hash would read the old content's
+/// thumbnail from the content tier, or write the old content's thumbnail (or
+/// annotations) under it.
+pub fn row_matches_file(row_size: i64, row_mtime: i64, file_size: i64, file_mtime: i64) -> bool {
+    row_size == file_size && row_mtime == file_mtime
+}
+
 /// Admission gate for *all* thumbnail loads (cache reads included, not just
 /// glycin decodes). Fast-scrolling a big folder binds thousands of cells, each
 /// spawning a load; without a bound they flood the main loop (async I/O + PNG
@@ -225,7 +236,10 @@ fn is_removable_source(file: &gio::File, uri: &str) -> bool {
 // duplicates, renames, and backups all hit. **The hash is the validation**: same
 // content ⇒ same key ⇒ correct thumbnail, so there is no mtime check. The hash is
 // already stamped on each grid item (`ImageObject::content_hash`), so the lookup
-// costs a field read, not a file read. Only Vitrine's own caches join this scheme
+// costs a field read, not a file read. The hash is only as good as the stamp, so
+// an item is stamped only while its index row's (size, mtime) is the file's
+// current one (`ImageObject::stamp_from_index`): a file edited since it was
+// hashed has no hash, and skips this tier. Only Vitrine's own caches join this scheme
 // — the shared freedesktop tier stays URI-keyed (spec).
 
 /// Content cache dir, keyed by BLAKE3. Deduplicated by content, so it holds one
@@ -1195,6 +1209,25 @@ mod tests {
         file.set_modified(std::time::SystemTime::now()).unwrap();
         assert!(mtime_secs(&std::fs::metadata(&path).unwrap()) > 1_000_000);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// #11: the stamped hash (and with it the content tier) is trusted only
+    /// while the row's (size, mtime) is the file's current one.
+    #[test]
+    fn content_hash_trusted_only_for_an_unchanged_file() {
+        assert!(row_matches_file(4096, 1000, 4096, 1000));
+        assert!(
+            !row_matches_file(4096, 1000, 4096, 1001),
+            "edited: new mtime"
+        );
+        assert!(
+            !row_matches_file(4096, 1000, 5000, 1000),
+            "same second, new size"
+        );
+        assert!(
+            !row_matches_file(4096, 1000, 4096, 900),
+            "restored older copy"
+        );
     }
 
     /// #18: a thumbnail appears at its final name whole or not at all, and a
