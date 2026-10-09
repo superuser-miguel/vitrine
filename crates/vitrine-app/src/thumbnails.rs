@@ -67,10 +67,35 @@ pub fn texture_cost(texture: &gdk::Texture) -> u64 {
     texture.width() as u64 * texture.height() as u64 * 4
 }
 
-/// RAM-cache key: URI plus the resolution bucket, so the same image cached at
-/// different icon sizes (e.g. 256 vs 512) doesn't collide.
-pub fn ram_key(uri: &str, target_px: u32) -> String {
-    format!("{uri}#{}", ThumbBucket::for_target(target_px).pixels())
+/// RAM-cache key: URI, the source's mtime, and the resolution bucket — so the
+/// same image cached at different icon sizes (e.g. 256 vs 512) doesn't collide,
+/// and a file rewritten under the same name (an edit in GIMP, a Save in place)
+/// is a different key instead of a stale hit. The mtime is the one the item
+/// already carries from the folder enumerate: no extra stat.
+pub fn ram_key(uri: &str, mtime: i64, target_px: u32) -> String {
+    format!(
+        "{uri}@{mtime}#{}",
+        ThumbBucket::for_target(target_px).pixels()
+    )
+}
+
+/// Every RAM-cache key `uri` can hold a thumbnail under, for each of `mtimes`
+/// and edit `suffixes` (see [`edit_key`]), at every bucket. What an eviction
+/// must remove to forget an image entirely.
+pub fn ram_keys_for(uri: &str, mtimes: &[i64], suffixes: &[String]) -> Vec<String> {
+    let mut keys = Vec::new();
+    for &mtime in mtimes {
+        for bucket in [
+            ThumbBucket::Normal,
+            ThumbBucket::Large,
+            ThumbBucket::XLarge,
+            ThumbBucket::XxLarge,
+        ] {
+            let base = ram_key(uri, mtime, bucket.pixels());
+            keys.extend(suffixes.iter().map(|suffix| format!("{base}{suffix}")));
+        }
+    }
+    keys
 }
 
 /// Whether an index row's content hash can be trusted for the file as it is
@@ -1209,6 +1234,35 @@ mod tests {
         file.set_modified(std::time::SystemTime::now()).unwrap();
         assert!(mtime_secs(&std::fs::metadata(&path).unwrap()) > 1_000_000);
         std::fs::remove_file(&path).ok();
+    }
+
+    /// #11: a rewritten file (new mtime) is a different RAM key; the bucket
+    /// and edit suffix still separate entries as before.
+    #[test]
+    fn ram_key_changes_with_mtime() {
+        let uri = "file:///p/a.jpg";
+        assert_ne!(ram_key(uri, 1000, 256), ram_key(uri, 1001, 256));
+        assert_eq!(ram_key(uri, 1000, 200), ram_key(uri, 1000, 256));
+        assert_ne!(ram_key(uri, 1000, 256), ram_key(uri, 1000, 512));
+        assert_eq!(ram_key(uri, 1000, 256), "file:///p/a.jpg@1000#256");
+    }
+
+    /// #19: the eviction set holds exactly the keys the loaders store under —
+    /// base key plus edit suffix, every bucket, old and new mtime.
+    #[test]
+    fn ram_keys_for_covers_what_loaders_store() {
+        let uri = "file:///p/a.jpg";
+        let suffixes = vec![String::new(), edit_key(6, Some((0.1, 0.1, 0.5, 0.5)))];
+        let keys = ram_keys_for(uri, &[1000, 2000], &suffixes);
+        for mtime in [1000, 2000] {
+            for px in [96, 128, 256, 400, 1024] {
+                for (o, c) in [(1, None), (6, Some((0.1, 0.1, 0.5, 0.5)))] {
+                    let stored = ram_key(uri, mtime, px) + &edit_key(o, c);
+                    assert!(keys.contains(&stored), "{stored} not evicted");
+                }
+            }
+        }
+        assert_eq!(keys.len(), 2 * 4 * 2);
     }
 
     /// #11: the stamped hash (and with it the content tier) is trusted only

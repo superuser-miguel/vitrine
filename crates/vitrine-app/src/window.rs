@@ -884,8 +884,9 @@ impl VitrineWindow {
         let cache = self.imp().thumb_cache.clone();
         let orientation = req.item.orientation();
         let crop = req.item.crop();
-        let key = crate::thumbnails::ram_key(&req.item.file().uri(), req.load_size)
-            + &crate::thumbnails::edit_key(orientation, crop);
+        let key =
+            crate::thumbnails::ram_key(&req.item.file().uri(), req.item.mtime(), req.load_size)
+                + &crate::thumbnails::edit_key(orientation, crop);
         let cached = cache.borrow_mut().get(&key).cloned();
         let cached_hit = cached.is_some();
         let result = if cached_hit {
@@ -1098,7 +1099,8 @@ impl VitrineWindow {
         if item.has_failed() {
             return;
         }
-        let key = crate::thumbnails::ram_key(&item.file().uri(), load_size);
+        let key = crate::thumbnails::ram_key(&item.file().uri(), item.mtime(), load_size)
+            + &crate::thumbnails::edit_key(item.orientation(), item.crop());
         if imp.thumb_cache.borrow().contains(&key) {
             return;
         }
@@ -2709,7 +2711,7 @@ impl VitrineWindow {
     /// Load a thumbnail for a path into a `Picture` (dedup cards, size 128).
     fn load_dedup_thumb(&self, picture: &gtk::Picture, path: &str, mtime: i64) {
         let file = gio::File::for_path(path);
-        let key = crate::thumbnails::ram_key(&file.uri(), 128);
+        let key = crate::thumbnails::ram_key(&file.uri(), mtime, 128);
         let cache = self.imp().thumb_cache.clone();
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             picture.set_paintable(Some(&texture));

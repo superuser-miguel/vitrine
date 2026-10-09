@@ -498,7 +498,7 @@ impl VitrineViewer {
         let Some(cache) = self.imp().thumb_cache.borrow().clone() else {
             return;
         };
-        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE)
+        let key = crate::thumbnails::ram_key(&item.file().uri(), item.mtime(), THUMB_SIZE)
             + &crate::thumbnails::edit_key(item.orientation(), item.crop());
         if let Some(texture) = cache.borrow_mut().get(&key).cloned() {
             pic.set_paintable(Some(&texture));
@@ -628,7 +628,7 @@ impl VitrineViewer {
         };
         let orientation = item.orientation();
         let crop = item.crop();
-        let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE)
+        let key = crate::thumbnails::ram_key(&item.file().uri(), item.mtime(), THUMB_SIZE)
             + &crate::thumbnails::edit_key(orientation, crop);
         let cached = cache.borrow_mut().get(&key).cloned();
         let texture = if cached.is_some() {
@@ -1259,16 +1259,34 @@ impl VitrineViewer {
             return;
         };
         let old_hash = item.content_hash();
+        let old_mtime = item.mtime();
         let file = item.file();
         let written = gio::spawn_blocking(move || {
             write_replace(&file, &bytes).map_err(|e| e.message().to_string())?;
             // The bytes are on disk; a failed re-hash must not read as "not saved".
-            Ok::<_, String>(vitrine_engine::blake3_file(&path).ok())
+            let facts = std::fs::metadata(&path).ok().map(|meta| {
+                let mtime = meta
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_secs() as i64);
+                (mtime, meta.len() as i64)
+            });
+            Ok::<_, String>((vitrine_engine::blake3_file(&path).ok(), facts))
         })
         .await
         .unwrap_or_else(|_| Err("worker failed".into()));
         let new_hash = match written {
-            Ok(hash) => hash,
+            Ok((hash, facts)) => {
+                // The item now describes the new bytes: its thumbnail keys
+                // (RAM, by mtime) and disk validation (Thumb::MTime/Size)
+                // follow, instead of serving — and re-filing under the new
+                // hash — the pre-save thumbnail (#19).
+                if let Some((mtime, size)) = facts {
+                    item.set_file_facts(mtime, size);
+                }
+                hash
+            }
             Err(err) => {
                 glib::g_warning!("vitrine", "save write failed: {err}");
                 self.toast(&format!("Couldn’t save: {err}"));
@@ -1325,9 +1343,12 @@ impl VitrineViewer {
         item.set_crop(None);
         self.imp().edit_history.borrow_mut().remove(&uri);
         self.sync_history_buttons(&item);
-        // Evict RAM entries for this uri (viewer + thumbs at common buckets,
-        // under every suffix it was shown with), then re-show; the disk cache
-        // self-invalidates via the mtime check.
+        // Evict RAM entries for this uri (viewer + thumbs at every bucket,
+        // under every suffix it was shown with), then re-show. The new mtime
+        // already makes new thumbnail keys; evicting the old ones frees their
+        // memory, and the new-mtime keys are evicted too in case the save
+        // landed in the same second as the original. The disk tiers
+        // self-invalidate via Thumb::MTime/Size.
         {
             let mut cache = self.imp().cache.borrow_mut();
             let mut hists = self.imp().hist_cache.borrow_mut();
@@ -1339,11 +1360,9 @@ impl VitrineViewer {
         }
         if let Some(thumbs) = self.imp().thumb_cache.borrow().as_ref() {
             let mut thumbs = thumbs.borrow_mut();
-            for px in [128u32, 256, 512, 1024] {
-                let base = crate::thumbnails::ram_key(&uri, px);
-                for suffix in &suffixes {
-                    thumbs.remove(&format!("{base}{suffix}"));
-                }
+            for key in crate::thumbnails::ram_keys_for(&uri, &[old_mtime, item.mtime()], &suffixes)
+            {
+                thumbs.remove(&key);
             }
         }
         self.show_position(pos);
@@ -1689,7 +1708,8 @@ impl VitrineViewer {
             // full texture replaces it in place — same aspect, so the image
             // sharpens without jumping.
             let placeholder = imp.thumb_cache.borrow().clone().and_then(|cache| {
-                let key = crate::thumbnails::ram_key(&item.file().uri(), THUMB_SIZE) + &okey;
+                let key = crate::thumbnails::ram_key(&item.file().uri(), item.mtime(), THUMB_SIZE)
+                    + &okey;
                 cache.borrow_mut().get(&key).cloned()
             });
             if crate::debug::enabled() {

@@ -133,6 +133,13 @@ impl ImageObject {
         self.imp().size.get()
     }
 
+    /// Record that the file was rewritten (Save in place): its new mtime and
+    /// size, so thumbnail keys and cache validation follow the new bytes.
+    pub fn set_file_facts(&self, mtime: i64, size: i64) {
+        self.imp().mtime.set(mtime);
+        self.imp().size.set(size);
+    }
+
     /// Stamp the hash and its annotations from the file's index row — only if
     /// the row still describes the file as it is: same `(size, mtime)` as the
     /// enumerate saw (see [`crate::thumbnails::row_matches_file`]). A file
@@ -256,5 +263,12 @@ mod tests {
             assert_eq!(item.orientation(), 1);
             assert_eq!(item.crop(), None);
         }
+    }
+
+    #[test]
+    fn save_updates_the_file_facts() {
+        let item = item(4096, 1000);
+        item.set_file_facts(2000, 5000);
+        assert_eq!((item.mtime(), item.size()), (2000, 5000));
     }
 }
