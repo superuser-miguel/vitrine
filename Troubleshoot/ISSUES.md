@@ -991,6 +991,104 @@ next `providers()`.
 | `rating_min` predicate | 173–176 ms (`SCAN files`) | 0.1–0.4 ms (`IN (…)`) |
 | `paths_needing_enrichment`, per 64-file batch | 73–80 ms (`SCAN files`) | 0.03 ms (partial index, schema v6) |
 
+
+## 0.4 — the index knows "offline" (2026-10-09)
+
+The rest of the review's 0.4 set (`ROADMAP.md` §5), plus what turned up while
+fixing it. Numbers come from a read-only copy of the real index (432,534 rows).
+All are in `main`; none is released yet.
+
+### V-40 · An unreachable file got the never-retry 0×0 sentinel · `CONFIRMED` · **FIXED (untested)**
+
+Review #1/#4. An unplugged drive or a lapsed portal grant at enrichment time was
+treated like a broken file: 0×0, never retried. Snapshot: 63,476 present rows at
+0×0, 63,439 of them portal paths.
+> **Fixed (schema v7):** enrichment now returns `Enriched` / `Undecodable` /
+> `Unreachable`. Unreachable rows keep `width IS NULL` and get
+> `files.unreachable_at`; they leave the queue (`idx_files_unenriched` excludes
+> them) until a walk lists the file again. A one-time step
+> (`maintenance.enrichment-sentinels-requeued.v1`, writer thread, 0.65 s on the
+> snapshot) triaged every 0×0 row with one `open` check: all 63,915 were
+> unreachable and are parked. Nothing deleted or marked missing.
+> Every launch also re-parks rows that a pre-0.4 build re-sentinelled
+> (the dev build and the installed app share one index).
+
+### V-41 · A missing file back unchanged was re-hashed from scratch · `CONFIRMED` · **FIXED (untested)**
+
+Review #5. `classify` called every `missing=1` row `Modified`, so a replugged
+drive re-hashed its subtree and lost date/camera until re-enriched.
+> **Fixed:** a `Reappeared` change clears `missing` and keeps hash and
+> enrichment when size and mtime match.
+
+### V-42 · An unmounted drive inside a root read as an emptied folder · `PLAUSIBLE` · **FIXED (untested)**
+
+Review #6. Only the scan root had an "unreadable" guard.
+> **Fixed:** the walk records mount points it crosses (`mount_points` table) and
+> unreadable directories. Reconcile holds back rows under an unavailable root, an
+> unreadable directory, a known mount point that now looks absent, or a mount
+> showing a different disk. A plain folder emptied by the owner still reconciles
+> as before (decided 2026-10-09: files get moved around a lot, and with V-41 a
+> wrong "missing" is cheap to undo). A drive never seen mounted by 0.4 can be
+> marked missing once.
+
+### V-43 · Thumbnails were checked by mtime order, not equality · `CONFIRMED` · **FIXED (untested)**
+
+Review #10/#18. A source restored with an older mtime kept a stale thumbnail in
+every URI tier; thumbnails were written straight to their final name.
+> **Fixed:** `Thumb::MTime`, `Thumb::Size` and `Thumb::URI` are read from the PNG
+> header chunks and compared as GLib does (`thumbnail-verify.c`); ordering is the
+> fallback only when the chunk is absent. Writes go to a hidden temp and are
+> renamed. Cost ~0.1 µs per cache hit.
+
+### V-44 · A file edited elsewhere under the same name showed its old thumbnail · `CONFIRMED` · **FIXED (untested)**
+
+Review #11/#19. RAM key and content tier ignored the file's current mtime; Save in
+place left the item's mtime stale.
+> **Fixed:** RAM key is `uri@mtime#px`; the index hash is stamped only when the
+> row's (size, mtime) match the file's, so a changed file skips the content tier
+> until the scan re-hashes it. Visible: such a file shows no stars or tags, and
+> can't be dragged, for those few seconds. Save updates the item's mtime and size.
+
+### V-45 · Navigation races and the viewer left over a new location · `CONFIRMED` · **FIXED**
+
+Review #12/#13. Two folder loads in flight: the last to finish won. Opening a tag or
+collection under the viewer didn't pop it.
+> **Fixed:** `begin_navigation()` pops the viewer and bumps a load generation;
+> `populate` drops stale results. Verified headless (1,500-image folder then a
+> 1-image folder; fails without the fix). A catalog gaining members while its
+> image is in the viewer appends them in place instead.
+
+### V-46 · Revealing the filter bar reset the tag filter · `CONFIRMED` · **FIXED**
+
+Review #14. While browsing a tag, it emptied the grid. Verified headless.
+
+### V-47 · Any scan's end ended "indexing" · `CONFIRMED` · **FIXED (untested)**
+
+Review #8. `Finished` carried no folder: the banner dropped while other roots
+were still scanning, and each root restamped the open grid.
+> **Fixed:** `Started`/`Finished` name their folder; a counter keeps the banner
+> up until the last scan; restamp only when the scan covers the open folder.
+
+### V-48 · Two connections could migrate the schema at once · `CONFIRMED` · **FIXED**
+
+Review #15. Harmless while migrations were `IF NOT EXISTS`, fatal to the indexer
+with v7's `ALTER TABLE`. `migrate` now re-reads the version under
+`BEGIN IMMEDIATE`.
+
+### V-49 · The viewer's full-size cache ignores mtime · `CONFIRMED` · **OPEN**
+
+Found with V-44. The viewer's texture and histogram caches are keyed by
+`uri + edit` only, so an image edited elsewhere while cached shows stale in the
+viewer. Same fix shape as V-44.
+
+### V-50 · ~264k index rows are dead portal handles · `MEASURED` · **OPEN — owner's decision**
+
+Every sampled `/run/user/1000/doc/…` path is ENOENT; the document store's 11,227
+entries all record another portal path as their host path, so they will never
+resolve. 0.4 parks the 63k unenriched ones and leaves the rest. A third of the 63k
+have the same content at a real path; 332 carry annotations, which are keyed by
+hash and survive any cleanup. Whether to retire them is the owner's call.
+
 ---
 
 ## Tier 4 — Open questions.
