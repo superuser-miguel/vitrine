@@ -746,7 +746,7 @@ async fn enrich_one(path: &str) -> Enrichment {
     enrichment.phash = phash_from_texture(&frame);
     // #3: warm the on-disk thumbnail cache from this decode so browsing an indexed
     // folder needs no on-demand decode. Uses the source's mtime for cache validity.
-    crate::thumbnails::warm_cache(&file, mtime, &frame).await;
+    crate::thumbnails::warm_cache(&file, mtime, byte_size, &frame).await;
     enrichment
 }
 

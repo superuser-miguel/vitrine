@@ -53,29 +53,52 @@ pub fn add_text_chunks(png: &[u8], entries: &[(&str, &str)]) -> Option<Vec<u8>> 
 /// a caller can read a prefix instead of the whole file. Thumbnailers put their
 /// `tEXt` chunks before `IDAT`. `None` if absent, truncated, or not a PNG.
 pub fn read_text_chunk(png: &[u8], keyword: &str) -> Option<String> {
+    let mut found = None;
+    for_each_text_chunk(png, |key, value| {
+        if key == keyword.as_bytes() {
+            found = String::from_utf8(value.to_vec()).ok();
+            false
+        } else {
+            true
+        }
+    });
+    found
+}
+
+/// Walk the `tEXt` chunks ahead of the image data, calling `visit(keyword,
+/// text)` for each until it returns `false`. Same bounds as
+/// [`read_text_chunk`]: stops at `IDAT`/`IEND` or a truncation, never reads
+/// pixels, never panics on junk. One pass serves any number of keywords.
+pub fn for_each_text_chunk(png: &[u8], mut visit: impl FnMut(&[u8], &[u8]) -> bool) {
     if png.len() < 8 || png[..8] != SIGNATURE {
-        return None;
+        return;
     }
     let mut at = 8;
     while at + 8 <= png.len() {
         let len = u32::from_be_bytes([png[at], png[at + 1], png[at + 2], png[at + 3]]) as usize;
         let kind = &png[at + 4..at + 8];
         if kind == b"IDAT" || kind == b"IEND" {
-            return None;
+            return;
         }
         let data_start = at + 8;
-        let data_end = data_start.checked_add(len)?;
+        let Some(data_end) = data_start.checked_add(len) else {
+            return;
+        };
         if kind == b"tEXt" {
-            let data = png.get(data_start..data_end)?;
+            let Some(data) = png.get(data_start..data_end) else {
+                return;
+            };
             if let Some(nul) = data.iter().position(|&b| b == 0) {
-                if &data[..nul] == keyword.as_bytes() {
-                    return String::from_utf8(data[nul + 1..].to_vec()).ok();
+                if !visit(&data[..nul], &data[nul + 1..]) {
+                    return;
                 }
             }
         }
-        at = data_end.checked_add(4)?; // skip the CRC
+        let Some(next) = data_end.checked_add(4) else {
+            return; // skip the CRC
+        };
+        at = next;
     }
-    None
 }
 
 /// Build one `tEXt` chunk: `len | "tEXt" | keyword \0 text | crc`.

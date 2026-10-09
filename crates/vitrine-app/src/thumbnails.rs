@@ -340,7 +340,8 @@ pub fn renderer_source(widget: &impl IsA<gtk::Widget>) -> glib::WeakRef<gtk::Wid
 
 /// Load a thumbnail for `file` at roughly `target_px`, from cache or by decoding.
 ///
-/// `source_mtime` (unix seconds) validates cached entries. `renderer_widget` is
+/// `source_mtime` (unix seconds) and `byte_size` (0 = unknown) validate cached
+/// entries against their `Thumb::MTime`/`Thumb::Size`. `renderer_widget` is
 /// resolved to a GSK renderer *after* decoding (so a not-yet-realized cell still
 /// works) to GPU-downscale a full-resolution decode; the shrunk result is cached.
 /// Returns `None` if the image cannot be decoded.
@@ -362,19 +363,23 @@ pub async fn load(
         // Our persistent removable/remote copy first, when applicable.
         if removable {
             if let Some(texture) =
-                read_cache(removable_dir(), &uri, bucket, source_mtime, true).await
+                read_cache(removable_dir(), &uri, bucket, source_mtime, byte_size, true).await
             {
                 crate::debug::cache_hit();
                 return Some(texture);
             }
         }
         // Shared cache is GNOME's — read but never re-touch it.
-        if let Some(texture) = read_cache(shared_dir(), &uri, bucket, source_mtime, false).await {
+        if let Some(texture) =
+            read_cache(shared_dir(), &uri, bucket, source_mtime, byte_size, false).await
+        {
             crate::debug::cache_hit();
             return Some(texture);
         }
         // Private cache is ours — mark access so eviction is LRU, not FIFO.
-        if let Some(texture) = read_cache(private_dir(), &uri, bucket, source_mtime, true).await {
+        if let Some(texture) =
+            read_cache(private_dir(), &uri, bucket, source_mtime, byte_size, true).await
+        {
             crate::debug::cache_hit();
             return Some(texture);
         }
@@ -409,6 +414,7 @@ pub async fn load(
             store(
                 &uri,
                 source_mtime,
+                byte_size,
                 bucket,
                 &thumb,
                 is_shareable(&file),
@@ -540,7 +546,12 @@ pub const WARM_PX: u32 = 256;
 /// this same URI-keyed cache, so a folder that has been indexed shows thumbnails
 /// instantly instead of decoding on scroll. Disk only — enrichment isn't display,
 /// so it doesn't touch the RAM cache.
-pub async fn warm_cache(file: &gio::File, source_mtime: i64, frame: &gdk::Texture) {
+pub async fn warm_cache(
+    file: &gio::File,
+    source_mtime: i64,
+    source_size: i64,
+    frame: &gdk::Texture,
+) {
     let bucket = ThumbBucket::for_target(WARM_PX);
     let Some(thumb) = downscale_cpu(frame.clone(), bucket.pixels()).await else {
         return;
@@ -552,8 +563,10 @@ pub async fn warm_cache(file: &gio::File, source_mtime: i64, frame: &gdk::Textur
     // are already small (no full-res RSS risk), and enrichment's own bounded
     // concurrency paces these — so every indexed image actually gets warmed rather
     // than being dropped by the write backlog cap.
-    let _ =
-        gio::spawn_blocking(move || write_thumb(&thumb, &uri, source_mtime, bucket, &roots)).await;
+    let _ = gio::spawn_blocking(move || {
+        write_thumb(&thumb, &uri, source_mtime, source_size, bucket, &roots)
+    })
+    .await;
 }
 
 /// Whether a decode for `file` may be written to the *shared* cache: only for
@@ -567,31 +580,31 @@ fn is_shareable(file: &gio::File) -> bool {
 }
 
 /// Read and validate a cached thumbnail from `dir`. A cache entry is used only
-/// when its mtime is at least the source's (i.e. it isn't stale).
+/// when its `Thumb::MTime` (and `Thumb::Size`, if present) match the source —
+/// see [`thumbnail_cache::is_current`]; `byte_size == 0` means "unknown".
 async fn read_cache(
     dir: PathBuf,
     uri: &str,
     bucket: ThumbBucket,
     source_mtime: i64,
+    byte_size: i64,
     touch: bool,
 ) -> Option<gdk::Texture> {
     let path = dir.join(thumbnail_cache::relative_path(uri, bucket));
 
-    // Stat + read + PNG-decode entirely off the main thread — gdk::Texture is
+    // Open + read + PNG-decode entirely off the main thread — gdk::Texture is
     // Send, so only the finished texture comes back. This is what keeps the main
     // loop responsive while scrolling thousands of cached thumbnails.
     let read_path = path.clone();
+    let uri = uri.to_string();
     let (texture, cache_mtime) = gio::spawn_blocking(move || {
-        let meta = std::fs::metadata(&read_path).ok()?;
-        let cache_mtime = meta
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)?;
-        if !thumbnail_cache::is_current(cache_mtime, source_mtime) {
+        let (bytes, cache_mtime) = read_thumb_file(&read_path)?;
+        // The metadata check walks the chunk headers of the bytes just read —
+        // no extra I/O, no pixels — before the decode it can save.
+        let meta = thumbnail_cache::ThumbMeta::parse(&bytes);
+        if !thumbnail_cache::is_current(&meta, cache_mtime, &uri, source_mtime, byte_size) {
             return None;
         }
-        let bytes = std::fs::read(&read_path).ok()?;
         let texture = gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes)).ok()?;
         Some((texture, cache_mtime))
     })
@@ -614,6 +627,18 @@ async fn read_cache(
         }
     }
     Some(texture)
+}
+
+/// A thumbnail file's bytes and its own mtime (unix seconds), from one open:
+/// the `fstat` rides the same fd as the read. Blocking. `None` if absent or
+/// unreadable.
+fn read_thumb_file(path: &std::path::Path) -> Option<(Vec<u8>, i64)> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    file.read_to_end(&mut bytes).ok()?;
+    Some((bytes, mtime_secs(&meta)))
 }
 
 /// Current unix time in seconds.
@@ -729,25 +754,26 @@ fn roots_for(shareable: bool, removable: bool, bucket: ThumbBucket) -> Vec<PathB
     }
 }
 
-/// PNG-encode `texture` (with the freedesktop `Thumb::URI`/`Thumb::MTime` chunks)
-/// and write it into each cache root. Runs on a worker thread (callers wrap it in
-/// `spawn_blocking`).
+/// PNG-encode `texture` (with the freedesktop `Thumb::URI`/`Thumb::MTime` chunks,
+/// plus `Thumb::Size` when the source size is known) and write it into each
+/// cache root. Runs on a worker thread (callers wrap it in `spawn_blocking`).
 fn write_thumb(
     texture: &gdk::Texture,
     uri: &str,
     source_mtime: i64,
+    source_size: i64,
     bucket: ThumbBucket,
     roots: &[PathBuf],
 ) {
     let png = texture.save_to_png_bytes();
-    let png = vitrine_engine::png_meta::add_text_chunks(
-        &png,
-        &[
-            ("Thumb::URI", uri),
-            ("Thumb::MTime", &source_mtime.to_string()),
-        ],
-    )
-    .unwrap_or_else(|| png.to_vec());
+    let mtime = source_mtime.to_string();
+    let size = source_size.to_string();
+    let mut chunks = vec![("Thumb::URI", uri), ("Thumb::MTime", mtime.as_str())];
+    if source_size > 0 {
+        chunks.push(("Thumb::Size", size.as_str()));
+    }
+    let png =
+        vitrine_engine::png_meta::add_text_chunks(&png, &chunks).unwrap_or_else(|| png.to_vec());
     let rel = format!("{}.png", thumbnail_cache::cache_key(uri));
     for root in roots {
         let dir = root.join(bucket.dir());
@@ -764,6 +790,7 @@ fn write_thumb(
 fn store(
     uri: &str,
     source_mtime: i64,
+    source_size: i64,
     bucket: ThumbBucket,
     texture: &gdk::Texture,
     shareable: bool,
@@ -787,7 +814,7 @@ fn store(
     let roots = roots_for(shareable, removable, bucket);
 
     gio::spawn_blocking(move || {
-        write_thumb(&texture, &uri, source_mtime, bucket, &roots);
+        write_thumb(&texture, &uri, source_mtime, source_size, bucket, &roots);
         PENDING.fetch_sub(1, Ordering::Relaxed);
     });
 }
