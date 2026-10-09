@@ -1017,6 +1017,16 @@ fn requeue_sentinels_once(db: &Db) {
         Ok(None) => {}
         Err(e) => glib::g_warning!("vitrine", "0×0 requeue failed (retries next launch): {e}"),
     }
+    // Every launch: an older build sharing this index (the installed app
+    // beside a dev build) re-sentinels parked rows; park them again.
+    match db.repair_parked_rows() {
+        Ok(0) => {}
+        Ok(n) => glib::g_message!(
+            "vitrine",
+            "parked rows touched by an older build: {n} repaired"
+        ),
+        Err(e) => glib::g_warning!("vitrine", "parked-row repair failed: {e}"),
+    }
 }
 
 fn now_secs() -> i64 {

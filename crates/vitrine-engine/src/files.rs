@@ -431,6 +431,25 @@ impl Db {
         Ok(Some(done))
     }
 
+    /// Undo what a pre-0.4 build does to parked rows when it shares this
+    /// database (the dev build and the installed app use the same index): it
+    /// knows nothing of `unreachable_at`, so its enrichment sees a parked row's
+    /// `width IS NULL`, fails to open the file and writes the old 0×0 sentinel,
+    /// leaving the mark set. Under 0.4 a 0×0 write clears the mark, so a marked
+    /// row at 0×0 can only come from such a build: park it again. (A row it
+    /// enriched for real keeps a stale mark, which is the same harmless state
+    /// as an enriched file that went offline.)
+    ///
+    /// Runs on every launch; it reads only the small `idx_files_unreachable`
+    /// set. Returns how many rows it re-parked.
+    pub fn repair_parked_rows(&self) -> rusqlite::Result<usize> {
+        self.conn().execute(
+            "UPDATE files SET width = NULL, height = NULL
+             WHERE unreachable_at IS NOT NULL AND width = 0 AND height = 0",
+            [],
+        )
+    }
+
     /// Up to `limit` present files still awaiting enrichment (`width IS NULL`,
     /// not parked as unreachable), oldest-indexed first. Every attempt either
     /// sets `width` (even to 0 on decode failure) or parks the row as
@@ -747,6 +766,34 @@ mod tests {
 
     /// The per-scan requeue reads the small partial index of parked rows, not
     /// the whole subtree of `files`.
+    #[test]
+    fn a_parked_row_sentinelled_by_an_older_build_is_parked_again() {
+        let db = Db::open_in_memory().unwrap();
+        for (path, h) in [("/gone/a.jpg", "hA"), ("/ok/b.jpg", "hB")] {
+            db.upsert_file(&rec(path, h)).unwrap();
+        }
+        db.mark_unreachable("/gone/a.jpg", 100).unwrap();
+        // What 0.3.x enrichment writes: 0×0, mark untouched.
+        db.conn()
+            .execute(
+                "UPDATE files SET width = 0, height = 0 WHERE path = '/gone/a.jpg'",
+                [],
+            )
+            .unwrap();
+        // A genuinely undecodable file under 0.4: 0×0 with no mark.
+        db.set_enrichment("/ok/b.jpg", &Enrichment::default())
+            .unwrap();
+
+        assert_eq!(db.repair_parked_rows().unwrap(), 1);
+        assert_eq!(width_height(&db, "/gone/a.jpg"), (None, None));
+        assert_eq!(width_height(&db, "/ok/b.jpg"), (Some(0), Some(0)));
+        assert!(
+            db.paths_needing_enrichment(10).unwrap().is_empty(),
+            "parked again, not back in the queue"
+        );
+        assert_eq!(db.repair_parked_rows().unwrap(), 0);
+    }
+
     #[test]
     fn the_parked_rows_query_reads_its_partial_index() {
         let db = Db::open_in_memory().unwrap();
