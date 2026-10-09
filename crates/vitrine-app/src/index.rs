@@ -1185,9 +1185,10 @@ mod tests {
         assert!(db.paths_needing_enrichment(10).unwrap().is_empty());
     }
 
-    /// #6 end to end: a drive mounted inside the root is unplugged, leaving
-    /// its empty mount point. The rescan leaves its rows present; when it is
-    /// plugged back unchanged, its files simply reappear.
+    /// #6 end to end: a drive mounted inside the root, already recorded as a
+    /// mount point, is unplugged, leaving its empty mount point. The rescan
+    /// leaves its rows present; when it is plugged back unchanged, its files
+    /// simply reappear.
     #[test]
     fn a_rescan_with_an_inner_drive_unplugged_marks_nothing_missing() {
         let dir = temp_folder("inner-drive");
@@ -1199,6 +1200,13 @@ mod tests {
         let (tx, _rx) = async_channel::unbounded();
         scan(&db, &dir, &IndexExclusions::default(), &tx, &mut || {}).unwrap();
         let before = db.file_by_path(&x).unwrap().unwrap();
+        // What a walk records when it crosses a real mount (tests can't mount).
+        db.conn()
+            .execute(
+                "INSERT INTO mount_points(path, last_seen) VALUES (?1, 1)",
+                [drive.to_string_lossy()],
+            )
+            .unwrap();
 
         // Unplug: the mount point stays behind, empty.
         std::fs::rename(&drive, dir.with_extension("offline")).unwrap();

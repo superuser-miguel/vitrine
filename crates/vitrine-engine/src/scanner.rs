@@ -149,45 +149,6 @@ fn looks_absent(dir: &Path) -> bool {
     }
 }
 
-/// Whether the nearest still-existing ancestor of `file`, strictly below
-/// `root`, looks absent (empty or unreadable). `cache` remembers the answer
-/// per directory, so a whole unplugged subtree costs one look per directory.
-fn inside_absent_dir(
-    file: &Path,
-    root: &Path,
-    cache: &mut std::collections::HashMap<PathBuf, bool>,
-) -> bool {
-    let mut climbed = Vec::new();
-    let mut answer = false;
-    let mut dir = file.parent();
-    while let Some(d) = dir {
-        if d == root || !d.starts_with(root) {
-            break;
-        }
-        if let Some(&known) = cache.get(d) {
-            answer = known;
-            break;
-        }
-        climbed.push(d.to_path_buf());
-        match std::fs::symlink_metadata(d) {
-            Ok(meta) => {
-                answer = meta.is_dir() && looks_absent(d);
-                break;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => dir = d.parent(),
-            // Can't even tell whether it exists: hold.
-            Err(_) => {
-                answer = true;
-                break;
-            }
-        }
-    }
-    for d in climbed {
-        cache.insert(d, answer);
-    }
-    answer
-}
-
 /// The outcome of [`Db::reconcile_walk`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reconcile {
@@ -266,12 +227,14 @@ impl Db {
     ///   are indexed but *none* of them was seen: a different disk on the same
     ///   mount point, not the one whose files the index knows. (This applies
     ///   to a root that is itself a mount point, too.)
-    /// - **A directory that looks like an unmounted mount point** we have never
-    ///   seen mounted: the nearest still-existing ancestor of the unseen file,
-    ///   strictly below the root, is empty or unreadable. An emptied folder
-    ///   looks the same, so its rows wait until it is removed or refilled —
-    ///   when in doubt, don't mark missing. The root itself is exempt: a root
-    ///   the user emptied still reconciles, as before.
+    ///
+    /// A mount point is recorded the first time any walk crosses it (before
+    /// the decisions above are made), so a drive mounted during any scan is
+    /// protected from then on. An empty plain directory that was never seen as
+    /// a mount point is just an emptied folder: its unseen rows are marked
+    /// missing, so moves out of it still relink. A drive never seen mounted
+    /// can therefore be marked missing once; [`Change::Reappeared`] makes that
+    /// cheap to undo (no re-hash, enrichment kept).
     ///
     /// Rows under excluded (cache) paths are left alone as well: the walk
     /// skipped them, so their absence from it means nothing.
@@ -335,11 +298,8 @@ impl Db {
         }
 
         let mut report = Reconcile::default();
-        let mut absent_dirs: std::collections::HashMap<PathBuf, bool> = Default::default();
         for path in unseen {
-            let p = Path::new(path.as_str());
-            if held.iter().any(|h| p.starts_with(h)) || inside_absent_dir(p, root, &mut absent_dirs)
-            {
+            if held.iter().any(|h| Path::new(path.as_str()).starts_with(h)) {
                 report.held_back += 1;
             } else {
                 self.mark_missing(path)?;
@@ -396,36 +356,49 @@ mod tests {
         db.file_by_path(path).unwrap().unwrap().missing
     }
 
-    /// #6: a mount point inside a readable root, unmounted. It walks as an
-    /// empty directory; its rows must not be marked missing. Real deletions
-    /// beside it still are.
+    /// #6: a mount point inside a readable root is recorded the first time a
+    /// walk crosses it; unmounted later, it walks as an empty directory and
+    /// its rows are held. An emptied plain folder beside it — never seen as a
+    /// mount — reconciles like any deletion, as do deleted files and folders.
     #[test]
-    fn an_unmounted_inner_mount_point_is_not_a_deletion() {
+    fn an_unmounted_inner_mount_point_is_held_an_emptied_folder_is_not() {
         let root = temp_root("inner-mount");
-        std::fs::create_dir(root.join("drive")).unwrap(); // left empty by the unmount
+        let drive = root.join("drive");
+        std::fs::create_dir_all(drive.join("2024")).unwrap();
+        std::fs::write(drive.join("x.jpg"), b"x").unwrap();
+        std::fs::write(drive.join("2024/y.jpg"), b"y").unwrap();
+        std::fs::create_dir(root.join("emptied")).unwrap();
         let db = Db::open_in_memory().unwrap();
         let a = index(&db, &root, "a.jpg");
         let on_drive = index(&db, &root, "drive/x.jpg");
         let deep = index(&db, &root, "drive/2024/y.jpg");
+        let emptied = index(&db, &root, "emptied/e.jpg");
         let deleted = index(&db, &root, "b.jpg");
         let deleted_folder = index(&db, &root, "old/c.jpg");
 
+        // First 0.4 scan with the drive mounted: the walk crosses the device
+        // change (simulated — tests can't mount) and records it.
+        let mut walk = walk_library(&root, &IndexExclusions::none());
+        walk.mounts.push(drive.clone());
+        db.reconcile_walk(&root, &walk, &IndexExclusions::none())
+            .unwrap();
+        assert!(!is_missing(&db, &on_drive) && !is_missing(&db, &deep));
+
+        // Unplugged: the mount point is left behind, empty.
+        std::fs::remove_dir_all(&drive).unwrap();
+        std::fs::create_dir(&drive).unwrap();
         let walk = walk_library(&root, &IndexExclusions::none());
+        assert!(walk.mounts.is_empty());
         let got = db
             .reconcile_walk(&root, &walk, &IndexExclusions::none())
             .unwrap();
 
-        assert_eq!(
-            got,
-            Reconcile {
-                flagged: 2,
-                held_back: 2,
-                root_unavailable: false
-            }
-        );
+        assert_eq!(got.held_back, 2);
+        assert!(!got.root_unavailable);
         assert!(!is_missing(&db, &a));
         assert!(!is_missing(&db, &on_drive), "offline is not deleted");
         assert!(!is_missing(&db, &deep));
+        assert!(is_missing(&db, &emptied), "an emptied folder reconciles");
         assert!(is_missing(&db, &deleted), "a real deletion still records");
         assert!(is_missing(&db, &deleted_folder), "so does a deleted folder");
         std::fs::remove_dir_all(&root).ok();
