@@ -30,6 +30,15 @@ const MAX_STARS: i64 = 5;
 /// Cap the longest edge of a decoded viewer texture. Bounds per-image memory
 /// (≤ ~4096²·4 ≈ 64 MB) so the LRU holds a useful working set.
 const VIEW_MAX: u32 = 4096;
+/// The viewer cache key for `item` as it is now (uri, mtime, edit state).
+fn view_key_of(item: &ImageObject) -> String {
+    crate::thumbnails::view_key(
+        &item.file().uri(),
+        item.mtime(),
+        &crate::thumbnails::edit_key(item.orientation(), item.crop()),
+    )
+}
+
 /// Viewer texture cache budget.
 const CACHE_BYTES: u64 = 256 * 1024 * 1024;
 /// Zoom multiplier per step; zoom range clamps around 1.0 (100%).
@@ -169,7 +178,7 @@ mod imp {
         pub histogram_area: TemplateChild<gtk::DrawingArea>,
         /// Bins currently painted by `histogram_area`'s draw func.
         pub hist_current: RefCell<Option<std::rc::Rc<crate::histogram::Histogram>>>,
-        /// Computed bins keyed by the viewer texture-cache key (uri + edit_key),
+        /// Computed bins keyed by the viewer texture-cache key (`view_key`: uri@mtime + edit),
         /// so re-viewing an image is a map lookup, not a re-tally.
         #[allow(clippy::type_complexity)]
         pub hist_cache:
@@ -1352,10 +1361,12 @@ impl VitrineViewer {
         {
             let mut cache = self.imp().cache.borrow_mut();
             let mut hists = self.imp().hist_cache.borrow_mut();
-            for suffix in &suffixes {
-                let key = format!("{uri}{suffix}");
-                cache.remove(&key);
-                hists.remove(&key);
+            for mtime in [old_mtime, item.mtime()] {
+                for suffix in &suffixes {
+                    let key = crate::thumbnails::view_key(&uri, mtime, suffix);
+                    cache.remove(&key);
+                    hists.remove(&key);
+                }
             }
         }
         if let Some(thumbs) = self.imp().thumb_cache.borrow().as_ref() {
@@ -1698,7 +1709,7 @@ impl VitrineViewer {
 
         // Display from cache, or decode; either way reset zoom to fit.
         let okey = crate::thumbnails::edit_key(item.orientation(), item.crop());
-        let uri = item.file().uri().to_string() + &okey;
+        let uri = crate::thumbnails::view_key(&item.file().uri(), item.mtime(), &okey);
         if let Some(texture) = imp.cache.borrow_mut().get(&uri).cloned() {
             self.set_wait_state(None);
             self.set_texture(&texture);
@@ -1779,7 +1790,11 @@ impl VitrineViewer {
         let orientation = item.orientation();
         let crop = item.crop();
         let byte_size = item.size();
-        let uri = file.uri().to_string() + &crate::thumbnails::edit_key(orientation, crop);
+        let uri = crate::thumbnails::view_key(
+            &file.uri(),
+            item.mtime(),
+            &crate::thumbnails::edit_key(orientation, crop),
+        );
         if !self.imp().decode_inflight.borrow_mut().insert(uri.clone()) {
             return;
         }
@@ -1833,8 +1848,7 @@ impl VitrineViewer {
             if item.has_failed() {
                 continue;
             }
-            let uri = item.file().uri().to_string()
-                + &crate::thumbnails::edit_key(item.orientation(), item.crop());
+            let uri = view_key_of(&item);
             if self.imp().cache.borrow().contains(&uri) {
                 continue;
             }
@@ -2012,8 +2026,7 @@ impl VitrineViewer {
         let Some(item) = self.item_at(pos) else {
             return;
         };
-        let key = item.file().uri().to_string()
-            + &crate::thumbnails::edit_key(item.orientation(), item.crop());
+        let key = view_key_of(&item);
 
         // Cached bins: paint immediately.
         if let Some(hist) = imp.hist_cache.borrow().get(&key).cloned() {
@@ -2048,8 +2061,7 @@ impl VitrineViewer {
                 // Paint only if this is still the shown image.
                 let cur = viewer.current_position();
                 if let Some(item) = viewer.item_at(cur) {
-                    let cur_key = item.file().uri().to_string()
-                        + &crate::thumbnails::edit_key(item.orientation(), item.crop());
+                    let cur_key = view_key_of(&item);
                     if cur_key == key {
                         imp.hist_current.replace(Some(hist));
                         imp.histogram_area.queue_draw();

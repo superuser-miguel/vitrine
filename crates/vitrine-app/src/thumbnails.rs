@@ -79,6 +79,13 @@ pub fn ram_key(uri: &str, mtime: i64, target_px: u32) -> String {
     )
 }
 
+/// The viewer's full-size texture/histogram cache key: `uri@mtime` plus the
+/// edit suffix ([`edit_key`]). The mtime makes a file edited elsewhere miss
+/// the cache instead of showing its old pixels (V-49, same shape as V-44).
+pub fn view_key(uri: &str, mtime: i64, edit: &str) -> String {
+    format!("{uri}@{mtime}{edit}")
+}
+
 /// Every RAM-cache key `uri` can hold a thumbnail under, for each of `mtimes`
 /// and edit `suffixes` (see [`edit_key`]), at every bucket. What an eviction
 /// must remove to forget an image entirely.
@@ -1138,6 +1145,17 @@ pub fn run_cleanup(plan: CleanupPlan) -> (usize, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// V-49: a file edited elsewhere (new mtime) must miss the viewer cache,
+    /// and the edit suffix still separates edit states.
+    #[test]
+    fn view_key_changes_with_mtime_and_edit() {
+        let uri = "file:///a.jpg";
+        let edit = edit_key(6, None);
+        assert_ne!(view_key(uri, 100, ""), view_key(uri, 101, ""));
+        assert_ne!(view_key(uri, 100, ""), view_key(uri, 100, &edit));
+        assert_eq!(view_key(uri, 100, &edit), format!("{uri}@100#o6"));
+    }
 
     /// The removable/remote heuristic (PLAN §16.5, Flavor 1): network schemes
     /// and typical auto-mount roots are "removable"; local + portal paths are not.
