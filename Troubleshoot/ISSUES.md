@@ -1075,19 +1075,33 @@ Review #15. Harmless while migrations were `IF NOT EXISTS`, fatal to the indexer
 with v7's `ALTER TABLE`. `migrate` now re-reads the version under
 `BEGIN IMMEDIATE`.
 
-### V-49 · The viewer's full-size cache ignores mtime · `CONFIRMED` · **OPEN**
+### V-49 · The viewer's full-size cache ignores mtime · `CONFIRMED` · **FIXED (untested)**
 
 Found with V-44. The viewer's texture and histogram caches are keyed by
 `uri + edit` only, so an image edited elsewhere while cached shows stale in the
 viewer. Same fix shape as V-44.
+> **Fixed 2026-11-18:** keys are `uri@mtime` + edit suffix
+> (`thumbnails::view_key`); Save in place evicts under the old and the new mtime.
+> Test: `view_key_changes_with_mtime_and_edit`.
 
-### V-50 · ~264k index rows are dead portal handles · `MEASURED` · **OPEN — owner's decision**
+### V-50 · ~264k index rows are dead portal handles · `MEASURED` · **FIXED (untested in the app) — owner chose to retire them 2026-11-18**
 
 Every sampled `/run/user/1000/doc/…` path is ENOENT; the document store's 11,227
 entries all record another portal path as their host path, so they will never
 resolve. 0.4 parks the 63k unenriched ones and leaves the rest. A third of the 63k
 have the same content at a real path; 332 carry annotations, which are keyed by
 hash and survive any cleanup. Whether to retire them is the owner's call.
+> **Retired in 0.4.0 (owner: GO, 2026-11-18).** Re-measured on a snapshot that
+> day: 264,309 portal rows across 394 doc ids, **all** ENOENT from the host *and*
+> from inside the sandbox (180 of the doc ids still exist in the sandbox's view,
+> but empty). One-time maintenance on first launch
+> (`maintenance.dead-portal-rows-retired.v1`): only while the portal mount answers;
+> a row goes when its path is a portal handle that stats NotFound; a row that is
+> the sole anchor of an annotation stays; dated `VACUUM INTO` backup
+> (`index-backup-pre-portal-purge-*.sqlite`) first. Dry run on the copy:
+> 264,107 deleted, 202 kept as sole anchors, 480,863 → 216,756 rows; every
+> annotation table and every non-portal row identical before/after; ~8 s once.
+> Test: `dead_portal_purge_keeps_live_real_and_sole_anchors`.
 
 ---
 
