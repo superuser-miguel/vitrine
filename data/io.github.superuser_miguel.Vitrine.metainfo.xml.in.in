@@ -48,6 +48,28 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.0" date="2026-11-18">
+      <description>
+        <p>
+          The index learns the difference between "gone" and "not here right
+          now": files on an unplugged drive or behind an expired file-chooser
+          grant are kept and come back as they were, and images changed by
+          other apps never show stale pictures.
+        </p>
+        <p>Changes in this release:</p>
+        <ul>
+          <li>A file that can't be reached (unplugged drive, expired file-chooser access) is set aside and retried when it returns, instead of being treated as broken forever.</li>
+          <li>A drive plugged back in is recognised as unchanged: no re-hashing, and dates and camera details are kept.</li>
+          <li>A drive that isn't mounted is no longer mistaken for an emptied folder.</li>
+          <li>Thumbnails and the full-size viewer notice when another app has changed an image, and show the new version.</li>
+          <li>Thumbnails are written safely, so an interrupted write can't leave a broken one.</li>
+          <li>Opening a folder, tag or collection while another is still loading always shows the last one you chose, and closes the viewer.</li>
+          <li>Showing the filter bar no longer clears the tag you're browsing.</li>
+          <li>"Indexing…" stays up until every folder has finished scanning.</li>
+          <li>A one-time cleanup removes about 264,000 index entries for folders once opened through the file chooser that no longer exist. Tags, ratings and collections are not affected, and a backup of the index is taken first.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.2" date="2026-10-08">
       <description>
         <p>

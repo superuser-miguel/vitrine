@@ -3,7 +3,7 @@
 *The short, living answer to "what are we building, and what comes next?"
 `PLAN.md` holds the designs and the rationale; this file holds the goals and
 the order. Re-read this before picking the next piece of work. Update it when
-a release ships or a decision changes. Last revised 2026-10-06, after v0.3.1 (tagging moved to a design track).*
+a release ships or a decision changes. Last revised 2026-11-18, at v0.4.0. A rewrite into charter, spec, workflow and plan is next (owner, 2026-11-18).*
 
 ---
 
@@ -73,9 +73,8 @@ They don't change between releases.
 | 0.3.0 | 2026-10-05 | All of the above shipped; the signed hosted repo; site refresh; CI fixed. |
 | 0.3.1 | 2026-10-06 | Private thumbnail cache (V-30), cache rows purged from the index (V-31), Clean Up Thumbnails, V-05, remembered icon size, `release.sh`, `run-dev.sh`. |
 | 0.3.2 | 2026-10-08 | The review's data-safety set: Save keeps duplicates' annotations and never writes the wrong format (V-32–34), phantom catalog drops, the stuck banner, the Lua lock (V-35–37), viewer undo/prefetch (V-38), the scale fixes (V-39). Shipped with hand checks deferred to the soak checklist (owner's notes). |
+| 0.4.0 | 2026-11-18 | The index knows "offline": unreachable files parked, not sentinelled (V-40); `Reappeared` (V-41); mount-aware reconcile (V-42); thumbnail and viewer invalidation by mtime (V-43, V-44, V-49); navigation lifecycle (V-45–47); schema v7 (V-48); the dead portal rows retired (V-50, owner's call). |
 
-**0.4 in progress (2026-10-09):** the offline model, thumbnail invalidation
-and navigation fixes are in `main` (V-40–48); V-49 remains, then the release.
 **Known debt (code review, 2026-10-06; full list in the vault note):** see §5
 for where each finding gets paid.
 
@@ -113,10 +112,10 @@ gallery-dl helpers are the only overlap.
 |---|---|
 | Save in place moves annotations; Save writes PNG under other extensions; Save As onto the source | **0.3.2 — shipped** |
 | Phantom hash from a text drop; stuck "Indexing…" banner; Lua guard held across a call; cheap perf wins (collection counts, N+1 ratings, partial index, `rating_min`) | **0.3.2 — shipped** |
-| Enrichment sentinel for unreachable files + retry of the 63k rows; `Reappeared`; mount-point reconcile | **0.4 — in `main`** (V-40–42, V-48) |
-| `Thumb::MTime` read back; mtime in RAM/content keys; atomic thumbnail writes | **0.4 — in `main`** (V-43–44) |
-| Folder-load generation token; viewer pop on every navigation; tag-filter reset; per-scan `Finished` | **0.4 — in `main`** (V-45–47) |
-| The viewer's full-size cache ignores mtime (V-49, found with V-44) | **0.4**, still open |
+| Enrichment sentinel for unreachable files + retry of the 63k rows; `Reappeared`; mount-point reconcile | **0.4 — shipped** (V-40–42, V-48) |
+| `Thumb::MTime` read back; mtime in RAM/content keys; atomic thumbnail writes | **0.4 — shipped** (V-43–44) |
+| Folder-load generation token; viewer pop on every navigation; tag-filter reset; per-scan `Finished` | **0.4 — shipped** (V-45–47) |
+| The viewer's full-size cache ignores mtime (V-49, found with V-44) | **0.4 — shipped** |
 | Tag-operation journal + Undo on the toast (engine + one button; commits to no tagging UI) | **0.3.x, if the owner confirms** |
 | `window.rs` extractions; CI jobs; test gaps; dead engine API | **1.0** (the engine tag calls with 0.9) |
 
@@ -159,8 +158,8 @@ gallery-dl helpers are the only overlap.
    daily tool; the stronger acceptance test).
 5. **XMP conflict rule (before 1.2):** Vitrine wins, file wins, or newest wins.
 6. **When, if ever, the browse view changes** (0.9, 1.0 or 1.3).
-7. **The ~264k dead portal rows (V-50):** retire them from the index, or keep
-   them parked. 0.4 deletes nothing; annotations are keyed by hash either way.
+7. ~~**The ~264k dead portal rows (V-50).**~~ Decided 2026-11-18: retire them.
+   0.4.0 does it once, with a backup, keeping the 202 rows that anchor annotations.
 
 ---
 
