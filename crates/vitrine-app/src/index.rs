@@ -44,6 +44,8 @@ pub fn index_exclusions() -> IndexExclusions {
 
 /// `meta` key marking the one-time V-31 purge as done.
 const CACHE_PURGE_KEY: &str = "maintenance.cache-rows-purged.v1";
+/// `meta` key marking the one-time V-50 retirement of dead portal rows as done.
+const PORTAL_PURGE_KEY: &str = "maintenance.dead-portal-rows-retired.v1";
 
 /// How many un-enriched files the driver pulls per round-trip to the writer.
 const ENRICH_BATCH: i64 = 64;
@@ -436,6 +438,7 @@ fn worker(
 
     // One-time maintenance, on the writer before any scan or write (V-31).
     purge_cache_rows_once(&db, &db_path, &exclusions);
+    purge_dead_portal_rows_once(&db, &db_path);
     requeue_sentinels_once(&db);
 
     // Single writer, but no head-of-line blocking (V-04, measured 2026-07-21:
@@ -925,30 +928,101 @@ fn scan_folder(
 }
 
 /// Purge the `files` rows a scan once made of thumbnail caches (V-31: 148,962
-/// of them, from 2026-07-21). Runs once per database, on the writer thread:
-/// plan, take a dated safety copy next to the DB, then delete. A row is kept
-/// when it is the only anchor of an annotation (see
-/// [`Db::plan_cache_purge`]). If the copy fails, nothing is deleted and the
-/// purge retries next launch.
+/// of them, from 2026-07-21). A row is kept when it is the only anchor of an
+/// annotation (see [`Db::plan_cache_purge`]).
 fn purge_cache_rows_once(db: &Db, db_path: &std::path::Path, exclusions: &IndexExclusions) {
-    if db.meta(CACHE_PURGE_KEY).ok().flatten().is_some() {
+    purge_rows_once(
+        db,
+        db_path,
+        &PurgeJob {
+            key: CACHE_PURGE_KEY,
+            backup_tag: "cache-purge",
+            what: "thumbnail-cache rows",
+        },
+        || db.plan_cache_purge(exclusions),
+    );
+}
+
+/// Retire the index rows of dead document-portal handles (V-50: ~264k rows
+/// from folders once opened through the file chooser, whose handles no longer
+/// resolve — not from the host, not from inside the sandbox). A row goes only
+/// when its path is a portal handle that stats as not-found; a row that is the
+/// only anchor of an annotation stays (see [`Db::plan_dead_portal_purge`]).
+///
+/// With the portal down every handle would look gone, so this runs only when
+/// the portal's mount answers with at least one entry; otherwise it waits for
+/// the next launch.
+fn purge_dead_portal_rows_once(db: &Db, db_path: &std::path::Path) {
+    if db.meta(PORTAL_PURGE_KEY).ok().flatten().is_some() {
         return;
     }
-    let plan = match db.plan_cache_purge(exclusions) {
+    let doc_root = glib::user_runtime_dir().join("doc");
+    let portal_up = std::fs::read_dir(&doc_root).is_ok_and(|mut entries| entries.next().is_some());
+    if !portal_up {
+        glib::g_message!(
+            "vitrine",
+            "dead portal rows: {} not answering, retiring next launch",
+            doc_root.display()
+        );
+        return;
+    }
+    purge_rows_once(
+        db,
+        db_path,
+        &PurgeJob {
+            key: PORTAL_PURGE_KEY,
+            backup_tag: "portal-purge",
+            what: "dead file-chooser rows",
+        },
+        || {
+            db.plan_dead_portal_purge(|path| {
+                std::fs::symlink_metadata(path)
+                    .is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            })
+        },
+    );
+}
+
+/// One one-time row purge: what it's called and where its marker lives.
+struct PurgeJob {
+    /// `meta` key set once the purge has run.
+    key: &'static str,
+    /// Middle of the backup file name: `index-backup-pre-<tag>-<stamp>.sqlite`.
+    backup_tag: &'static str,
+    /// Plural noun for the log line ("thumbnail-cache rows").
+    what: &'static str,
+}
+
+/// Run a one-time purge on the writer thread: plan, take a dated safety copy
+/// next to the DB, then delete in one transaction and mark it done. If the
+/// plan or the copy fails, nothing is deleted and it retries next launch.
+fn purge_rows_once<E: std::fmt::Display>(
+    db: &Db,
+    db_path: &std::path::Path,
+    job: &PurgeJob,
+    plan: impl FnOnce() -> Result<vitrine_engine::exclusions::CachePurgePlan, E>,
+) {
+    if db.meta(job.key).ok().flatten().is_some() {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let plan = match plan() {
         Ok(plan) => plan,
         Err(e) => {
-            glib::g_warning!("vitrine", "cache-row purge: plan failed: {e}");
+            glib::g_warning!("vitrine", "{} purge: plan failed: {e}", job.what);
             return;
         }
     };
     if crate::debug::enabled() {
         eprintln!(
-            "VDBG-PURGE ms={} before={} cache_rows={} kept_annotated={} to_delete={}",
+            "VDBG-PURGE ms={} job={} before={} candidates={} kept_annotated={} to_delete={} plan_ms={}",
             crate::debug::since_start_ms(),
+            job.backup_tag,
             plan.before,
             plan.cache_rows,
             plan.kept_annotated,
-            plan.delete_ids.len()
+            plan.delete_ids.len(),
+            started.elapsed().as_millis()
         );
     }
     if !plan.delete_ids.is_empty() {
@@ -956,11 +1030,15 @@ fn purge_cache_rows_once(db: &Db, db_path: &std::path::Path, exclusions: &IndexE
             .and_then(|t| t.format("%Y%m%d-%H%M%S"))
             .map(|s| s.to_string())
             .unwrap_or_else(|_| now_secs().to_string());
-        let backup = db_path.with_file_name(format!("index-backup-pre-cache-purge-{stamp}.sqlite"));
+        let backup = db_path.with_file_name(format!(
+            "index-backup-pre-{}-{stamp}.sqlite",
+            job.backup_tag
+        ));
         if let Err(e) = db.backup_to(&backup) {
             glib::g_warning!(
                 "vitrine",
-                "cache-row purge skipped: backup to {} failed: {e}",
+                "{} purge skipped: backup to {} failed: {e}",
+                job.what,
                 backup.display()
             );
             return;
@@ -969,14 +1047,17 @@ fn purge_cache_rows_once(db: &Db, db_path: &std::path::Path, exclusions: &IndexE
             Ok(done) => {
                 glib::g_message!(
                     "vitrine",
-                    "removed {} thumbnail-cache rows from the index (backup: {})",
+                    "removed {} {} from the index, kept {} that anchor annotations (backup: {})",
                     done.deleted,
+                    job.what,
+                    done.kept_annotated,
                     backup.display()
                 );
                 if crate::debug::enabled() {
                     eprintln!(
-                        "VDBG-PURGE ms={} before={} deleted={} kept_annotated={} after={} backup={}",
+                        "VDBG-PURGE ms={} job={} before={} deleted={} kept_annotated={} after={} backup={}",
                         crate::debug::since_start_ms(),
+                        job.backup_tag,
                         done.before,
                         done.deleted,
                         done.kept_annotated,
@@ -986,13 +1067,13 @@ fn purge_cache_rows_once(db: &Db, db_path: &std::path::Path, exclusions: &IndexE
                 }
             }
             Err(e) => {
-                glib::g_warning!("vitrine", "cache-row purge failed: {e}");
+                glib::g_warning!("vitrine", "{} purge failed: {e}", job.what);
                 return;
             }
         }
     }
-    if let Err(e) = db.set_meta(CACHE_PURGE_KEY, &now_secs().to_string()) {
-        glib::g_warning!("vitrine", "cache-row purge: marking done: {e}");
+    if let Err(e) = db.set_meta(job.key, &now_secs().to_string()) {
+        glib::g_warning!("vitrine", "{} purge: marking done: {e}", job.what);
     }
 }
 

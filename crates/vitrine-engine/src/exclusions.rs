@@ -138,9 +138,33 @@ impl Db {
         &self,
         exclusions: &IndexExclusions,
     ) -> rusqlite::Result<CachePurgePlan> {
+        self.plan_row_purge(|path| exclusions.excludes(Path::new(path)))
+    }
+
+    /// Decide which dead document-portal rows can go (V-50). A row is a
+    /// candidate when its path is a portal handle (`/run/user/<uid>/doc/…`) and
+    /// `is_gone(path)` says it no longer resolves; the same annotation rule as
+    /// [`Db::plan_cache_purge`] keeps any row that is the only anchor of a tag,
+    /// rating, comment, collection membership or edit. The caller supplies
+    /// `is_gone` and must only call this while the portal is known to be up —
+    /// with the portal down every handle looks gone.
+    pub fn plan_dead_portal_purge(
+        &self,
+        is_gone: impl Fn(&str) -> bool,
+    ) -> rusqlite::Result<CachePurgePlan> {
+        self.plan_row_purge(|path| crate::files::is_portal_document_path(path) && is_gone(path))
+    }
+
+    /// Shared planner: `is_candidate(path)` picks the rows to delete; a
+    /// candidate survives when its hash is annotated and no non-candidate row
+    /// holds that hash. In the plan, `cache_rows` counts the candidates.
+    fn plan_row_purge(
+        &self,
+        is_candidate: impl Fn(&str) -> bool,
+    ) -> rusqlite::Result<CachePurgePlan> {
         let mut plan = CachePurgePlan::default();
-        // (id, hash) of every cache row; plus every hash a non-cache row holds.
-        let mut cache_rows: Vec<(i64, String)> = Vec::new();
+        // (id, hash) of every candidate row; plus every hash another row holds.
+        let mut candidates: Vec<(i64, String)> = Vec::new();
         let mut kept_hashes: HashSet<String> = HashSet::new();
         {
             let mut stmt = self
@@ -156,17 +180,16 @@ impl Db {
             for row in rows {
                 let (id, path, hash) = row?;
                 plan.before += 1;
-                if exclusions.excludes(Path::new(&path)) {
-                    cache_rows.push((id, hash));
+                if is_candidate(&path) {
+                    candidates.push((id, hash));
                 } else {
                     kept_hashes.insert(hash);
                 }
             }
         }
-        plan.cache_rows = cache_rows.len();
-
+        plan.cache_rows = candidates.len();
         let annotated = self.annotated_hashes()?;
-        for (id, hash) in cache_rows {
+        for (id, hash) in candidates {
             if annotated.contains(&hash) && !kept_hashes.contains(&hash) {
                 plan.kept_annotated += 1;
             } else {
@@ -233,6 +256,61 @@ mod tests {
                 PathBuf::from("/home/me/.var/app/io.github.x.Vitrine/cache"),
             ],
         )
+    }
+
+    /// V-50: only dead portal handles go; a live handle, a real path, and a
+    /// dead handle that is the sole anchor of a tag all stay.
+    #[test]
+    fn dead_portal_purge_keeps_live_real_and_sole_anchors() {
+        let db = Db::open_in_memory().unwrap();
+        let rows = [
+            ("/run/user/1000/doc/aa/dead.jpg", "h-dead"),
+            ("/run/user/1000/doc/aa/live.jpg", "h-live"),
+            ("/home/me/Pictures/real.jpg", "h-real"),
+            ("/run/user/1000/doc/bb/dup.jpg", "h-real"),
+            ("/run/user/1000/doc/bb/tagged.jpg", "h-tagged"),
+        ];
+        for (path, hash) in rows {
+            db.upsert_file(&FileRecord {
+                path: path.into(),
+                content_hash: hash.into(),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        db.conn()
+            .execute_batch(
+                "INSERT INTO tags (name) VALUES ('kept');
+                 INSERT INTO file_tags (content_hash, tag_id, created_at)
+                   SELECT 'h-tagged', id, 0 FROM tags WHERE name = 'kept';
+                 INSERT INTO file_tags (content_hash, tag_id, created_at)
+                   SELECT 'h-real', id, 0 FROM tags WHERE name = 'kept';",
+            )
+            .unwrap();
+        let plan = db
+            .plan_dead_portal_purge(|p| !p.ends_with("live.jpg"))
+            .unwrap();
+        assert_eq!(plan.before, 5);
+        assert_eq!(plan.cache_rows, 3); // dead, dup, tagged
+        assert_eq!(plan.kept_annotated, 1); // tagged: its only anchor
+        let done = db.apply_cache_purge(&plan).unwrap();
+        assert_eq!(done.deleted, 2);
+        let left: Vec<String> = db
+            .conn()
+            .prepare("SELECT path FROM files ORDER BY path")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            left,
+            [
+                "/home/me/Pictures/real.jpg",
+                "/run/user/1000/doc/aa/live.jpg",
+                "/run/user/1000/doc/bb/tagged.jpg",
+            ]
+        );
     }
 
     #[test]
