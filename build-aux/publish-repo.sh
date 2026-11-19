@@ -50,9 +50,25 @@ echo ">> Building the signed release into a fresh OSTree repo…"
 flatpak-builder --user --force-clean --state-dir="$work/state" \
     --repo="$repo" --gpg-sign="$KEY" "$work/build-dir" "$MANIFEST"
 
+# Add-on helpers (PLAN §16.1): built into the same signed repo, so the
+# vitrine remote serves them beside the app. An app extension can only be
+# built against an INSTALLED Vitrine that declares the extension point
+# (io.github.superuser_miguel.Vitrine.Helper, since 0.4.1), so this needs the
+# publishing machine's own Vitrine at 0.4.1 or later.
+for helper in build-aux/helpers/*/io.github.superuser_miguel.Vitrine.Helper.*.yml; do
+    [ -e "$helper" ] || continue
+    name="$(basename "$(dirname "$helper")")"
+    echo ">> Building the $name helper into the same repo…"
+    flatpak-builder --user --force-clean --state-dir="$work/state-$name" \
+        --repo="$repo" --gpg-sign="$KEY" "$work/build-$name" "$helper"
+done
+
 # Debug symbols are ~2x the app and the bundle carries none, so dropping the
 # ref keeps both distribution channels byte-identical.
-ostree --repo="$repo" refs --delete "runtime/$APP.Debug/x86_64/$BRANCH" 2>/dev/null || true
+# The same goes for every helper: drop all .Debug refs.
+for ref in $(ostree --repo="$repo" refs | grep '\.Debug/'); do
+    ostree --repo="$repo" refs --delete "$ref"
+done
 
 # Regenerates appstream + summary and signs both. Without a signed summary a
 # client with GPGKey set refuses the remote outright.

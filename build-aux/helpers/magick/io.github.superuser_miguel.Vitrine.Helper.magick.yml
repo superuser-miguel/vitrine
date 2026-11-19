@@ -17,7 +17,6 @@ runtime-version: master
 sdk: org.gnome.Sdk//50
 build-extension: true
 separate-locales: false
-appstream-compose: false
 build-options:
   prefix: /app/helpers/magick
 modules:
@@ -68,6 +67,11 @@ modules:
         sha256: 40b6fefa88fe16ca5a4b3d3db5133eaebfb0157f21f98530bde8aec5dd5b0776
       - type: file
         path: policy.xml
+      - type: file
+        path: io.github.superuser_miguel.Vitrine.Helper.magick.metainfo.xml
     post-install:
       # Replace ImageMagick's permissive default with Vitrine's allow-list.
       - install -Dm644 policy.xml ${FLATPAK_DEST}/etc/ImageMagick-7/policy.xml
+      # type="addon" metadata: lets GNOME Software list it under Vitrine.
+      - install -Dm644 io.github.superuser_miguel.Vitrine.Helper.magick.metainfo.xml
+        ${FLATPAK_DEST}/share/metainfo/io.github.superuser_miguel.Vitrine.Helper.magick.metainfo.xml
