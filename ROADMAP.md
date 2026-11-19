@@ -3,7 +3,7 @@
 *The short, living answer to "what are we building, and what comes next?"
 `PLAN.md` holds the designs and the rationale; this file holds the goals and
 the order. Re-read this before picking the next piece of work. Update it when
-a release ships or a decision changes. Last revised 2026-11-18, at v0.4.0. A rewrite into charter, spec, workflow and plan is next (owner, 2026-11-18).*
+a release ships or a decision changes. Last revised 2026-11-19, at v0.4.1. A rewrite into charter, spec, workflow and plan is next (owner, 2026-11-18).*
 
 ---
 
@@ -74,6 +74,7 @@ They don't change between releases.
 | 0.3.1 | 2026-10-06 | Private thumbnail cache (V-30), cache rows purged from the index (V-31), Clean Up Thumbnails, V-05, remembered icon size, `release.sh`, `run-dev.sh`. |
 | 0.3.2 | 2026-10-08 | The review's data-safety set: Save keeps duplicates' annotations and never writes the wrong format (V-32–34), phantom catalog drops, the stuck banner, the Lua lock (V-35–37), viewer undo/prefetch (V-38), the scale fixes (V-39). Shipped with hand checks deferred to the soak checklist (owner's notes). |
 | 0.4.0 | 2026-11-18 | The index knows "offline": unreachable files parked, not sentinelled (V-40); `Reappeared` (V-41); mount-aware reconcile (V-42); thumbnail and viewer invalidation by mtime (V-43, V-44, V-49); navigation lifecycle (V-45–47); schema v7 (V-48); the dead portal rows retired (V-50, owner's call). |
+| 0.4.1 | 2026-11-19 | The add-on slot for helpers (`…Vitrine.Helper`, mounted at `/app/helpers`) and helper detection: groundwork G2 for the ImageMagick colour tools. No visible change. |
 
 **Known debt (code review, 2026-10-06; full list in the vault note):** see §5
 for where each finding gets paid.

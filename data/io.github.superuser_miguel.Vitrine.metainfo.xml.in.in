@@ -48,6 +48,18 @@
     </screenshot>
   </screenshots>
   <releases>
+    <release version="0.4.1" date="2026-11-19">
+      <description>
+        <p>
+          Groundwork for add-ons: Vitrine can now receive optional helper
+          tools from its own signed repository. Nothing changes in how the
+          app looks or works.
+        </p>
+        <ul>
+          <li>An add-on slot for helper tools, starting with ImageMagick for the coming colour tools. Add-ons are only installed when you ask for them.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-11-18">
       <description>
         <p>
