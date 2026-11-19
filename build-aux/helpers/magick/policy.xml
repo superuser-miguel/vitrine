@@ -1,0 +1,14 @@
+<policymap>
+  <!-- Vitrine helper policy (G4 draft): image formats only, bounded resources. -->
+  <policy domain="resource" name="memory" value="1GiB"/>
+  <policy domain="resource" name="map" value="2GiB"/>
+  <policy domain="resource" name="disk" value="4GiB"/>
+  <policy domain="resource" name="area" value="256MP"/>
+  <policy domain="resource" name="width" value="32KP"/>
+  <policy domain="resource" name="height" value="32KP"/>
+  <policy domain="resource" name="time" value="120"/>
+  <policy domain="delegate" rights="none" pattern="*"/>
+  <policy domain="path" rights="none" pattern="@*"/>
+  <policy domain="coder" rights="none" pattern="*"/>
+  <policy domain="coder" rights="read|write" pattern="{JPEG,JPG,PNG,TIFF,TIF,WEBP,HEIC,HEIF,AVIF,JXL,JP2,J2K,PPM,PGM,PNM,MIFF}"/>
+</policymap>

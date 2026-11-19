@@ -1,0 +1,73 @@
+# G1 groundwork: ImageMagick as a Vitrine add-on (Flatpak app extension).
+# Builds one module against the GNOME 50 SDK; every delegate library
+# (jpeg, png, tiff, webp, heif, jxl, openjp2, lcms2, fftw, gomp) comes from
+# the runtime. Mounted by the app at /app/helpers/magick (G2 adds the
+# add-extensions point). Text, fonts, vector and document formats are left
+# out on purpose: colour tools never need them, and they are the coders with
+# the worst security record. policy.xml then denies every remaining coder
+# except image formats, and caps memory, pixel area and time.
+#
+# Groundwork status (2026-11-19): G1 built standalone against GNOME 50 in
+# under a minute, ~6 MB installed; reads/writes AVIF HEIC JXL JP2 JPEG PNG
+# TIFF WebP in the sandbox. Building it AS an extension needs an installed
+# Vitrine that declares the extension point (G2).
+id: io.github.superuser_miguel.Vitrine.Helper.magick
+runtime: io.github.superuser_miguel.Vitrine
+runtime-version: master
+sdk: org.gnome.Sdk//50
+build-extension: true
+separate-locales: false
+appstream-compose: false
+build-options:
+  prefix: /app/helpers/magick
+modules:
+  - name: imagemagick
+    buildsystem: autotools
+    config-opts:
+      - --disable-static
+      - --enable-shared
+      - --disable-docs
+      - --without-modules
+      - --enable-hdri
+      - --with-quantum-depth=16
+      - --without-perl
+      - --without-magick-plus-plus
+      - --without-x
+      - --with-jpeg
+      - --with-png
+      - --with-tiff
+      - --with-webp
+      - --with-heic
+      - --with-jxl
+      - --with-openjp2
+      - --with-lcms
+      - --with-zlib
+      - --without-freetype
+      - --without-fontconfig
+      - --without-pango
+      - --without-rsvg
+      - --without-gslib
+      - --without-gvc
+      - --without-djvu
+      - --without-wmf
+      - --without-openexr
+      - --without-raw
+      - --without-lqr
+      - --without-xml
+    cleanup:
+      - /include
+      - /lib/pkgconfig
+      - '*.la'
+      - '*.a'
+      - /share/doc
+      - /share/man
+      - /bin/*-config
+    sources:
+      - type: archive
+        url: https://github.com/ImageMagick/ImageMagick/archive/refs/tags/7.1.2-35.tar.gz
+        sha256: 40b6fefa88fe16ca5a4b3d3db5133eaebfb0157f21f98530bde8aec5dd5b0776
+      - type: file
+        path: policy.xml
+    post-install:
+      # Replace ImageMagick's permissive default with Vitrine's allow-list.
+      - install -Dm644 policy.xml ${FLATPAK_DEST}/etc/ImageMagick-7/policy.xml

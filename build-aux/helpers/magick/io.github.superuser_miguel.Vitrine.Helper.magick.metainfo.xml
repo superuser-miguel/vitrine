@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- G3 draft: lets GNOME Software list the helper as an add-on of Vitrine. -->
+<component type="addon">
+  <id>io.github.superuser_miguel.Vitrine.Helper.magick</id>
+  <extends>io.github.superuser_miguel.Vitrine</extends>
+  <name>Colour tools</name>
+  <summary>Adjust colours, levels and sharpness with ImageMagick</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>ImageMagick</project_license>
+  <url type="homepage">https://superuser-miguel.github.io/vitrine/</url>
+  <developer id="io.github.superuser_miguel">
+    <name>superuser-miguel</name>
+  </developer>
+</component>
