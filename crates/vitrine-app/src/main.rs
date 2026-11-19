@@ -11,6 +11,7 @@
 mod debug;
 mod decode;
 mod grid_cell;
+mod helpers;
 mod histogram;
 mod image_object;
 mod index;
@@ -86,6 +87,7 @@ fn main() -> glib::ExitCode {
         thumbnails::prune_private_cache();
         thumbnails::prune_removable_cache();
         thumbnails::prune_content_cache();
+        log_helpers();
     });
     app.connect_activate(|app| present(&window_for(app)));
     app.connect_open(|app, files, _hint| {
@@ -97,6 +99,27 @@ fn main() -> glib::ExitCode {
     });
 
     app.run()
+}
+
+/// Say which add-on helpers this run found (PLAN §16.1). Silent when none
+/// are installed — the normal case — except under VITRINE_DEBUG.
+fn log_helpers() {
+    let found = helpers::get();
+    if let Some(magick) = &found.magick {
+        glib::g_message!(
+            "vitrine",
+            "helper found: ImageMagick at {}",
+            magick.display()
+        );
+    }
+    if debug::enabled() {
+        eprintln!(
+            "VDBG-HELPERS ms={} root={} magick={}",
+            debug::since_start_ms(),
+            helpers::HELPERS_ROOT,
+            found.magick.is_some()
+        );
+    }
 }
 
 fn window_for(app: &adw::Application) -> VitrineWindow {

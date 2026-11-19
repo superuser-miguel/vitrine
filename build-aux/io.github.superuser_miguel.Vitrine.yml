@@ -44,6 +44,18 @@ finish-args:
   #                                FileChooser portal (persisted as doc-portal
   #                                paths in config).
 
+# Add-on helpers (PLAN §16.1): external tools ship as Flatpak extensions of
+# Vitrine from vitrine-repo, mounted at /app/helpers/<name>. Installed only
+# when the user asks (GNOME Software's Add-ons, or `flatpak install`), and
+# removed with the app. The first is ImageMagick for the colour tools
+# (build-aux/helpers/magick). An empty point costs nothing.
+add-extensions:
+  io.github.superuser_miguel.Vitrine.Helper:
+    directory: helpers
+    subdirectories: true
+    no-autodownload: true
+    autodelete: true
+
 modules:
   # ---------------------------------------------------------------- blueprint
   # Compiles .blp UI files at build time; not needed at runtime.
@@ -63,6 +75,10 @@ modules:
     buildsystem: meson
     config-opts:
       - -Dprofile=default
+    post-install:
+      # The add-on extension point's mount point: Flatpak mounts helpers onto
+      # it but cannot create it inside the read-only /app.
+      - install -d ${FLATPAK_DEST}/helpers
     sources:
       - type: dir
         path: ..

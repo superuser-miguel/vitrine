@@ -34,6 +34,18 @@ finish-args:
   - --filesystem=xdg-pictures          # the one deliberate static root
   - --filesystem=xdg-cache/thumbnails:create   # shared freedesktop thumb cache
 
+# Add-on helpers (PLAN §16.1): external tools ship as Flatpak extensions of
+# Vitrine from vitrine-repo, mounted at /app/helpers/<name>. Installed only
+# when the user asks (GNOME Software's Add-ons, or `flatpak install`), and
+# removed with the app. The first is ImageMagick for the colour tools
+# (build-aux/helpers/magick). An empty point costs nothing.
+add-extensions:
+  io.github.superuser_miguel.Vitrine.Helper:
+    directory: helpers
+    subdirectories: true
+    no-autodownload: true
+    autodelete: true
+
 cleanup:
   - /include
   - /lib/pkgconfig
@@ -60,6 +72,10 @@ modules:
       append-path: /usr/lib/sdk/rust-stable/bin
       env:
         CARGO_HOME: /run/build/vitrine/cargo
+    post-install:
+      # The add-on extension point's mount point: Flatpak mounts helpers onto
+      # it but cannot create it inside the read-only /app.
+      - install -d ${FLATPAK_DEST}/helpers
     sources:
       # Release source: the tagged release, pinned by tag (+ commit once
       # tagged). Local testing can swap in {type: dir, path: ..}.
