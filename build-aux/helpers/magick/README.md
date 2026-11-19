@@ -16,12 +16,18 @@ Verified 2026-11-19 (standalone build, run under `flatpak build`):
 
 | Check | Result |
 | --- | --- |
-| Build time / installed size | under 1 min / ~6 MB |
+| Build time / installed size | under 1.5 min / 5.9 MB |
 | JPEG, AVIF, JXL in, PNG out | all succeed |
 | MVG, TXT, HTTPS, SVG write, `@file` | all refused by policy |
 | 49 KB PNG that expands to 400 MP | refused ("cache resources exhausted") |
 | `flatpak-spawn --sandbox` from Vitrine | no unexposed files, read-only exposure holds, no network |
 
-Open: building as an extension requires the extension point in an *installed*
-Vitrine (G2) — dev builds are never installed into the user's Flatpak, so
-helper builds need a throwaway installation (`FLATPAK_USER_DIR`).
+Built as a real extension 2026-11-19 (G3) against the installed Vitrine 0.4.1,
+which declares the extension point: 5.9 MB stripped (extension builds keep
+debug info unless `strip`/`no-debuginfo` are set: 21 MB without). Its
+AppStream entry (`type="addon"`, `<extends>` Vitrine) lands in the repo
+catalogue. `build-aux/publish-repo.sh` builds every helper here into the same
+signed repo as the app; it needs the publishing machine's Vitrine at 0.4.1+.
+
+Install: GNOME Software → Vitrine → Add-ons, or
+`flatpak install vitrine io.github.superuser_miguel.Vitrine.Helper.magick`.

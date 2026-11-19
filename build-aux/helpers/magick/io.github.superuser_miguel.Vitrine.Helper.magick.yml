@@ -19,6 +19,10 @@ build-extension: true
 separate-locales: false
 build-options:
   prefix: /app/helpers/magick
+  # Extension builds keep debug info by default (17 MB libMagickCore vs
+  # 5 MB stripped); the bundle and repo ship no debug refs anyway.
+  strip: true
+  no-debuginfo: true
 modules:
   - name: imagemagick
     buildsystem: autotools
